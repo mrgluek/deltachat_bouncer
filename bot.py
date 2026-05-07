@@ -420,10 +420,15 @@ def help_command(bot, accid, event):
     )
     
     admin_email = database.get_config("admin_dc_email")
+    is_actually_admin = _is_dc_admin(bot, accid, msg.from_id)
+    
     if not admin_email:
         help_text += "\n\n/initadmin — Claim bot ownership"
-    elif _is_dc_admin(bot, accid, msg.from_id):
+    elif is_actually_admin:
         help_text += f"\n\n👑 **Admin:** `{admin_email}`"
+        help_text += "\n\n**Admin Commands:**\n"
+        help_text += "/transports — Show mail relays and stats\n"
+        help_text += "/rmtransport <email> — Remove a mail relay"
         
     _send(bot, accid, msg.chat_id, help_text)
 
@@ -441,7 +446,8 @@ def donate_command(bot, accid, event):
 def transports_command(bot, accid, event):
     msg = event.msg
     if not _is_dc_admin(bot, accid, msg.from_id):
-        return # Admin only
+        _send(bot, accid, msg.chat_id, "❌ This command is only for the bot administrator.")
+        return
         
     try:
         transports = bot.rpc.list_transports(accid)
@@ -458,7 +464,8 @@ def transports_command(bot, accid, event):
 def rmtransport_command(bot, accid, event):
     msg = event.msg
     if not _is_dc_admin(bot, accid, msg.from_id):
-        return # Admin only
+        _send(bot, accid, msg.chat_id, "❌ This command is only for the bot administrator.")
+        return
         
     addr = (event.payload or "").strip()
     if not addr:
