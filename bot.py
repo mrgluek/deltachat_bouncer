@@ -154,6 +154,7 @@ def _check_chat_inactivity(bot, accid, chat_id) -> str:
 
 def _background_checker_loop(bot, accid):
     logger.info("Background checker loop started.")
+    time.sleep(10) # Wait for bot to connect and sync
     while True:
         try:
             # Run once a day. We check if 24h passed since last run.
@@ -161,21 +162,34 @@ def _background_checker_loop(bot, accid):
             now = time.time()
             if now - last_run >= 24 * 3600:
                 logger.info("Running daily inactivity check...")
-                chats = bot.rpc.get_chat_ids(accid)
+                
+                # Try multiple methods to get chats to be compatible with different core/bindings versions
+                chats = []
+                try:
+                    chats = bot.rpc.get_chats(accid)
+                except Exception:
+                    try:
+                        chats = bot.rpc.get_chat_ids(accid)
+                    except Exception as e:
+                        logger.error(f"Failed to get chats: {e}")
+                
                 for chat_id in chats:
                     try:
                         chat = bot.rpc.get_basic_chat_info(accid, chat_id)
-                        # We only want to check groups/mailing lists. 
-                        # Usually type 2, 3, etc are groups (multiuser). We can rely on _check_chat_inactivity returning empty for non-groups.
-                        is_multiuser = getattr(chat, "is_multiuser", None)
-                        if is_multiuser is None:
-                            # fallback: assume it might be a group, the inner function will skip if <= 2 contacts
-                            is_multiuser = True
+                        
+                        # Check if it's a group chat. 
+                        # In some versions it's 'is_multiuser', in others we check 'chat_type'
+                        is_group = False
+                        if isinstance(chat, dict):
+                            is_group = chat.get('is_multiuser') or chat.get('chat_type') != "Single"
+                        else:
+                            is_group = getattr(chat, 'is_multiuser', False) or getattr(chat, 'chat_type', "") != "Single"
                             
-                        if is_multiuser:
+                        if is_group:
                             report = _check_chat_inactivity(bot, accid, chat_id)
                             if report:
                                 _send(bot, accid, chat_id, report)
+                                time.sleep(1) # Add a small delay to avoid spamming the core
                     except Exception as e:
                         logger.error(f"Error checking chat {chat_id} in background task: {e}")
                         
