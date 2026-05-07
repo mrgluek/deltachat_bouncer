@@ -337,7 +337,13 @@ def on_start(bot, args):
     
     logger.info(f"Bouncer bot started with accid {accid}.")
     
-    # Show configured transports
+    # Show configured admin and transports
+    admin_email = database.get_config("admin_dc_email")
+    admin_fp = database.get_admin_fingerprint()
+    if admin_email:
+        fp_suffix = f" ({admin_fp[-8:].upper()})" if admin_fp else ""
+        print(f"Bot Administrator: {admin_email}{fp_suffix}")
+    
     try:
         transports = bot.rpc.list_transports(accid)
         print("\n" + "=" * 50)
@@ -435,12 +441,14 @@ def help_command(bot, accid, event):
     )
     
     admin_email = database.get_config("admin_dc_email")
+    admin_fp = database.get_admin_fingerprint()
     is_actually_admin = _is_dc_admin(bot, accid, msg.from_id)
     
     if not admin_email:
         help_text += "\n\n/initadmin — Claim bot ownership"
     elif is_actually_admin:
-        help_text += f"\n\n👑 **Admin:** `{admin_email}`"
+        fp_suffix = f" ({admin_fp[-8:].upper()})" if admin_fp else ""
+        help_text += f"\n\n👑 **Admin:** `{admin_email}`{fp_suffix}"
         help_text += "\n\n**Admin Commands:**\n"
         help_text += "/transports — Show mail relays and stats\n"
         help_text += "/rmtransport <email> — Remove a mail relay"
