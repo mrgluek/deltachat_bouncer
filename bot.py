@@ -311,6 +311,41 @@ def bounce_command(bot, accid, event):
     else:
         _send(bot, accid, msg.chat_id, "✅ All users are active or this is not a group chat.")
 
+@dc_cli.on(events.NewMessage(command="/help"))
+def help_command(bot, accid, event):
+    msg = event.msg
+    contact = bot.rpc.get_contact(accid, msg.from_id)
+    sender_email = contact.address
+    
+    help_text = (
+        f"👋 Hi {sender_email}!\n\n"
+        f"I monitor groups and report inactive users (no activity for {INACTIVITY_DAYS_THRESHOLD} days).\n\n"
+        f"**Commands:**\n"
+        f"/bounce — Trigger an immediate inactivity check in this group.\n"
+        f"/help — This message.\n"
+        f"/donate — Support development ❤️\n\n"
+        f"🛡 **Admin:** Only the bot administrator can use /bounce.\n"
+        f"🤖 **Source:** Run your own bot: https://github.com/mrgluek/deltachat_bouncer"
+    )
+    
+    admin_email = database.get_config("admin_dc_email")
+    if not admin_email:
+        help_text += "\n\n/initadmin — Claim bot ownership"
+    elif _is_dc_admin(bot, accid, msg.from_id):
+        help_text += f"\n\n👑 **Admin:** `{admin_email}`"
+        
+    _send(bot, accid, msg.chat_id, help_text)
+
+@dc_cli.on(events.NewMessage(command="/donate"))
+def donate_command(bot, accid, event):
+    msg = event.msg
+    _send(bot, accid, msg.chat_id,
+          "❤️ **Support Bot Development**\n\n"
+          "If you find this bot useful, you can support its development:\n\n"
+          "☕️ Ko-fi: https://ko-fi.com/gluek (🌍 world cards, paypal)\n"
+          "🚀 Tribute: https://web.tribute.tg/d/IWb (🇷🇺 russian cards, SBP)\n\n"
+          "Thank you! 🙏")
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) == 1:
