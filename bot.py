@@ -273,11 +273,17 @@ def on_start(bot, args):
     
     logger.info(f"Bouncer bot started with accid {accid}.")
     
-    # Generate and print SecureJoin QR code to logs
+    # Show configured transports
     try:
-        qrdata = bot.rpc.get_chat_securejoin_qr_code(accid, None)
+        transports = bot.rpc.list_transports(accid)
         print("\n" + "=" * 50)
-        print("To add this bot, scan the QR code or copy the link:\n")
+        print("Configured Bot Transports (Relays):")
+        for t in transports:
+            a = t.get('addr', '') if isinstance(t, dict) else getattr(t, 'addr', '')
+            print(f" - {a}")
+        
+        qrdata = bot.rpc.get_chat_securejoin_qr_code(accid, None)
+        print("\nTo add this bot, scan the QR code or copy the link:\n")
         
         qr = qrcode.QRCode(version=1, box_size=1, border=2)
         qr.add_data(qrdata)
@@ -382,8 +388,73 @@ def donate_command(bot, accid, event):
           "🚀 Tribute: https://web.tribute.tg/d/IWb (🇷🇺 russian cards, SBP)\n\n"
           "Thank you! 🙏")
 
+@dc_cli.on(events.NewMessage(command="/transports"))
+def transports_command(bot, accid, event):
+    msg = event.msg
+    if not _is_dc_admin(bot, accid, msg.from_id):
+        return # Admin only
+        
+    try:
+        transports = bot.rpc.list_transports(accid)
+        reply = "🤖 **Configured Transports:**\n\n"
+        for t in transports:
+            a = t.get('addr', '') if isinstance(t, dict) else getattr(t, 'addr', '')
+            reply += f"• {a}\n"
+        reply += "\nUse `/rmtransport <email>` to remove a relay."
+        _send(bot, accid, msg.chat_id, reply)
+    except Exception as e:
+        _send(bot, accid, msg.chat_id, f"❌ Failed to list transports: {e}")
+
+@dc_cli.on(events.NewMessage(command="/rmtransport"))
+def rmtransport_command(bot, accid, event):
+    msg = event.msg
+    if not _is_dc_admin(bot, accid, msg.from_id):
+        return # Admin only
+        
+    addr = (event.payload or "").strip()
+    if not addr:
+        _send(bot, accid, msg.chat_id, "Usage: /rmtransport user@example.com")
+        return
+
+    try:
+        transports = bot.rpc.list_transports(accid)
+        if len(transports) <= 1:
+            _send(bot, accid, msg.chat_id, "❌ Cannot remove the last transport.")
+            return
+        
+        bot.rpc.delete_transport(accid, addr)
+        _send(bot, accid, msg.chat_id, f"✅ Transport `{addr}` removed.")
+    except Exception as e:
+        _send(bot, accid, msg.chat_id, f"❌ Failed to remove transport: {e}")
+
 if __name__ == "__main__":
     import sys
+    
+    # Handle 'init transport' CLI command
+    if len(sys.argv) > 2 and sys.argv[1] == "init" and sys.argv[2] == "transport":
+        if len(sys.argv) < 4:
+            print("Usage: python bot.py init transport <email> <password>")
+            sys.exit(1)
+            
+        addr, password = sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else ""
+        
+        # We need a temporary instance to call RPC
+        from deltabot_cli import BotCli
+        temp_bot = BotCli("bouncer")
+        
+        accids = temp_bot.rpc.get_all_account_ids()
+        if not accids:
+            print("Error: No accounts configured. Run 'python bot.py init addr password' first.")
+            sys.exit(1)
+            
+        try:
+            temp_bot.rpc.add_or_update_transport(accids[0], {"addr": addr, "password": password})
+            print(f"Success: Backup transport {addr} added.")
+        except Exception as e:
+            print(f"Error adding transport: {e}")
+            sys.exit(1)
+        sys.exit(0)
+
     if len(sys.argv) == 1:
         sys.argv.append("serve")
     dc_cli.start()

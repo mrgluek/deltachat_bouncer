@@ -44,11 +44,18 @@ A professional Delta Chat bot designed to maintain group quality by monitoring i
 
 ## Admin Management
 
-You can manually manage the administrator via the server CLI:
+You can manually manage the administrator or add backup transports via the server CLI:
 
+### Set Administrator
 ```bash
 docker compose exec bot python set_admin.py --email your@email.com
 ```
+
+### Add Backup Relay (Transport)
+To ensure the bot stays online even if one mail server is down:
+1. Stop the bot: `docker compose stop bot`
+2. Add relay: `docker compose run --rm bot python bot.py init transport backup-email@example.com password`
+3. Start the bot: `docker compose up -d`
 
 ## Support & Development
 
