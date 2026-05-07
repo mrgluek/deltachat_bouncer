@@ -80,23 +80,26 @@ def _is_dc_admin(bot, accid, contact_id):
         if not contact:
             return False
 
+        # Safety check: bot itself is never the admin
+        if contact_id == 1:
+            return False
+
         # 1. Check fingerprint (strongest)
         admin_fp = database.get_admin_fingerprint()
         if admin_fp:
             c_fp = _get_contact_fingerprint(bot, accid, contact_id, contact=contact)
+            logger.info(f"Admin check (FP) for {contact_id}: stored={admin_fp}, contact={c_fp}")
             if c_fp:
-                # c_fp might be a comma-separated list if multiple keys were found
                 if admin_fp.upper() in c_fp.upper().split(','):
                     return True
             
-            # If fingerprint is set but didn't match (or couldn't be retrieved), 
-            # we REJECT even if email matches (security hardening)
             logger.warning(f"Admin check: Fingerprint mismatch or missing for {contact_id}")
             return False
         
-        # 2. Check email (legacy or initial setup before /initadmin)
+        # 2. Check email
         sender_email = contact.address
         admin_email = database.get_config("admin_dc_email")
+        logger.info(f"Admin check (Email) for {contact_id}: stored={admin_email}, contact={sender_email}")
         if admin_email and sender_email and admin_email.lower().strip() == sender_email.lower().strip():
             return True
             
