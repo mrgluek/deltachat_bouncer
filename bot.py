@@ -188,6 +188,29 @@ def _background_checker_loop(bot, accid):
 
 # ── Commands ──
 
+@dc_cli.on_init
+def on_init(bot, args):
+    global dc_bot_instance, dc_accid
+    bot.logger.info("Initializing Bouncer Bot...")
+    dc_bot_instance = bot
+    
+    accounts = bot.rpc.get_all_account_ids()
+    if accounts:
+        dc_accid = accounts[0]
+        bot.rpc.set_config(dc_accid, "displayname", "Bouncer Bot")
+        bot.rpc.set_config(dc_accid, "selfstatus", "I monitor groups for inactive users. Send /bounce to check now.")
+        
+        # Set icon if exists
+        try:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            for icon_name in ["icon.png", os.path.join("data", "icon.png")]:
+                icon_path = os.path.join(base_dir, icon_name)
+                if os.path.exists(icon_path):
+                    bot.rpc.set_config(dc_accid, "selfavatar", icon_path)
+                    break
+        except Exception as e:
+            bot.logger.warning(f"Could not set avatar: {e}")
+
 @dc_cli.on_start
 def on_start(bot, args):
     global dc_bot_instance, dc_accid
@@ -201,20 +224,6 @@ def on_start(bot, args):
     accid = accounts[0]
     dc_accid = accid
     
-    bot.rpc.set_config(accid, "displayname", "Bouncer Bot")
-    bot.rpc.set_config(accid, "selfstatus", "I monitor groups for inactive users. Send /bounce to check now.")
-    
-    # Set icon if exists
-    try:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        for icon_name in ["icon.png", os.path.join("data", "icon.png")]:
-            icon_path = os.path.join(base_dir, icon_name)
-            if os.path.exists(icon_path):
-                bot.rpc.set_config(accid, "selfavatar", icon_path)
-                break
-    except Exception as e:
-        logger.warning(f"Could not set avatar: {e}")
-        
     logger.info(f"Bouncer bot started with accid {accid}.")
     
     # Generate and print SecureJoin QR code to logs
@@ -279,4 +288,7 @@ def bounce_command(bot, accid, event):
         _send(bot, accid, msg.chat_id, "✅ All users are active or this is not a group chat.")
 
 if __name__ == "__main__":
+    import sys
+    if len(sys.argv) == 1:
+        sys.argv.append("serve")
     dc_cli.start()
