@@ -33,43 +33,32 @@ BOUNCE_COOLDOWN_SECONDS = 600  # 10 minutes
 
 def _get_contact_fingerprint(bot, accid, contact_id, contact=None):
     self_fps = set()
+    bot_addr = None
     try:
         bot_addr = bot.rpc.get_config(accid, "addr")
         if bot_addr:
             bot_addr = bot_addr.lower().strip()
-            all_contacts = bot.rpc.get_all_contacts(accid)
-            for c in all_contacts:
-                c_addr = (getattr(c, 'address', '') or '').lower().strip()
-                is_self = getattr(c, 'is_self', False)
-                # If email matches or it's marked as self
-                if (c_addr and c_addr == bot_addr) or is_self:
-                    c_id = getattr(c, 'id', None)
-                    if c_id:
-                        enc_info_self = bot.rpc.get_contact_encryption_info(accid, c_id)
-                        if enc_info_self:
-                            matches = re.findall(r'[0-9a-fA-F]{32,64}', "".join(enc_info_self.split()).replace(':', ''))
-                            self_fps.update(m.upper() for m in matches)
-                        
-                        # Also check direct fingerprint fields
-                        for attr in ['fingerprint', 'key_fingerprint', 'public_key']:
-                            val = getattr(c, attr, None)
-                            if val:
-                                matches = re.findall(r'[0-9a-fA-F]{32,64}', str(val).replace(' ', '').replace(':', ''))
+            
+            # The most reliable way: the core's encryption info string contains blocks for each party
+            # with their email addresses. We can just parse the text for the current contact.
+            for args in [(accid, contact_id), (contact_id,)]:
+                try:
+                    enc_info_self = bot.rpc.get_contact_encryption_info(*args)
+                    if enc_info_self:
+                        # Split by double newline to separate parties
+                        blocks = re.split(r'\n\s*\n', enc_info_self.strip())
+                        for block in blocks:
+                            if bot_addr in block.lower():
+                                matches = re.findall(r'[0-9a-fA-F]{32,64}', "".join(block.split()).replace(':', ''))
                                 self_fps.update(m.upper() for m in matches)
-        
+                        break # Successfully parsed from one of the method variations
+                except Exception:
+                    continue
+
         if self_fps:
-            logger.info(f"Detected bot's own fingerprints: {[f[-8:] for f in self_fps]}")
+            logger.info(f"Detected bot's own fingerprints from enc_info: {[f[-8:] for f in self_fps]}")
     except Exception as e:
         logger.error(f"Error detecting self-fingerprint: {e}")
-
-    # Fallback to ID 1
-    if not self_fps:
-        try:
-            enc_info_self = bot.rpc.get_contact_encryption_info(accid, 1)
-            if enc_info_self:
-                matches = re.findall(r'[0-9a-fA-F]{32,64}', "".join(enc_info_self.split()).replace(':', ''))
-                self_fps.update(m.upper() for m in matches)
-        except: pass
 
     # Filter fingerprints from contact object
     if contact:
