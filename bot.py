@@ -34,28 +34,35 @@ BOUNCE_COOLDOWN_SECONDS = 600  # 10 minutes
 def _get_contact_fingerprint(bot, accid, contact_id, contact=None):
     self_fps = set()
     try:
-        # The most robust way to find "self" is to look through all contacts
-        all_contacts = bot.rpc.get_all_contacts(accid)
-        for c in all_contacts:
-            # Check if this contact is the bot itself
-            is_self = getattr(c, 'is_self', False) if not isinstance(c, dict) else c.get('is_self', False)
-            if is_self:
-                c_id = getattr(c, 'id', None) if not isinstance(c, dict) else c.get('id', None)
-                if c_id:
-                    enc_info_self = bot.rpc.get_contact_encryption_info(accid, c_id)
-                    if enc_info_self:
-                        matches = re.findall(r'[0-9a-fA-F]{32,64}', "".join(enc_info_self.split()).replace(':', ''))
-                        self_fps.update(m.upper() for m in matches)
-                # Also check direct fingerprint fields in the self-contact
-                for attr in ['fingerprint', 'key_fingerprint', 'public_key']:
-                    val = getattr(c, attr, None) if not isinstance(c, dict) else c.get(attr, None)
-                    if val:
-                        matches = re.findall(r'[0-9a-fA-F]{32,64}', str(val).replace(' ', '').replace(':', ''))
-                        self_fps.update(m.upper() for m in matches)
+        bot_addr = bot.rpc.get_config(accid, "addr")
+        if bot_addr:
+            bot_addr = bot_addr.lower().strip()
+            all_contacts = bot.rpc.get_all_contacts(accid)
+            for c in all_contacts:
+                c_addr = (getattr(c, 'address', '') or '').lower().strip()
+                is_self = getattr(c, 'is_self', False)
+                # If email matches or it's marked as self
+                if (c_addr and c_addr == bot_addr) or is_self:
+                    c_id = getattr(c, 'id', None)
+                    if c_id:
+                        enc_info_self = bot.rpc.get_contact_encryption_info(accid, c_id)
+                        if enc_info_self:
+                            matches = re.findall(r'[0-9a-fA-F]{32,64}', "".join(enc_info_self.split()).replace(':', ''))
+                            self_fps.update(m.upper() for m in matches)
+                        
+                        # Also check direct fingerprint fields
+                        for attr in ['fingerprint', 'key_fingerprint', 'public_key']:
+                            val = getattr(c, attr, None)
+                            if val:
+                                matches = re.findall(r'[0-9a-fA-F]{32,64}', str(val).replace(' ', '').replace(':', ''))
+                                self_fps.update(m.upper() for m in matches)
+        
+        if self_fps:
+            logger.info(f"Detected bot's own fingerprints: {[f[-8:] for f in self_fps]}")
     except Exception as e:
-        logger.debug(f"Self-contact lookup failed: {e}")
+        logger.error(f"Error detecting self-fingerprint: {e}")
 
-    # Fallback to ID 1 if above failed
+    # Fallback to ID 1
     if not self_fps:
         try:
             enc_info_self = bot.rpc.get_contact_encryption_info(accid, 1)
