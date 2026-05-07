@@ -110,7 +110,13 @@ def _send(bot, accid, chat_id, text):
 # ── Bouncer Logic ──
 
 def _check_chat_inactivity(bot, accid, chat_id) -> str:
-    """Check a specific chat for inactive members and return a formatted report string."""
+    # 1. Ensure we have a monitoring start date for this chat
+    monitored_since = database.get_chat_monitored_since(chat_id)
+    now = time.time()
+    if monitored_since is None:
+        monitored_since = now
+        database.set_chat_monitored_since(chat_id, monitored_since)
+
     try:
         contacts = bot.rpc.get_chat_contacts(accid, chat_id)
     except Exception as e:
@@ -120,8 +126,8 @@ def _check_chat_inactivity(bot, accid, chat_id) -> str:
     if len(contacts) <= 2:
         return "" # Ignore 1-on-1 chats and empty groups
         
-    now = time.time()
     inactive_users = []
+    lurkers_skipped = 0
     
     for contact_id in contacts:
         if contact_id == DC_CONTACT_ID_SELF:
@@ -139,7 +145,12 @@ def _check_chat_inactivity(bot, accid, chat_id) -> str:
             address = contact.address or "no_email@example.com"
             
             if last_seen == 0:
-                inactive_users.append(f"- {name} ({address}) - never seen")
+                # Only report "never seen" if we have been monitoring for at least 30 days
+                # because for a new bot, EVERYONE who hasn't spoken yet is "never seen".
+                if now - monitored_since >= INACTIVITY_SECONDS_THRESHOLD:
+                    inactive_users.append(f"- {name} ({address}) - never seen since monitoring started")
+                else:
+                    lurkers_skipped += 1
             else:
                 inactive_duration = now - last_seen
                 if inactive_duration > INACTIVITY_SECONDS_THRESHOLD:
@@ -150,10 +161,18 @@ def _check_chat_inactivity(bot, accid, chat_id) -> str:
             logger.error(f"Error checking contact {contact_id}: {e}")
 
     if not inactive_users:
+        if lurkers_skipped > 0:
+            monitored_days = int((now - monitored_since) / (24 * 3600))
+            return f"ℹ️ **Inactivity Check**\nI've been monitoring this group for {monitored_days} days. {lurkers_skipped} members haven't spoken yet, but I need {INACTIVITY_DAYS_THRESHOLD} days of observation before reporting them as inactive."
         return ""
         
-    report = f"⚠️ **Inactivity Report**\nThe following users have not been seen for more than {INACTIVITY_DAYS_THRESHOLD} days (or never):\n\n"
+    report = f"⚠️ **Inactivity Report**\nThe following users have not been seen for more than {INACTIVITY_DAYS_THRESHOLD} days:\n\n"
     report += "\n".join(inactive_users)
+    
+    if lurkers_skipped > 0:
+        monitored_days = int((now - monitored_since) / (24 * 3600))
+        report += f"\n\n_Note: {lurkers_skipped} more members haven't spoken yet, but they are still in the {INACTIVITY_DAYS_THRESHOLD}-day grace period (monitored for {monitored_days} days)._"
+        
     return report
 
 def _background_checker_loop(bot, accid):

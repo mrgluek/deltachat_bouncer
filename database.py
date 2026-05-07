@@ -17,6 +17,14 @@ def init_db():
                 value TEXT
             )
         ''')
+
+        # Chats table to track when the bot started monitoring a group
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS chats (
+                chat_id INTEGER PRIMARY KEY,
+                monitored_since REAL
+            )
+        ''')
         
         conn.commit()
         conn.close()
@@ -37,6 +45,23 @@ def get_config(key: str) -> str:
         row = cursor.fetchone()
         conn.close()
         return row[0] if row else None
+
+def get_chat_monitored_since(chat_id: int) -> float:
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT monitored_since FROM chats WHERE chat_id = ?", (chat_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+
+def set_chat_monitored_since(chat_id: int, timestamp: float):
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO chats (chat_id, monitored_since) VALUES (?, ?)", (chat_id, timestamp))
+        conn.commit()
+        conn.close()
 
 def get_admin_fingerprint():
     """Get the saved admin DC fingerprint."""

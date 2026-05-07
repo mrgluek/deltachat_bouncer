@@ -5,6 +5,7 @@ A professional Delta Chat bot designed to maintain group quality by monitoring i
 ## Features
 
 - 🕵️ **Daily Inactivity Report:** Automatically scans all groups once a day and posts a list of inactive members.
+- ⏳ **30-Day Grace Period:** For new groups, the bot waits 30 days before reporting "never seen" users to avoid false positives.
 - 🚀 **Manual Check (`/bounce`):** Anyone can trigger an immediate inactivity check (with a 10-minute cooldown per group).
 - 🛡️ **Secure Administration:** Claim ownership with `/initadmin`. Admins bypass rate limits and have exclusive control over bot settings.
 - 📱 **QR Code Link:** Generates a SecureJoin QR code in the logs for easy device linking.
