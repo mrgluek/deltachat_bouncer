@@ -25,6 +25,10 @@ DC_CONTACT_ID_SELF = 1
 INACTIVITY_DAYS_THRESHOLD = 30
 INACTIVITY_SECONDS_THRESHOLD = INACTIVITY_DAYS_THRESHOLD * 24 * 3600
 
+# Anti-spam: {chat_id: timestamp}
+_chat_anti_spam: dict[int, float] = {}
+BOUNCE_COOLDOWN_SECONDS = 600  # 10 minutes
+
 # ── Admin helpers ──
 
 def _get_contact_fingerprint(bot, accid, contact_id, contact=None):
@@ -301,9 +305,22 @@ def initadmin_command(bot, accid, event):
 def bounce_command(bot, accid, event):
     msg = event.msg
     
-    if not _is_dc_admin(bot, accid, msg.from_id):
-        _send(bot, accid, msg.chat_id, "❌ This command is restricted to the bot administrator.")
-        return
+    # Allow everyone to use /bounce, but with a cooldown (admins are exempt)
+    is_admin = _is_dc_admin(bot, accid, msg.from_id)
+    now = time.time()
+    
+    if not is_admin:
+        last_bounce = _chat_anti_spam.get(msg.chat_id, 0)
+        if now - last_bounce < BOUNCE_COOLDOWN_SECONDS:
+            remaining = int((BOUNCE_COOLDOWN_SECONDS - (now - last_bounce)) / 60)
+            if remaining < 1:
+                 _send(bot, accid, msg.chat_id, "⌛️ Please wait a moment before running another check.")
+            else:
+                 _send(bot, accid, msg.chat_id, f"⌛️ This group was checked recently. Please wait {remaining}m before running another check.")
+            return
+
+    # Update timestamp
+    _chat_anti_spam[msg.chat_id] = now
 
     report = _check_chat_inactivity(bot, accid, msg.chat_id)
     if report:
@@ -324,7 +341,7 @@ def help_command(bot, accid, event):
         f"/bounce — Trigger an immediate inactivity check in this group.\n"
         f"/help — This message.\n"
         f"/donate — Support development ❤️\n\n"
-        f"🛡 **Admin:** Only the bot administrator can use /bounce.\n"
+        f"💡 _Anyone can use /bounce, but no more than once every 10 minutes per group._\n\n"
         f"🤖 **Source:** Run your own bot: https://github.com/mrgluek/deltachat_bouncer"
     )
     

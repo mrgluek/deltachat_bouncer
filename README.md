@@ -1,11 +1,14 @@
 # Delta Chat Bouncer Bot
 
-A Delta Chat bot designed to monitor large groups and report users who haven't been seen online for over 30 days.
+A professional Delta Chat bot designed to maintain group quality by monitoring inactivity. It automatically scans group members and reports users who haven't been seen online for over 30 days.
 
 ## Features
-- **Daily Inactivity Report:** Wakes up once a day to scan all groups the bot is in and reports inactive members.
-- **Manual Check:** Admins can trigger an immediate check in a group using the `/bounce` command.
-- **Secure Administration:** Uses Delta Chat cryptographic fingerprints (or email) for admin authentication.
+
+- 🕵️ **Daily Inactivity Report:** Automatically scans all groups once a day and posts a list of inactive members.
+- 🚀 **Manual Check (`/bounce`):** Anyone can trigger an immediate inactivity check (with a 10-minute cooldown per group).
+- 🛡️ **Secure Administration:** Claim ownership with `/initadmin`. Admins bypass rate limits and have exclusive control over bot settings.
+- 📱 **QR Code Link:** Generates a SecureJoin QR code in the logs for easy device linking.
+- 🐳 **Docker Ready:** Easy deployment using Docker Compose.
 
 ## Setup
 
@@ -15,25 +18,39 @@ A Delta Chat bot designed to monitor large groups and report users who haven't b
    cd deltachat_bouncer
    ```
 
-2. **Configure Delta Chat account:**
-   Initialize the Delta Chat account for the bot:
-
+2. **Initialize Account:**
+   Run the initialization command once to set up the bot's email and password:
    ```bash
    docker compose run --rm bot python bot.py init bot-email@example.com your_password
    ```
 
-   Then start the bot:
-
+3. **Start the Bot:**
    ```bash
    docker compose up -d
    docker compose logs -f
    ```
-   *(You'll see a QR code in the logs if it's the first time and you need to link a device).*
+   *Note: If it's a new account, a QR code will be printed to the logs for linking your Delta Chat device.*
 
-3. **Set Admin:**
-   - Add the bot to your contacts in Delta Chat.
-   - Send `/initadmin` to the bot in a direct message. 
-   - *Alternatively*, run `python set_admin.py` (or execute it within the docker container) to manually set the admin email/fingerprint.
+4. **Claim Admin Ownership:**
+   Send `/initadmin` to the bot in a private message to become the administrator.
 
-## Commands (Admin Only)
-- `/bounce` - Triggers an immediate inactivity check in the current group and sends the report to the chat.
+## Commands
+
+- `/bounce` — Trigger an immediate inactivity check in the current group.
+- `/help` — Show available commands and bot information.
+- `/donate` — Support project development ❤️
+- `/initadmin` — Claim administrative ownership (private chat only).
+
+## Admin Management
+
+You can manually manage the administrator via the server CLI:
+
+```bash
+docker compose exec bot python set_admin.py --email your@email.com
+```
+
+## Support & Development
+
+If you find this bot useful, consider supporting its development:
+- **GitHub:** [mrgluek/deltachat_bouncer](https://github.com/mrgluek/deltachat_bouncer)
+- **Donations:** Use the `/donate` command in Delta Chat.
