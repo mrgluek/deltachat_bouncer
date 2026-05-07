@@ -163,15 +163,25 @@ def _background_checker_loop(bot, accid):
             if now - last_run >= 24 * 3600:
                 logger.info("Running daily inactivity check...")
                 
-                # Try multiple methods to get chats to be compatible with different core/bindings versions
+                # Try multiple methods and signatures to find the one that works with this core version
                 chats = []
-                try:
-                    chats = bot.rpc.get_chats(accid)
-                except Exception:
+                methods_to_try = [
+                    lambda: bot.rpc.get_chats(accid, None, None, False),
+                    lambda: bot.rpc.get_chats(accid),
+                    lambda: bot.rpc.get_chat_ids(accid, 0),
+                    lambda: bot.rpc.get_chat_ids(accid),
+                    lambda: bot.rpc.get_all_chats(accid),
+                ]
+                
+                for method in methods_to_try:
                     try:
-                        chats = bot.rpc.get_chat_ids(accid)
-                    except Exception as e:
-                        logger.error(f"Failed to get chats: {e}")
+                        chats = method()
+                        if chats is not None:
+                            break
+                    except Exception:
+                        continue
+                else:
+                    logger.error("All methods to get chat list failed with 'Method not found' or other error.")
                 
                 for chat_id in chats:
                     try:
