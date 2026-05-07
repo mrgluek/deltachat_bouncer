@@ -432,24 +432,29 @@ if __name__ == "__main__":
     
     # Handle 'init transport' CLI command
     if len(sys.argv) > 2 and sys.argv[1] == "init" and sys.argv[2] == "transport":
-        if len(sys.argv) < 4:
+        if len(sys.argv) < 5:
             print("Usage: python bot.py init transport <email> <password>")
             sys.exit(1)
             
-        addr, password = sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else ""
+        addr, password = sys.argv[3], sys.argv[4]
         
-        # We need a temporary instance to call RPC
-        from deltabot_cli import BotCli
-        temp_bot = BotCli("bouncer")
+        # We need to manually initialize RPC to add transport without starting the bot
+        from deltachat2 import Rpc, IOTransport
+        from appdirs import user_config_dir
         
-        accids = temp_bot.rpc.get_all_account_ids()
-        if not accids:
-            print("Error: No accounts configured. Run 'python bot.py init addr password' first.")
-            sys.exit(1)
-            
+        config_dir = user_config_dir("bouncer")
+        accounts_dir = os.path.join(config_dir, "accounts")
+        
         try:
-            temp_bot.rpc.add_or_update_transport(accids[0], {"addr": addr, "password": password})
-            print(f"Success: Backup transport {addr} added.")
+            with IOTransport(accounts_dir=accounts_dir) as trans:
+                rpc = Rpc(trans)
+                accids = rpc.get_all_account_ids()
+                if not accids:
+                    print("Error: No accounts configured. Run 'python bot.py init addr password' first.")
+                    sys.exit(1)
+                    
+                rpc.add_or_update_transport(accids[0], {"addr": addr, "password": password})
+                print(f"Success: Backup transport {addr} added.")
         except Exception as e:
             print(f"Error adding transport: {e}")
             sys.exit(1)
