@@ -102,10 +102,59 @@ def _is_dc_admin(bot, accid, contact_id):
 
 def _send(bot, accid, chat_id, text):
     msg_data = MsgData(text=text)
+    
+    # Try to determine how many attempts we should make based on number of transports
     try:
-        bot.rpc.send_msg(accid, chat_id, msg_data)
-    except Exception as e:
-        logger.error(f"Failed to send msg to chat {chat_id}: {e}")
+        transports = bot.rpc.list_transports(accid)
+        max_attempts = max(2, len(transports))
+    except Exception:
+        transports = []
+        max_attempts = 2
+
+    for attempt in range(max_attempts):
+        try:
+            bot.rpc.send_msg(accid, chat_id, msg_data)
+            return # Success!
+        except Exception as e:
+            error_str = str(e).lower()
+            logger.warning(f"Attempt {attempt + 1} failed to send message: {e}")
+            
+            # List of strings that suggest a transport/network level failure
+            transport_errors = ["network", "timeout", "connection", "unreachable", "smtp", "status 0", "socket", "refused", "auth"]
+            
+            if attempt < max_attempts - 1 and any(err in error_str for err in transport_errors):
+                try:
+                    # Determine current primary address
+                    current_addr = bot.rpc.get_config(accid, "addr")
+                    
+                    if not transports:
+                        transports = bot.rpc.list_transports(accid)
+                    
+                    if len(transports) > 1:
+                        # Find a backup relay to switch to
+                        for t in transports:
+                            t_addr = t.get('addr') if isinstance(t, dict) else getattr(t, 'addr', None)
+                            if t_addr and t_addr != current_addr:
+                                logger.info(f"Switching transport from {current_addr} to backup: {t_addr}")
+                                try:
+                                    bot.rpc.set_config(accid, "addr", t_addr)
+                                    # If the transport has a password stored, update it too
+                                    t_pw = t.get('password') if isinstance(t, dict) else getattr(t, 'password', None)
+                                    if t_pw:
+                                        bot.rpc.set_config(accid, "mail_pw", t_pw)
+                                    
+                                    time.sleep(2) # Give core a moment to reconfigure
+                                    break 
+                                except Exception as set_e:
+                                    logger.error(f"Failed to switch transport: {set_e}")
+                                    continue
+                except Exception as rotate_e:
+                    logger.error(f"Error during transport rotation: {rotate_e}")
+            else:
+                # If it's not a transport error or we're out of attempts, just stop
+                break
+
+    logger.error(f"Final failure sending msg to chat {chat_id} after {max_attempts} attempts.")
 
 # ── Bouncer Logic ──
 
