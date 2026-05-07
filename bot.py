@@ -1,4 +1,5 @@
 import asyncio
+import io
 import logging
 import os
 import re
@@ -8,6 +9,7 @@ from datetime import datetime
 
 from deltachat2 import events, MsgData
 from deltabot_cli import BotCli
+import qrcode
 
 import database
 
@@ -192,7 +194,38 @@ def on_start(bot, accid, event):
     dc_bot_instance = bot
     dc_accid = accid
     bot.rpc.set_config(accid, "displayname", "Bouncer Bot")
+    bot.rpc.set_config(accid, "selfstatus", "I monitor groups for inactive users. Send /bounce to check now.")
+    
+    # Set icon if exists
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        for icon_name in ["icon.png", os.path.join("data", "icon.png")]:
+            icon_path = os.path.join(base_dir, icon_name)
+            if os.path.exists(icon_path):
+                bot.rpc.set_config(accid, "selfavatar", icon_path)
+                break
+    except Exception as e:
+        logger.warning(f"Could not set avatar: {e}")
+        
     logger.info("Bouncer bot started.")
+    
+    # Generate and print SecureJoin QR code to logs
+    try:
+        qrdata = bot.rpc.get_chat_securejoin_qr_code(accid, None)
+        print("\n" + "=" * 50)
+        print("To add this bot, scan the QR code or copy the link:\n")
+        
+        qr = qrcode.QRCode(version=1, box_size=1, border=2)
+        qr.add_data(qrdata)
+        qr.make(fit=True)
+        f = io.StringIO()
+        qr.print_ascii(out=f)
+        print(f.getvalue())
+        
+        print(qrdata)
+        print("\n" + "=" * 50 + "\n")
+    except Exception as e:
+        logger.error(f"Failed to generate QR code: {e}")
     
     t = threading.Thread(target=_background_checker_loop, args=(bot, accid), daemon=True)
     t.start()

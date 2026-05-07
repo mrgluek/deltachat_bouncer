@@ -11,18 +11,24 @@ A Delta Chat bot designed to monitor large groups and report users who haven't b
 
 1. **Clone the repository:**
    ```bash
-   git clone <your-repo-url>
+   git clone https://github.com/mrgluek/deltachat_bouncer
    cd deltachat_bouncer
    ```
 
 2. **Configure Delta Chat account:**
-   Use the `deltabot-cli` standard process or initialize it. Run the bot for the first time so it generates the `data` folder and connects.
+   Initialize the Delta Chat account for the bot:
 
    ```bash
-   docker-compose up -d
-   docker-compose logs -f
+   docker compose run --rm bot python bot.py init bot-email@example.com your_password
    ```
-   *(You'll see a QR code in the logs if it's the first time and you need to link a device, or use `deltabot_cli` to login directly).*
+
+   Then start the bot:
+
+   ```bash
+   docker compose up -d
+   docker compose logs -f
+   ```
+   *(You'll see a QR code in the logs if it's the first time and you need to link a device).*
 
 3. **Set Admin:**
    - Add the bot to your contacts in Delta Chat.
