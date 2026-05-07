@@ -188,11 +188,19 @@ def _background_checker_loop(bot, accid):
 
 # ── Commands ──
 
-@dc_cli.on(events.BotStart)
-def on_start(bot, accid, event):
+@dc_cli.on_start
+def on_start(bot, args):
     global dc_bot_instance, dc_accid
     dc_bot_instance = bot
+    
+    accounts = bot.rpc.get_all_account_ids()
+    if not accounts:
+        logger.error("No accounts found.")
+        return
+        
+    accid = accounts[0]
     dc_accid = accid
+    
     bot.rpc.set_config(accid, "displayname", "Bouncer Bot")
     bot.rpc.set_config(accid, "selfstatus", "I monitor groups for inactive users. Send /bounce to check now.")
     
@@ -207,7 +215,7 @@ def on_start(bot, accid, event):
     except Exception as e:
         logger.warning(f"Could not set avatar: {e}")
         
-    logger.info("Bouncer bot started.")
+    logger.info(f"Bouncer bot started with accid {accid}.")
     
     # Generate and print SecureJoin QR code to logs
     try:
