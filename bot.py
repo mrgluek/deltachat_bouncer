@@ -33,25 +33,33 @@ BOUNCE_COOLDOWN_SECONDS = 600  # 10 minutes
 
 def _get_contact_fingerprint(bot, accid, contact_id, contact=None):
     self_fps = set()
-    bot_addr = None
     try:
+        bot_addrs = []
+        # Get primary address
         bot_addr = bot.rpc.get_config(accid, "addr")
         if bot_addr:
-            bot_addr = bot_addr.lower().strip()
+            bot_addrs.append(bot_addr.lower().strip())
             
-            # The most reliable way: the core's encryption info string contains blocks for each party
-            # with their email addresses. We can just parse the text for the current contact.
+        # Get all transport aliases (crucial if chat was started via secondary relay)
+        try:
+            transports = bot.rpc.list_transports(accid)
+            for t in transports:
+                t_addr = t.get('addr', '') if isinstance(t, dict) else getattr(t, 'addr', '')
+                if t_addr:
+                    bot_addrs.append(t_addr.lower().strip())
+        except: pass
+        
+        if bot_addrs:
             for args in [(accid, contact_id), (contact_id,)]:
                 try:
                     enc_info_self = bot.rpc.get_contact_encryption_info(*args)
                     if enc_info_self:
-                        # Split by double newline to separate parties
                         blocks = re.split(r'\n\s*\n', enc_info_self.strip())
                         for block in blocks:
-                            if bot_addr in block.lower():
+                            if any(a in block.lower() for a in bot_addrs):
                                 matches = re.findall(r'[0-9a-fA-F]{32,64}', "".join(block.split()).replace(':', ''))
                                 self_fps.update(m.upper() for m in matches)
-                        break # Successfully parsed from one of the method variations
+                        break
                 except Exception:
                     continue
 
