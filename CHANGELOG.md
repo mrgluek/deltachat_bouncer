@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.1] - 2026-05-08
+### Fixed
+- Fixed "Method not found" error in daily inactivity check by expanding RPC method fallbacks (added `get_chat_list_ids`).
+- Added detailed logging for RPC method attempts to improve diagnostics.
+
 ## [1.2.0] - 2026-05-07
 ### Added
 - Added Multi-Transport support (Backup Relays).

@@ -274,24 +274,31 @@ def _background_checker_loop(bot, accid):
                 logger.info("Running daily inactivity check...")
                 
                 # Try multiple methods and signatures to find the one that works with this core version
-                chats = []
+                chats = None
                 methods_to_try = [
-                    lambda: bot.rpc.get_chats(accid, None, None, False),
-                    lambda: bot.rpc.get_chats(accid),
-                    lambda: bot.rpc.get_chat_ids(accid, 0),
-                    lambda: bot.rpc.get_chat_ids(accid),
-                    lambda: bot.rpc.get_all_chats(accid),
+                    ("get_chat_list_ids(accid, 0, None)", lambda: bot.rpc.get_chat_list_ids(accid, 0, None)),
+                    ("get_chat_ids(accid, 0, None)", lambda: bot.rpc.get_chat_ids(accid, 0, None)),
+                    ("get_chat_ids(accid, 0)", lambda: bot.rpc.get_chat_ids(accid, 0)),
+                    ("get_chat_ids(accid)", lambda: bot.rpc.get_chat_ids(accid)),
+                    ("get_chats(accid, 0, None)", lambda: bot.rpc.get_chats(accid, 0, None)),
+                    ("get_chats(accid, None, None, False)", lambda: bot.rpc.get_chats(accid, None, None, False)),
+                    ("get_chats(accid)", lambda: bot.rpc.get_chats(accid)),
+                    ("get_all_chats(accid)", lambda: bot.rpc.get_all_chats(accid)),
                 ]
                 
-                for method in methods_to_try:
+                for name, method in methods_to_try:
                     try:
                         chats = method()
                         if chats is not None:
+                            logger.info(f"Successfully retrieved chat list using {name}")
                             break
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(f"Method {name} failed: {e}")
                         continue
-                else:
-                    logger.error("All methods to get chat list failed with 'Method not found' or other error.")
+                
+                if chats is None:
+                    logger.error("All methods to get chat list failed. Check core version and RPC compatibility.")
+                    chats = [] # Prevent crash in the loop below
                 
                 for chat_id in chats:
                     try:
