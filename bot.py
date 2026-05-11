@@ -624,13 +624,13 @@ def relays_command(bot, accid, event):
             _send(bot, accid, msg.chat_id, "✅ No group members using regular mail providers found.")
             return
 
-        reply = f"⚠️ **Members with Regular Mail ({len(found_users)}):**\n"
+        reply = f"⚠️ **Members with free mail providers ({len(found_users)}):**\n\n"
         reply += "These users may experience delivery issues in large groups:\n\n"
         for user in found_users:
             matches_str = ", ".join(user["matches"])
             reply += f"• {user['name']} ({user['primary']}) — {matches_str}\n"
         
-        reply += "\nConsider asking them to use professional SMTP relays or private servers."
+        reply += "\nConsider asking them to use public chatmail relays or private servers."
         _send(bot, accid, msg.chat_id, reply)
 
     except Exception as e:
