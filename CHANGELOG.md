@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 - Enhanced all reports with rich formatting (bold names, square brackets for timestamps) and contact links.
 - Enhanced `/relays` to automatically extract secondary addresses (transports) for all contacts by parsing encryption info.
 - Added daily status reports (heartbeats) that post group statistics even if no one is inactive yet.
+- Added "Top 10 Posters" ranking to inactivity reports and daily heartbeats, showing the most active members in the last 24 hours.
 ### Changed
 - Improved background loop diagnostics by logging specific errors for all RPC fallback methods.
 - Fixed critical bug in `/contact<ID>` command by implementing manual vCard generation and sharing (resolved `MsgData` and `MessageViewtype` incompatibilities).

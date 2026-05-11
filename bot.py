@@ -202,6 +202,37 @@ def _send(bot, accid, chat_id, text):
 
     logger.error(f"Final failure sending msg to chat {chat_id} after {max_attempts} attempts.")
 
+def _get_top_posters(bot, accid, chat_id, limit=10, hours=24):
+    """Return top posters in the given chat for the last N hours."""
+    now = time.time()
+    since = now - (hours * 3600)
+    
+    try:
+        # Get all message IDs in the chat
+        msg_ids = bot.rpc.get_message_ids(accid, chat_id, False, False)
+        
+        counts = {} # {contact_id: count}
+        # Iterate backwards until we hit the time limit
+        for msg_id in reversed(msg_ids):
+            try:
+                # We need the timestamp and from_id
+                msg = bot.rpc.get_message(accid, msg_id)
+                if msg.timestamp < since:
+                    break
+                
+                # Ignore system contacts (ID <= 9)
+                if msg.from_id > 9:
+                    counts[msg.from_id] = counts.get(msg.from_id, 0) + 1
+            except Exception:
+                continue
+        
+        # Sort by count
+        sorted_posters = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+        return sorted_posters[:limit]
+    except Exception as e:
+        logger.error(f"Error getting top posters for chat {chat_id}: {e}")
+        return []
+
 # ── Bouncer Logic ──
 
 def _check_chat_inactivity(bot, accid, chat_id, daily=False) -> str:
@@ -284,6 +315,20 @@ def _check_chat_inactivity(bot, accid, chat_id, daily=False) -> str:
 
     if lurkers_skipped > 0:
         report += f"\n\n_Note: {lurkers_skipped} more members haven't spoken yet, but they are still in the {INACTIVITY_DAYS_THRESHOLD}-day grace period._"
+
+    # Add Top 10 Posters
+    top_posters = _get_top_posters(bot, accid, chat_id)
+    if top_posters:
+        report += "\n\n🏆 **Top 10 Posters (last 24h):**\n"
+        medals = ["🥇", "🥈", "🥉", "4.", "5.", "6.", "7.", "8.", "9.", "10."]
+        for i, (contact_id, count) in enumerate(top_posters):
+            try:
+                contact = bot.rpc.get_contact(accid, contact_id)
+                name = contact.name or contact.display_name or "Unknown"
+                medal = medals[i] if i < len(medals) else f"{i+1}."
+                report += f"{medal} **{name}**: {count} msgs\n"
+            except:
+                continue
         
     return report
 

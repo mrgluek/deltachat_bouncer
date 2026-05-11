@@ -4,7 +4,7 @@ A professional Delta Chat bot designed to maintain group quality by monitoring i
 
 ## Features
 
-- 🕵️ **Daily Status & Inactivity Report:** Automatically scans all groups once a day. Posts group statistics (total members, active count) and a list of inactive members.
+- 📊 **Daily Status & Inactivity Report:** Automatically scans all groups once a day. Posts group statistics (total members, active count), a list of inactive members, and a **Top 10 Posters** ranking for the last 24 hours.
 - 📬 **Relay Check (`/relays`):** Scan for group members using "regular mail" (Yandex, Mail.ru, Rambler) that may cause delivery issues in large groups.
 - 👤 **Contact Sharing:** Commands like `/relays` and inactivity reports now include `/contact<ID>` links to quickly get a contact object for any user.
 - ⏳ **30-Day Grace Period:** For new groups, the bot waits 30 days before reporting "never seen" users to avoid false positives.
