@@ -7,9 +7,10 @@ import threading
 import time
 from datetime import datetime
 
-from deltachat2 import events, MsgData
+from deltachat2 import events, MsgData, MessageViewtype
 from deltabot_cli import BotCli
 import qrcode
+import tempfile
 
 import database
 
@@ -686,8 +687,25 @@ def handle_all_messages(bot, accid, event):
                     
                     if contact_id in chat_contact_ids:
                         logger.info(f"DEBUG: Sharing contact {contact_id} in chat {msg.chat_id}")
-                        # Reverting to MsgData dataclass because RPC wrapper requires it for asdict()
-                        bot.rpc.send_msg(accid, msg.chat_id, MsgData(contact_id=contact_id))
+                        temp_path = None
+                        try:
+                            # Generate vCard content using core RPC
+                            vcard_content = bot.rpc.make_vcard(accid, [contact_id])
+                            
+                            # Create a temporary file to hold the vCard
+                            with tempfile.NamedTemporaryFile(suffix=".vcf", mode="w", delete=False) as f:
+                                f.write(vcard_content)
+                                temp_path = f.name
+                            
+                            # Send the vCard as a message
+                            bot.rpc.send_msg(accid, msg.chat_id, MsgData(file=temp_path, viewtype=MessageViewtype.VCARD))
+                            logger.info(f"DEBUG: Successfully shared contact {contact_id}")
+                        finally:
+                            if temp_path and os.path.exists(temp_path):
+                                try:
+                                    os.unlink(temp_path)
+                                except Exception as e:
+                                    logger.warning(f"DEBUG: Failed to delete temp vCard file {temp_path}: {e}")
                     else:
                         logger.warning(f"DEBUG: User {msg.from_id} tried to access contact {contact_id} not in chat {msg.chat_id}")
                 except Exception as e:
