@@ -244,7 +244,7 @@ def _check_chat_inactivity(bot, accid, chat_id, daily=False) -> str:
             if last_seen == 0:
                 # Only report "never seen" if we have been monitoring for at least 30 days
                 if now - monitored_since >= INACTIVITY_SECONDS_THRESHOLD:
-                    inactive_users.append(f"- {name} ({address}) - never seen")
+                    inactive_users.append(f"• /contact{contact_id} **{name}** ({address}) [never seen]")
                 else:
                     lurkers_skipped += 1
             else:
@@ -252,7 +252,7 @@ def _check_chat_inactivity(bot, accid, chat_id, daily=False) -> str:
                 if inactive_duration > INACTIVITY_SECONDS_THRESHOLD:
                     days_ago = int(inactive_duration / (24 * 3600))
                     date_str = datetime.fromtimestamp(last_seen).strftime("%-d %b %Y")
-                    inactive_users.append(f"- {name} ({address}) - last seen {date_str}, {days_ago} days ago")
+                    inactive_users.append(f"• /contact{contact_id} **{name}** ({address}) [last seen {date_str}, {days_ago}d ago]")
                 else:
                     active_count += 1
         except Exception as e:
@@ -486,9 +486,10 @@ def help_command(bot, accid, event):
         f"👋 Hi {sender_email}!\n\n"
         f"I monitor groups and report inactive users (no activity for {INACTIVITY_DAYS_THRESHOLD} days).\n\n"
         f"**Commands:**\n"
-        f"/bounce — Trigger an inactivity check in this group.\n"
-        f"/relays — Find group members using regular mail.\n"
-        f"/help — This message.\n"
+        f"/bounce — Trigger an inactivity check in the current group.\n"
+        f"/relays — Find group members using regular mail providers.\n"
+        f"/contact<ID> — Get a contact object for the given ID.\n"
+        f"/help — This message.\n\n"
         f"/donate — Support development ❤️\n\n"
         f"💡 _Commands have a 10-minute cooldown per group (except for admins)._\n\n"
         f"🤖 **Source:** Run your own bot: https://github.com/mrgluek/deltachat_bouncer"
@@ -593,6 +594,13 @@ def relays_command(bot, accid, event):
             primary_addr = contact.address or "no_address"
             name = contact.name or contact.display_name or "Unknown"
             
+            last_seen = getattr(contact, "last_seen", 0)
+            if last_seen == 0:
+                last_seen_str = "never seen"
+            else:
+                date_str = datetime.fromtimestamp(last_seen).strftime("%-d %b %Y")
+                last_seen_str = date_str
+
             # Get all addresses associated with this contact from various sources
             all_addresses = {primary_addr.lower().strip()}
             try:
@@ -617,6 +625,8 @@ def relays_command(bot, accid, event):
                 found_users.append({
                     "name": name,
                     "primary": primary_addr,
+                    "last_seen": last_seen_str,
+                    "contact_id": contact_id,
                     "matches": sorted(list(set(matching_addresses)))
                 })
 
@@ -628,7 +638,7 @@ def relays_command(bot, accid, event):
         reply += "These users may experience delivery issues in large groups:\n\n"
         for user in found_users:
             matches_str = ", ".join(user["matches"])
-            reply += f"• {user['name']} ({user['primary']}) — {matches_str}\n"
+            reply += f"• /contact{user['contact_id']} **{user['name']}** ({user['primary']}) [{user['last_seen']}] — {matches_str}\n"
         
         reply += "\nConsider asking them to use public chatmail relays or private servers."
         _send(bot, accid, msg.chat_id, reply)
@@ -636,6 +646,30 @@ def relays_command(bot, accid, event):
     except Exception as e:
         logger.error(f"Error in /relays command: {e}")
         _send(bot, accid, msg.chat_id, f"❌ Failed to check members: {e}")
+
+@dc_cli.on(events.NewMessage)
+def handle_all_messages(bot, accid, event):
+    """Handle dynamic commands like /contact123"""
+    msg = event.msg
+    text = (msg.text or "").strip()
+    if text.startswith("/contact"):
+        try:
+            id_str = text[8:].strip()
+            if id_str.isdigit():
+                contact_id = int(id_str)
+                # Verify contact exists and is in the same chat
+                try:
+                    chat_contacts = bot.rpc.get_chat_contacts(accid, msg.chat_id)
+                    if contact_id in chat_contacts:
+                        # Send contact object
+                        bot.rpc.send_msg(accid, msg.chat_id, MsgData(contact_id=contact_id))
+                    else:
+                        logger.debug(f"User {msg.from_id} tried to access contact {contact_id} not in chat {msg.chat_id}")
+                except Exception:
+                    # Chat or contact might not exist
+                    pass
+        except Exception as e:
+            logger.debug(f"Error handling contact link: {e}")
 
 if __name__ == "__main__":
     import sys

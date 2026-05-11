@@ -6,6 +6,7 @@ A professional Delta Chat bot designed to maintain group quality by monitoring i
 
 - 🕵️ **Daily Status & Inactivity Report:** Automatically scans all groups once a day. Posts group statistics (total members, active count) and a list of inactive members.
 - 📬 **Relay Check (`/relays`):** Scan for group members using "regular mail" (Yandex, Mail.ru, Rambler) that may cause delivery issues in large groups.
+- 👤 **Contact Sharing:** Commands like `/relays` and inactivity reports now include `/contact<ID>` links to quickly get a contact object for any user.
 - ⏳ **30-Day Grace Period:** For new groups, the bot waits 30 days before reporting "never seen" users to avoid false positives.
 - 🚀 **Manual Check (`/bounce`):** Anyone can trigger an immediate inactivity check (with a 10-minute cooldown per group).
 - 🛡️ **Secure Administration:** Claim ownership with `/initadmin`. Admins bypass rate limits and have exclusive control over bot settings and group scanning.
@@ -40,6 +41,7 @@ A professional Delta Chat bot designed to maintain group quality by monitoring i
 
 - `/bounce` — Trigger an immediate inactivity check in the current group.
 - `/relays` — Find group members using regular mail providers.
+- `/contact<ID>` — Get a contact object for the given ID (e.g., `/contact123`).
 - `/help` — Show available commands and bot information.
 - `/donate` — Support project development ❤️
 - `/initadmin` — Claim administrative ownership (private chat only).
