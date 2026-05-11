@@ -235,6 +235,24 @@ def _get_top_posters(bot, accid, chat_id, limit=10, hours=24):
 
 # ── Bouncer Logic ──
 
+def _get_top_posters_report(bot, accid, chat_id):
+    """Generate a formatted report of top posters."""
+    top_posters = _get_top_posters(bot, accid, chat_id)
+    if not top_posters:
+        return "ℹ️ No activity recorded in this chat in the last 24 hours."
+        
+    report = "🏆 **Top 10 Posters (last 24h):**\n"
+    medals = ["🥇", "🥈", "🥉", "4.", "5.", "6.", "7.", "8.", "9.", "10."]
+    for i, (contact_id, count) in enumerate(top_posters):
+        try:
+            contact = bot.rpc.get_contact(accid, contact_id)
+            name = contact.name or contact.display_name or "Unknown"
+            medal = medals[i] if i < len(medals) else f"{i+1}."
+            report += f"{medal} **{name}**: {count} msgs\n"
+        except:
+            continue
+    return report
+
 def _check_chat_inactivity(bot, accid, chat_id, daily=False) -> str:
     # 1. Ensure we have a monitoring start date for this chat
     monitored_since = database.get_chat_monitored_since(chat_id)
@@ -316,20 +334,12 @@ def _check_chat_inactivity(bot, accid, chat_id, daily=False) -> str:
     if lurkers_skipped > 0:
         report += f"\n\n_Note: {lurkers_skipped} more members haven't spoken yet, but they are still in the {INACTIVITY_DAYS_THRESHOLD}-day grace period._"
 
-    # Add Top 10 Posters
-    top_posters = _get_top_posters(bot, accid, chat_id)
-    if top_posters:
-        report += "\n\n🏆 **Top 10 Posters (last 24h):**\n"
-        medals = ["🥇", "🥈", "🥉", "4.", "5.", "6.", "7.", "8.", "9.", "10."]
-        for i, (contact_id, count) in enumerate(top_posters):
-            try:
-                contact = bot.rpc.get_contact(accid, contact_id)
-                name = contact.name or contact.display_name or "Unknown"
-                medal = medals[i] if i < len(medals) else f"{i+1}."
-                report += f"{medal} **{name}**: {count} msgs\n"
-            except:
-                continue
-        
+    # Add Top 10 Posters only for daily reports (manual /bounce handles it separately)
+    if daily:
+        top_report = _get_top_posters_report(bot, accid, chat_id)
+        if "🏆" in top_report:
+            report += "\n\n" + top_report
+
     return report
 
 def _background_checker_loop(bot, accid):
@@ -528,9 +538,28 @@ def bounce_command(bot, accid, event):
 
     report = _check_chat_inactivity(bot, accid, msg.chat_id)
     if report:
+        # For manual /bounce, we also include top posters at the end
+        top_report = _get_top_posters_report(bot, accid, msg.chat_id)
+        if "🏆" in top_report:
+            report += "\n\n" + top_report
         _send(bot, accid, msg.chat_id, report)
     else:
         _send(bot, accid, msg.chat_id, "✅ All users are active or this is not a group chat.")
+
+@dc_cli.on(events.NewMessage(command="/top"))
+def top_command(bot, accid, event):
+    msg = event.msg
+    # 10-minute cooldown similar to other commands
+    last_check = _chat_anti_spam.get(msg.chat_id, 0) # Reuse bounce cooldown for simplicity
+    now = time.time()
+    
+    if not _is_dc_admin(bot, accid, msg.from_id):
+        if now - last_check < BOUNCE_COOLDOWN_SECONDS:
+             _send(bot, accid, msg.chat_id, "⌛️ Please wait a moment before running another check.")
+             return
+    
+    _chat_anti_spam[msg.chat_id] = now
+    _send(bot, accid, msg.chat_id, _get_top_posters_report(bot, accid, msg.chat_id))
 
 @dc_cli.on(events.NewMessage(command="/help"))
 def help_command(bot, accid, event):
@@ -544,8 +573,9 @@ def help_command(bot, accid, event):
         f"**Commands:**\n"
         f"/bounce — Trigger an inactivity check in the current group.\n"
         f"/relays — Find group members using regular mail providers.\n"
+        f"/top    — Show top 10 posters in the last 24 hours.\n"
         f"/contact<ID> — Get a contact object for the given ID.\n"
-        f"/help — This message.\n\n"
+        f"/help   — This message.\n\n"
         f"/donate — Support development ❤️\n\n"
         f"💡 _Commands have a 10-minute cooldown per group (except for admins)._\n\n"
         f"🤖 **Source:** Run your own bot: https://github.com/mrgluek/deltachat_bouncer"
