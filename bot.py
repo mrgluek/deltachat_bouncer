@@ -29,6 +29,12 @@ INACTIVITY_SECONDS_THRESHOLD = INACTIVITY_DAYS_THRESHOLD * 24 * 3600
 _chat_anti_spam: dict[int, float] = {}
 BOUNCE_COOLDOWN_SECONDS = 600  # 10 minutes
 
+REGULAR_MAIL_DOMAINS = {
+    "yandex.ru", "yandex.com", "ya.ru",
+    "mail.ru", "list.ru", "bk.ru", "inbox.ru",
+    "rambler.ru"
+}
+
 # ── Admin helpers ──
 
 def _get_contact_fingerprint(bot, accid, contact_id, contact=None):
@@ -481,6 +487,7 @@ def help_command(bot, accid, event):
         help_text += f"\n\n👑 **Admin:** `{admin_email}`{fp_suffix}"
         help_text += "\n\n**Admin Commands:**\n"
         help_text += "/transports — Show mail relays and stats\n"
+        help_text += "/relays — Find group members using regular mail\n"
         help_text += "/rmtransport <email> — Remove a mail relay"
         
     _send(bot, accid, msg.chat_id, help_text)
@@ -535,6 +542,69 @@ def rmtransport_command(bot, accid, event):
         _send(bot, accid, msg.chat_id, f"✅ Transport `{addr}` removed.")
     except Exception as e:
         _send(bot, accid, msg.chat_id, f"❌ Failed to remove transport: {e}")
+
+@dc_cli.on(events.NewMessage(command="/relays"))
+def relays_command(bot, accid, event):
+    """Check group members for regular mail providers, including secondary transports."""
+    msg = event.msg
+    if not _is_dc_admin(bot, accid, msg.from_id):
+        _send(bot, accid, msg.chat_id, "❌ This command is only for the bot administrator.")
+        return
+
+    try:
+        contacts = bot.rpc.get_chat_contacts(accid, msg.chat_id)
+        found_users = []
+        for contact_id in contacts:
+            if contact_id == DC_CONTACT_ID_SELF:
+                continue
+            
+            contact = bot.rpc.get_contact(accid, contact_id)
+            primary_addr = contact.address or "no_address"
+            name = contact.name or contact.display_name or "Unknown"
+            
+            # Get all addresses associated with this contact from various sources
+            all_addresses = {primary_addr.lower().strip()}
+            try:
+                # Encryption info typically lists all associated addresses (transports)
+                enc_info = bot.rpc.get_contact_encryption_info(accid, contact_id)
+                if enc_info:
+                    # Extract emails using a standard pattern
+                    emails = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', enc_info)
+                    for e in emails:
+                        all_addresses.add(e.lower().strip())
+            except Exception:
+                pass
+
+            matching_addresses = []
+            for addr in all_addresses:
+                if '@' in addr:
+                    domain = addr.split('@')[-1]
+                    if domain in REGULAR_MAIL_DOMAINS:
+                        matching_addresses.append(addr)
+            
+            if matching_addresses:
+                found_users.append({
+                    "name": name,
+                    "primary": primary_addr,
+                    "matches": sorted(list(set(matching_addresses)))
+                })
+
+        if not found_users:
+            _send(bot, accid, msg.chat_id, "✅ No group members using regular mail providers found.")
+            return
+
+        reply = f"⚠️ **Members with Regular Mail ({len(found_users)}):**\n"
+        reply += "These users may experience delivery issues in large groups:\n\n"
+        for user in found_users:
+            matches_str = ", ".join(user["matches"])
+            reply += f"• {user['name']} ({user['primary']}) — {matches_str}\n"
+        
+        reply += "\nConsider asking them to use professional SMTP relays or private servers."
+        _send(bot, accid, msg.chat_id, reply)
+
+    except Exception as e:
+        logger.error(f"Error in /relays command: {e}")
+        _send(bot, accid, msg.chat_id, f"❌ Failed to check members: {e}")
 
 if __name__ == "__main__":
     import sys
