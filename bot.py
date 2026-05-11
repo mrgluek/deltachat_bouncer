@@ -678,8 +678,8 @@ def handle_all_messages(bot, accid, event):
                     
                     if contact_id in chat_contact_ids:
                         logger.info(f"DEBUG: Sharing contact {contact_id} in chat {msg.chat_id}")
-                        # Using raw dict for RPC compatibility
-                        bot.rpc.send_msg(accid, msg.chat_id, {"contact_id": contact_id})
+                        # Reverting to MsgData dataclass because RPC wrapper requires it for asdict()
+                        bot.rpc.send_msg(accid, msg.chat_id, MsgData(contact_id=contact_id))
                     else:
                         logger.warning(f"DEBUG: User {msg.from_id} tried to access contact {contact_id} not in chat {msg.chat_id}")
                 except Exception as e:
