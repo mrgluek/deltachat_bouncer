@@ -202,7 +202,7 @@ def _send(bot, accid, chat_id, text):
 
 # ── Bouncer Logic ──
 
-def _check_chat_inactivity(bot, accid, chat_id) -> str:
+def _check_chat_inactivity(bot, accid, chat_id, daily=False) -> str:
     # 1. Ensure we have a monitoring start date for this chat
     monitored_since = database.get_chat_monitored_since(chat_id)
     now = time.time()
@@ -219,6 +219,8 @@ def _check_chat_inactivity(bot, accid, chat_id) -> str:
     if len(contacts) <= 2:
         return "" # Ignore 1-on-1 chats and empty groups
         
+    total_members = 0
+    active_count = 0
     inactive_users = []
     lurkers_skipped = 0
     
@@ -231,6 +233,7 @@ def _check_chat_inactivity(bot, accid, chat_id) -> str:
             if contact.address and contact.address.lower() == "deltachat@system.local":
                 continue # Ignore system contact
 
+            total_members += 1
             last_seen = getattr(contact, "last_seen", 0)
             
             # Use name if available, otherwise address, otherwise "Unknown"
@@ -239,9 +242,8 @@ def _check_chat_inactivity(bot, accid, chat_id) -> str:
             
             if last_seen == 0:
                 # Only report "never seen" if we have been monitoring for at least 30 days
-                # because for a new bot, EVERYONE who hasn't spoken yet is "never seen".
                 if now - monitored_since >= INACTIVITY_SECONDS_THRESHOLD:
-                    inactive_users.append(f"- {name} ({address}) - never seen since monitoring started")
+                    inactive_users.append(f"- {name} ({address}) - never seen")
                 else:
                     lurkers_skipped += 1
             else:
@@ -250,21 +252,33 @@ def _check_chat_inactivity(bot, accid, chat_id) -> str:
                     days_ago = int(inactive_duration / (24 * 3600))
                     date_str = datetime.fromtimestamp(last_seen).strftime("%-d %b %Y")
                     inactive_users.append(f"- {name} ({address}) - last seen {date_str}, {days_ago} days ago")
+                else:
+                    active_count += 1
         except Exception as e:
             logger.error(f"Error checking contact {contact_id}: {e}")
 
-    if not inactive_users:
+    monitored_days = int((now - monitored_since) / (24 * 3600))
+    
+    if not daily and not inactive_users:
         if lurkers_skipped > 0:
-            monitored_days = int((now - monitored_since) / (24 * 3600))
             return f"ℹ️ **Inactivity Check**\nI've been monitoring this group for {monitored_days} days. {lurkers_skipped} members haven't spoken yet, but I need {INACTIVITY_DAYS_THRESHOLD} days of observation before reporting them as inactive."
         return ""
         
-    report = f"⚠️ **Inactivity Report**\nThe following users have not been seen for more than {INACTIVITY_DAYS_THRESHOLD} days:\n\n"
-    report += "\n".join(inactive_users)
+    # Build the report
+    title = "📊 **Daily Status Report**" if daily else "⚠️ **Inactivity Report**"
+    report = f"{title}\n"
+    report += f"Monitoring this group for {monitored_days} days.\n\n"
+    report += f"• Total members: {total_members}\n"
+    report += f"• Active recently: {active_count}\n"
     
+    if inactive_users:
+        report += f"• ⚠️ Inactive (>30d): {len(inactive_users)}\n\n"
+        report += "\n".join(inactive_users)
+    else:
+        report += "• Inactive (>30d): 0\n"
+
     if lurkers_skipped > 0:
-        monitored_days = int((now - monitored_since) / (24 * 3600))
-        report += f"\n\n_Note: {lurkers_skipped} more members haven't spoken yet, but they are still in the {INACTIVITY_DAYS_THRESHOLD}-day grace period (monitored for {monitored_days} days)._"
+        report += f"\n\n_Note: {lurkers_skipped} more members haven't spoken yet, but they are still in the {INACTIVITY_DAYS_THRESHOLD}-day grace period._"
         
     return report
 
@@ -321,7 +335,7 @@ def _background_checker_loop(bot, accid):
                             is_group = getattr(chat, 'is_multiuser', False) or getattr(chat, 'chat_type', "") != "Single"
                             
                         if is_group:
-                            report = _check_chat_inactivity(bot, accid, chat_id)
+                            report = _check_chat_inactivity(bot, accid, chat_id, daily=True)
                             if report:
                                 _send(bot, accid, chat_id, report)
                                 time.sleep(1) # Add a small delay to avoid spamming the core
