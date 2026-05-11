@@ -32,7 +32,7 @@ BOUNCE_COOLDOWN_SECONDS = 600  # 10 minutes
 
 REGULAR_MAIL_DOMAINS = {
     "yandex.ru", "yandex.com", "ya.ru",
-    "mail.ru", "list.ru", "bk.ru", "inbox.ru", "internet.ru"
+    "mail.ru", "list.ru", "bk.ru", "inbox.ru", "internet.ru",
     "rambler.ru"
 }
 
@@ -235,7 +235,10 @@ def _check_chat_inactivity(bot, accid, chat_id, daily=False) -> str:
                 continue # Ignore system contact
 
             total_members += 1
-            last_seen = getattr(contact, "last_seen", 0)
+            if isinstance(contact, dict):
+                last_seen = contact.get("last_seen", 0)
+            else:
+                last_seen = getattr(contact, "last_seen", 0)
             
             # Use name if available, otherwise address, otherwise "Unknown"
             name = contact.name or contact.display_name or "Unknown"
@@ -598,10 +601,15 @@ def relays_command(bot, accid, event):
                 continue
             
             contact = bot.rpc.get_contact(accid, contact_id)
-            primary_addr = contact.address or "no_address"
-            name = contact.name or contact.display_name or "Unknown"
+            if isinstance(contact, dict):
+                primary_addr = contact.get("address", "no_address")
+                name = contact.get("name") or contact.get("display_name") or "Unknown"
+                last_seen = contact.get("last_seen", 0)
+            else:
+                primary_addr = getattr(contact, "address", "no_address")
+                name = getattr(contact, "name", None) or getattr(contact, "display_name", None) or "Unknown"
+                last_seen = getattr(contact, "last_seen", 0)
             
-            last_seen = getattr(contact, "last_seen", 0)
             if last_seen == 0:
                 last_seen_str = "never seen"
             else:
