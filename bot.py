@@ -722,16 +722,16 @@ def relays_command(bot, accid, event):
                 })
 
         if not found_users:
-            _send(bot, accid, msg.chat_id, "✅ No group members using regular mail providers found.")
+            _send(bot, accid, msg.chat_id, "✅ No group members using public Russian mail providers found.")
             return
 
-        reply = f"⚠️ **Members with free mail providers ({len(found_users)}):**\n\n"
+        reply = f"⚠️ **Members with public Russian mail providers ({len(found_users)}):**\n\n"
         reply += "These users may experience delivery issues in large groups:\n\n"
         for user in found_users:
             matches_str = ", ".join(user["matches"])
             reply += f"• /contact{user['contact_id']} **{user['name']}** ({user['primary']}) [{user['last_seen']}] — {matches_str}\n"
         
-        reply += "\nConsider asking them to use public chatmail relays or private servers."
+        reply += "\nConsider asking them to use chatmail relays or private servers."
         _send(bot, accid, msg.chat_id, reply)
 
     except Exception as e:
