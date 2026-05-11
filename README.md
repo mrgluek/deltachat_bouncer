@@ -39,7 +39,7 @@ A professional Delta Chat bot designed to maintain group quality by monitoring i
 ## Commands
 
 - `/bounce` — Trigger an immediate inactivity check in the current group.
-- `/relays` — Find group members using regular mail providers (Admin only).
+- `/relays` — Find group members using regular mail providers.
 - `/help` — Show available commands and bot information.
 - `/donate` — Support project development ❤️
 - `/initadmin` — Claim administrative ownership (private chat only).

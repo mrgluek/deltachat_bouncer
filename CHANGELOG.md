@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## [1.3.0] - 2026-05-11
 ### Added
-- Added `/relays` command for administrators to find group members using regular mail providers (Yandex, Mail.ru, Rambler).
+- Added `/relays` command to find group members using regular mail providers (Yandex, Mail.ru, Rambler). Available to all users with a 10-minute cooldown.
 - Enhanced `/relays` to automatically extract secondary addresses (transports) for all contacts by parsing encryption info.
 - Added daily status reports (heartbeats) that post group statistics even if no one is inactive yet.
 ### Changed

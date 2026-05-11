@@ -27,6 +27,7 @@ INACTIVITY_SECONDS_THRESHOLD = INACTIVITY_DAYS_THRESHOLD * 24 * 3600
 
 # Anti-spam: {chat_id: timestamp}
 _chat_anti_spam: dict[int, float] = {}
+_chat_relays_anti_spam: dict[int, float] = {}
 BOUNCE_COOLDOWN_SECONDS = 600  # 10 minutes
 
 REGULAR_MAIL_DOMAINS = {
@@ -485,10 +486,11 @@ def help_command(bot, accid, event):
         f"👋 Hi {sender_email}!\n\n"
         f"I monitor groups and report inactive users (no activity for {INACTIVITY_DAYS_THRESHOLD} days).\n\n"
         f"**Commands:**\n"
-        f"/bounce — Trigger an immediate inactivity check in this group.\n"
+        f"/bounce — Trigger an inactivity check in this group.\n"
+        f"/relays — Find group members using regular mail.\n"
         f"/help — This message.\n"
         f"/donate — Support development ❤️\n\n"
-        f"💡 _Anyone can use /bounce, but no more than once every 10 minutes per group._\n\n"
+        f"💡 _Commands have a 10-minute cooldown per group (except for admins)._\n\n"
         f"🤖 **Source:** Run your own bot: https://github.com/mrgluek/deltachat_bouncer"
     )
     
@@ -503,7 +505,6 @@ def help_command(bot, accid, event):
         help_text += f"\n\n👑 **Admin:** `{admin_email}`{fp_suffix}"
         help_text += "\n\n**Admin Commands:**\n"
         help_text += "/transports — Show mail relays and stats\n"
-        help_text += "/relays — Find group members using regular mail\n"
         help_text += "/rmtransport <email> — Remove a mail relay"
         
     _send(bot, accid, msg.chat_id, help_text)
@@ -563,9 +564,23 @@ def rmtransport_command(bot, accid, event):
 def relays_command(bot, accid, event):
     """Check group members for regular mail providers, including secondary transports."""
     msg = event.msg
-    if not _is_dc_admin(bot, accid, msg.from_id):
-        _send(bot, accid, msg.chat_id, "❌ This command is only for the bot administrator.")
-        return
+    
+    # Allow everyone to use /relays, but with a cooldown (admins are exempt)
+    is_admin = _is_dc_admin(bot, accid, msg.from_id)
+    now = time.time()
+    
+    if not is_admin:
+        last_check = _chat_relays_anti_spam.get(msg.chat_id, 0)
+        if now - last_check < BOUNCE_COOLDOWN_SECONDS:
+            remaining = int((BOUNCE_COOLDOWN_SECONDS - (now - last_check)) / 60)
+            if remaining < 1:
+                 _send(bot, accid, msg.chat_id, "⌛️ Please wait a moment before running another check.")
+            else:
+                 _send(bot, accid, msg.chat_id, f"⌛️ Relay check was done recently. Please wait {remaining}m before running another check.")
+            return
+
+    # Update timestamp
+    _chat_relays_anti_spam[msg.chat_id] = now
 
     try:
         contacts = bot.rpc.get_chat_contacts(accid, msg.chat_id)
