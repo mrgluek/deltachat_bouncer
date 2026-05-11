@@ -660,6 +660,7 @@ def handle_all_messages(bot, accid, event):
     msg = event.msg
     text = (msg.text or "").strip()
     if text.startswith("/contact"):
+        logger.info(f"DEBUG: Processing contact request: {text}")
         try:
             id_str = text[8:].strip()
             if id_str.isdigit():
@@ -667,16 +668,24 @@ def handle_all_messages(bot, accid, event):
                 # Verify contact exists and is in the same chat
                 try:
                     chat_contacts = bot.rpc.get_chat_contacts(accid, msg.chat_id)
-                    if contact_id in chat_contacts:
-                        # Send contact object
-                        bot.rpc.send_msg(accid, msg.chat_id, MsgData(contact_id=contact_id))
+                    # Convert to set of ints for robust comparison
+                    chat_contact_ids = set()
+                    for c in chat_contacts:
+                        try:
+                            chat_contact_ids.add(int(c))
+                        except (ValueError, TypeError):
+                            continue
+                    
+                    if contact_id in chat_contact_ids:
+                        logger.info(f"DEBUG: Sharing contact {contact_id} in chat {msg.chat_id}")
+                        # Using raw dict for RPC compatibility
+                        bot.rpc.send_msg(accid, msg.chat_id, {"contact_id": contact_id})
                     else:
-                        logger.debug(f"User {msg.from_id} tried to access contact {contact_id} not in chat {msg.chat_id}")
-                except Exception:
-                    # Chat or contact might not exist
-                    pass
+                        logger.warning(f"DEBUG: User {msg.from_id} tried to access contact {contact_id} not in chat {msg.chat_id}")
+                except Exception as e:
+                    logger.error(f"DEBUG: Error in contact security check: {e}")
         except Exception as e:
-            logger.debug(f"Error handling contact link: {e}")
+            logger.error(f"DEBUG: Error parsing contact ID: {e}")
 
 if __name__ == "__main__":
     import sys
