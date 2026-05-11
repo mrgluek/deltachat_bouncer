@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2026-05-11
+### Added
+- Added `/relays` command for administrators to find group members using regular mail providers (Yandex, Mail.ru, Rambler).
+- Enhanced `/relays` to automatically extract secondary addresses (transports) for all contacts by parsing encryption info.
+- Added daily status reports (heartbeats) that post group statistics even if no one is inactive yet.
+### Changed
+- Improved background loop diagnostics by logging specific errors for all RPC fallback methods.
+- Reduced log noise by changing admin fingerprint mismatch warnings to info level.
+
 ## [1.2.1] - 2026-05-08
 ### Fixed
 - Fixed "Method not found" error in daily inactivity check by expanding RPC method fallbacks (added `get_chat_list_ids`).

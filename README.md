@@ -4,10 +4,11 @@ A professional Delta Chat bot designed to maintain group quality by monitoring i
 
 ## Features
 
-- 🕵️ **Daily Inactivity Report:** Automatically scans all groups once a day and posts a list of inactive members.
+- 🕵️ **Daily Status & Inactivity Report:** Automatically scans all groups once a day. Posts group statistics (total members, active count) and a list of inactive members.
+- 📬 **Relay Check (`/relays`):** Scan for group members using "regular mail" (Yandex, Mail.ru, Rambler) that may cause delivery issues in large groups.
 - ⏳ **30-Day Grace Period:** For new groups, the bot waits 30 days before reporting "never seen" users to avoid false positives.
 - 🚀 **Manual Check (`/bounce`):** Anyone can trigger an immediate inactivity check (with a 10-minute cooldown per group).
-- 🛡️ **Secure Administration:** Claim ownership with `/initadmin`. Admins bypass rate limits and have exclusive control over bot settings.
+- 🛡️ **Secure Administration:** Claim ownership with `/initadmin`. Admins bypass rate limits and have exclusive control over bot settings and group scanning.
 - 📱 **QR Code Link:** Generates a SecureJoin QR code in the logs for easy device linking.
 - 🐳 **Docker Ready:** Easy deployment using Docker Compose.
 
@@ -38,6 +39,7 @@ A professional Delta Chat bot designed to maintain group quality by monitoring i
 ## Commands
 
 - `/bounce` — Trigger an immediate inactivity check in the current group.
+- `/relays` — Find group members using regular mail providers (Admin only).
 - `/help` — Show available commands and bot information.
 - `/donate` — Support project development ❤️
 - `/initadmin` — Claim administrative ownership (private chat only).
