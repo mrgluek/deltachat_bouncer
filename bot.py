@@ -130,7 +130,7 @@ def _is_dc_admin(bot, accid, contact_id):
                 if admin_fp.upper() in c_fp.upper().split(','):
                     return True
             
-            logger.warning(f"Admin check: Fingerprint mismatch or missing for {contact_id}")
+            logger.info(f"Admin check: Fingerprint mismatch or missing for {contact_id}")
             return False
         
         # 2. Check email
@@ -282,6 +282,7 @@ def _background_checker_loop(bot, accid):
                 # Try multiple methods and signatures to find the one that works with this core version
                 chats = None
                 methods_to_try = [
+                    ("get_chat_list_ids(accid, 0, None, 0, 1000)", lambda: bot.rpc.get_chat_list_ids(accid, 0, None, 0, 1000)),
                     ("get_chat_list_ids(accid, 0, None)", lambda: bot.rpc.get_chat_list_ids(accid, 0, None)),
                     ("get_chat_ids(accid, 0, None)", lambda: bot.rpc.get_chat_ids(accid, 0, None)),
                     ("get_chat_ids(accid, 0)", lambda: bot.rpc.get_chat_ids(accid, 0)),
@@ -299,7 +300,8 @@ def _background_checker_loop(bot, accid):
                             logger.info(f"Successfully retrieved chat list using {name}")
                             break
                     except Exception as e:
-                        logger.debug(f"Method {name} failed: {e}")
+                        # Log error details to help diagnose RPC mismatch
+                        logger.info(f"Discovery: Method {name} failed: {e}")
                         continue
                 
                 if chats is None:
