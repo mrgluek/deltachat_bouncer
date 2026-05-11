@@ -32,7 +32,7 @@ BOUNCE_COOLDOWN_SECONDS = 600  # 10 minutes
 
 REGULAR_MAIL_DOMAINS = {
     "yandex.ru", "yandex.com", "ya.ru",
-    "mail.ru", "list.ru", "bk.ru", "inbox.ru",
+    "mail.ru", "list.ru", "bk.ru", "inbox.ru", "internet.ru"
     "rambler.ru"
 }
 
