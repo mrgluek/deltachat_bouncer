@@ -7,7 +7,7 @@ import threading
 import time
 from datetime import datetime
 
-from deltachat2 import events, MsgData, MessageViewtype
+from deltachat2 import events, MsgData
 from deltabot_cli import BotCli
 import qrcode
 import tempfile
@@ -698,7 +698,7 @@ def handle_all_messages(bot, accid, event):
                                 temp_path = f.name
                             
                             # Send the vCard as a message
-                            bot.rpc.send_msg(accid, msg.chat_id, MsgData(file=temp_path, viewtype=MessageViewtype.VCARD))
+                            bot.rpc.send_msg(accid, msg.chat_id, MsgData(file=temp_path, viewtype="Vcard"))
                             logger.info(f"DEBUG: Successfully shared contact {contact_id}")
                         finally:
                             if temp_path and os.path.exists(temp_path):

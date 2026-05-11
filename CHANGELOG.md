@@ -11,7 +11,7 @@ All notable changes to this project will be documented in this file.
 - Added daily status reports (heartbeats) that post group statistics even if no one is inactive yet.
 ### Changed
 - Improved background loop diagnostics by logging specific errors for all RPC fallback methods.
-- Fixed critical bug in `/contact<ID>` command by implementing manual vCard generation and sharing (resolved `MsgData` incompatibility).
+- Fixed critical bug in `/contact<ID>` command by implementing manual vCard generation and sharing (resolved `MsgData` and `MessageViewtype` incompatibilities).
 - Fixed `last_seen` extraction for contacts by properly handling `AttrDict` and dictionary fallbacks.
 - Reduced log noise by changing admin fingerprint mismatch warnings to info level.
 
