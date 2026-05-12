@@ -17,7 +17,11 @@ All notable changes to this project will be documented in this file.
 - Fixed `last_seen` extraction for contacts by properly handling `AttrDict` and dictionary fallbacks.
 - Reduced log noise by changing admin fingerprint mismatch warnings to info level.
 
-## [1.2.1] - 2026-05-08
+## [1.3.1] - 2026-05-12
+### Changed
+- Reduced inactivity threshold from 30 days to 7 days for more aggressive group management.
+- Removed activity ranking from manual `/bounce` reports to keep them focused (ranking is still available via `/top`).
+- Updated reports to dynamically reflect the current inactivity threshold in days.
 ### Fixed
 - Fixed "Method not found" error in daily inactivity check by expanding RPC method fallbacks (added `get_chat_list_ids`).
 - Added detailed logging for RPC method attempts to improve diagnostics.

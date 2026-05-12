@@ -1,6 +1,6 @@
 # Delta Chat Bouncer Bot
 
-A professional Delta Chat bot designed to maintain group quality by monitoring inactivity. It automatically scans group members and reports users who haven't been seen online for over 30 days.
+A professional Delta Chat bot designed to maintain group quality by monitoring inactivity. It automatically scans group members and reports users who haven't been seen online for over 7 days.
 
 ## Features
 
@@ -8,7 +8,7 @@ A professional Delta Chat bot designed to maintain group quality by monitoring i
 - 📬 **Relay Check (`/relays`):** Scan for group members using regular mail providers.
 - 🏆 **Activity Ranking (`/top`):** Show the 10 most active members in the last 24 hours.
 - 👤 **Contact Sharing:** Commands like `/relays`, `/top`, and inactivity reports now include `/contact<ID>` links to quickly get a contact object for any user.
-- ⏳ **30-Day Grace Period:** For new groups, the bot waits 30 days before reporting "never seen" users to avoid false positives.
+- ⏳ **7-Day Grace Period:** For new groups, the bot waits 7 days before reporting "never seen" users to avoid false positives.
 - 🚀 **Manual Check (`/bounce`):** Anyone can trigger an immediate inactivity check (with a 10-minute cooldown per group).
 - 🛡️ **Secure Administration:** Claim ownership with `/initadmin`. Admins bypass rate limits and have exclusive control over bot settings and group scanning.
 - 📱 **QR Code Link:** Generates a SecureJoin QR code in the logs for easy device linking.
@@ -44,7 +44,7 @@ A professional Delta Chat bot designed to maintain group quality by monitoring i
 - `/relays` — Find group members using regular mail providers.
 - `/top` — Show the 10 most active members in the last 24 hours.
 - `/contact<ID>` — Get a contact object for the given ID (e.g., `/contact123`).
-- `/help` — Show available commands and bot information.
+- `/help` — Show available commands and bot information (Threshold: 7 days).
 - `/donate` — Support project development ❤️
 - `/initadmin` — Claim administrative ownership (private chat only).
 

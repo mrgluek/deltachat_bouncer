@@ -23,7 +23,7 @@ dc_bot_instance = None
 dc_accid = None
 
 DC_CONTACT_ID_SELF = 1
-INACTIVITY_DAYS_THRESHOLD = 30
+INACTIVITY_DAYS_THRESHOLD = 7
 INACTIVITY_SECONDS_THRESHOLD = INACTIVITY_DAYS_THRESHOLD * 24 * 3600
 
 # Anti-spam: {chat_id: timestamp}
@@ -326,10 +326,10 @@ def _check_chat_inactivity(bot, accid, chat_id, daily=False) -> str:
     report += f"• Active recently: {active_count}\n"
     
     if inactive_users:
-        report += f"• ⚠️ Inactive (>30d): {len(inactive_users)}\n\n"
+        report += f"• ⚠️ Inactive (>{INACTIVITY_DAYS_THRESHOLD}d): {len(inactive_users)}\n\n"
         report += "\n".join(inactive_users)
     else:
-        report += "• Inactive (>30d): 0\n"
+        report += f"• Inactive (>{INACTIVITY_DAYS_THRESHOLD}d): 0\n"
 
     if lurkers_skipped > 0:
         report += f"\n\n_Note: {lurkers_skipped} more members haven't spoken yet, but they are still in the {INACTIVITY_DAYS_THRESHOLD}-day grace period._"
@@ -538,10 +538,6 @@ def bounce_command(bot, accid, event):
 
     report = _check_chat_inactivity(bot, accid, msg.chat_id)
     if report:
-        # For manual /bounce, we also include top posters at the end
-        top_report = _get_top_posters_report(bot, accid, msg.chat_id)
-        if "🏆" in top_report:
-            report += "\n\n" + top_report
         _send(bot, accid, msg.chat_id, report)
     else:
         _send(bot, accid, msg.chat_id, "✅ All users are active or this is not a group chat.")
