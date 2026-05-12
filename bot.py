@@ -23,7 +23,7 @@ dc_bot_instance = None
 dc_accid = None
 
 DC_CONTACT_ID_SELF = 1
-INACTIVITY_DAYS_THRESHOLD = 7
+INACTIVITY_DAYS_THRESHOLD = 14
 INACTIVITY_SECONDS_THRESHOLD = INACTIVITY_DAYS_THRESHOLD * 24 * 3600
 
 # Anti-spam: {chat_id: timestamp}
@@ -353,54 +353,32 @@ def _background_checker_loop(bot, accid):
             if now - last_run >= 24 * 3600:
                 logger.info("Running daily inactivity check...")
                 
-                # Try multiple methods and signatures to find the one that works with this core version
-                chats = None
-                methods_to_try = [
-                    ("get_chat_list(accid)", lambda: bot.rpc.get_chat_list(accid)),
-                    ("get_chat_list(accid, 0, None, None, None)", lambda: bot.rpc.get_chat_list(accid, 0, None, None, None)),
-                    ("get_chat_list_ids(accid, 0, None, 0, 1000)", lambda: bot.rpc.get_chat_list_ids(accid, 0, None, 0, 1000)),
-                    ("get_chat_list_ids(accid, 0, None)", lambda: bot.rpc.get_chat_list_ids(accid, 0, None)),
-                    ("get_chat_ids(accid, 0, None)", lambda: bot.rpc.get_chat_ids(accid, 0, None)),
-                    ("get_chat_ids(accid, 0)", lambda: bot.rpc.get_chat_ids(accid, 0)),
-                    ("get_chat_ids(accid)", lambda: bot.rpc.get_chat_ids(accid)),
-                    ("get_chats(accid, 0, None)", lambda: bot.rpc.get_chats(accid, 0, None)),
-                    ("get_chats(accid, None, None, False)", lambda: bot.rpc.get_chats(accid, None, None, False)),
-                    ("get_chats(accid)", lambda: bot.rpc.get_chats(accid)),
-                    ("get_all_chats(accid)", lambda: bot.rpc.get_all_chats(accid)),
-                ]
+                # get_chatlist_entries returns a list of chat_ids (u32)
+                # Signature: get_chatlist_entries(account_id, list_flags?, query_string?, query_contact_id?)
+                try:
+                    chats = bot.rpc.get_chatlist_entries(accid, None, None, None)
+                    logger.info(f"Retrieved {len(chats)} chats via get_chatlist_entries")
+                except Exception as e:
+                    logger.error(f"get_chatlist_entries failed: {e}")
+                    chats = []
                 
-                for name, method in methods_to_try:
+                GROUP_TYPES = {"Group", "Mailinglist", "OutBroadcast", "InBroadcast"}
+
+                for chat_id in chats:
                     try:
-                        chats = method()
-                        if chats is not None:
-                            logger.info(f"Successfully retrieved chat list using {name}")
-                            break
-                    except Exception as e:
-                        # Log error details to help diagnose RPC mismatch
-                        logger.info(f"Discovery: Method {name} failed: {e}")
-                        continue
-                
-                if chats is None:
-                    logger.error("All methods to get chat list failed. Check core version and RPC compatibility.")
-                    chats = [] # Prevent crash in the loop below
-                
-                for item in chats:
-                    try:
-                        # Depending on the core version, the RPC might return a list of integers or a list of dicts/objects
-                        chat_id = item if isinstance(item, int) else (item.get("id") if isinstance(item, dict) else getattr(item, "id", None))
-                        if chat_id is None:
+                        if not isinstance(chat_id, int):
                             continue
-                            
+
                         chat = bot.rpc.get_basic_chat_info(accid, chat_id)
-                        
-                        # Check if it's a group chat. 
-                        # In some versions it's 'is_multiuser', in others we check 'chat_type'
-                        is_group = False
+
+                        # chat_type is a JsonrpcChatType enum string: Single, Group, Mailinglist, OutBroadcast, InBroadcast
                         if isinstance(chat, dict):
-                            is_group = chat.get('is_multiuser') or chat.get('chat_type') != "Single"
+                            chat_type = chat.get('chat_type', 'Single')
                         else:
-                            is_group = getattr(chat, 'is_multiuser', False) or getattr(chat, 'chat_type', "") != "Single"
-                            
+                            chat_type = getattr(chat, 'chat_type', 'Single')
+
+                        is_group = str(chat_type) in GROUP_TYPES
+
                         if is_group:
                             report = _check_chat_inactivity(bot, accid, chat_id, daily=True)
                             if report:
