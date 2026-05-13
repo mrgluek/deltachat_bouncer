@@ -1,0 +1,3 @@
+
+# Local overrides (healthchecks, etc.)
+.env.local
