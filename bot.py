@@ -253,7 +253,7 @@ def _get_top_posters_report(bot, accid, chat_id):
             continue
     return report
 
-def _check_chat_inactivity(bot, accid, chat_id, daily=False) -> str:
+def _check_chat_inactivity(bot, accid, chat_id) -> str:
     # 1. Ensure we have a monitoring start date for this chat
     monitored_since = database.get_chat_monitored_since(chat_id)
     now = time.time()
@@ -313,14 +313,13 @@ def _check_chat_inactivity(bot, accid, chat_id, daily=False) -> str:
 
     monitored_days = int((now - monitored_since) / (24 * 3600))
     
-    if not daily and not inactive_users:
+    if not inactive_users:
         if lurkers_skipped > 0:
             return f"ℹ️ **Inactivity Check**\nI've been monitoring this group for {monitored_days} days. {lurkers_skipped} members haven't spoken yet, but I need {INACTIVITY_DAYS_THRESHOLD} days of observation before reporting them as inactive."
         return ""
         
     # Build the report
-    title = "📊 **Daily Status Report**" if daily else "⚠️ **Inactivity Report**"
-    report = f"{title}\n"
+    report = "⚠️ **Inactivity Report**\n"
     report += f"Monitoring this group for {monitored_days} days.\n\n"
     report += f"• Total members: {total_members}\n"
     report += f"• Active recently: {active_count}\n"
@@ -334,65 +333,41 @@ def _check_chat_inactivity(bot, accid, chat_id, daily=False) -> str:
     if lurkers_skipped > 0:
         report += f"\n\n_Note: {lurkers_skipped} more members haven't spoken yet, but they are still in the {INACTIVITY_DAYS_THRESHOLD}-day grace period._"
 
-    # Add Top 10 Posters only for daily reports (manual /bounce handles it separately)
-    if daily:
-        top_report = _get_top_posters_report(bot, accid, chat_id)
-        if "🏆" in top_report:
-            report += "\n\n" + top_report
-
     return report
 
-def _background_checker_loop(bot, accid):
-    logger.info("Background checker loop started.")
+def _background_monitor_loop(bot, accid):
+    logger.info("Background monitor task started.")
     time.sleep(10) # Wait for bot to connect and sync
     while True:
         try:
-            # Run once a day. We check if 24h passed since last run.
-            last_run = float(database.get_config("last_daily_run") or 0)
-            now = time.time()
-            if now - last_run >= 24 * 3600:
-                logger.info("Running daily inactivity check...")
-                
-                # get_chatlist_entries returns a list of chat_ids (u32)
-                # Signature: get_chatlist_entries(account_id, list_flags?, query_string?, query_contact_id?)
+            try:
+                chats = bot.rpc.get_chatlist_entries(accid, None, None, None)
+                logger.info(f"Background check: tracking {len(chats)} chats")
+            except Exception as e:
+                logger.error(f"get_chatlist_entries failed: {e}")
+                chats = []
+            
+            GROUP_TYPES = {"Group", "Mailinglist", "OutBroadcast", "InBroadcast"}
+
+            for chat_id in chats:
                 try:
-                    chats = bot.rpc.get_chatlist_entries(accid, None, None, None)
-                    logger.info(f"Retrieved {len(chats)} chats via get_chatlist_entries")
+                    if not isinstance(chat_id, int):
+                        continue
+
+                    chat = bot.rpc.get_basic_chat_info(accid, chat_id)
+                    chat_type = chat.get('chat_type', 'Single') if isinstance(chat, dict) else getattr(chat, 'chat_type', 'Single')
+
+                    if str(chat_type) in GROUP_TYPES:
+                        # Ensure monitored_since is set for new groups
+                        if database.get_chat_monitored_since(chat_id) is None:
+                            logger.info(f"Started monitoring new group: {chat_id}")
+                            database.set_chat_monitored_since(chat_id, time.time())
                 except Exception as e:
-                    logger.error(f"get_chatlist_entries failed: {e}")
-                    chats = []
-                
-                GROUP_TYPES = {"Group", "Mailinglist", "OutBroadcast", "InBroadcast"}
-
-                for chat_id in chats:
-                    try:
-                        if not isinstance(chat_id, int):
-                            continue
-
-                        chat = bot.rpc.get_basic_chat_info(accid, chat_id)
-
-                        # chat_type is a JsonrpcChatType enum string: Single, Group, Mailinglist, OutBroadcast, InBroadcast
-                        if isinstance(chat, dict):
-                            chat_type = chat.get('chat_type', 'Single')
-                        else:
-                            chat_type = getattr(chat, 'chat_type', 'Single')
-
-                        is_group = str(chat_type) in GROUP_TYPES
-
-                        if is_group:
-                            report = _check_chat_inactivity(bot, accid, chat_id, daily=True)
-                            if report:
-                                _send(bot, accid, chat_id, report)
-                                time.sleep(1) # Add a small delay to avoid spamming the core
-                    except Exception as e:
-                        logger.error(f"Error checking chat {chat_id} in background task: {e}")
-                        
-                database.set_config("last_daily_run", str(now))
-                logger.info("Daily check finished.")
+                    logger.error(f"Error checking chat {chat_id} in background monitor: {e}")
         except Exception as e:
             logger.error(f"Background loop error: {e}")
             
-        time.sleep(3600) # Check every hour if we need to run the daily task
+        time.sleep(3600) # Check every hour for new chats
 
 # ── Commands ──
 
@@ -464,7 +439,7 @@ def on_start(bot, args):
     except Exception as e:
         logger.error(f"Failed to generate QR code: {e}")
     
-    t = threading.Thread(target=_background_checker_loop, args=(bot, accid), daemon=True)
+    t = threading.Thread(target=_background_monitor_loop, args=(bot, accid), daemon=True)
     t.start()
 
 
