@@ -18,7 +18,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 1. **Clone the repository:**
 
    ```bash
-   git clone https://github.com/mrgluek/deltachat_bouncer
+   git clone https://git.gluek.info/gluek/deltachat_bouncer
    cd deltachat_bouncer
    ```
 
@@ -73,5 +73,5 @@ To ensure the bot stays online even if one mail server is down:
 
 If you find this bot useful, consider supporting its development:
 
-- **GitHub:** [mrgluek/deltachat_bouncer](https://github.com/mrgluek/deltachat_bouncer)
+- **Git:** [gluek/deltachat_bouncer](https://git.gluek.info/gluek/deltachat_bouncer)
 - **Donations:** Use the `/donate` command in Delta Chat.

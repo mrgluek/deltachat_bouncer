@@ -527,7 +527,7 @@ def help_command(bot, accid, event):
         f"/help   — This message.\n\n"
         f"/donate — Support development ❤️\n\n"
         f"💡 _Commands have a 10-minute cooldown per group (except for admins)._\n\n"
-        f"🤖 **Source:** Run your own bot: https://github.com/mrgluek/deltachat_bouncer"
+        f"🤖 **Source:** Run your own bot: https://git.gluek.info/gluek/deltachat_bouncer"
     )
     
     admin_email = database.get_config("admin_dc_email")
