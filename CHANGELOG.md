@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-05-19
+
+### Added
+
+- Added complete set of in-chat transport management commands matching `tgbridge`:
+  - `/addtransport <payload>` to dynamically add backup mail relays via chatmail URI or credentials.
+  - `/setprimary <addr>` to switch the primary active mail relay (`configured_addr`).
+- Implemented `transport_stats` SQLite database table and statistics tracking.
+- Upgraded `/transports` command to show connectivity status, primary/backup labels, message counts (sent/received), and last sent/received timestamps.
+- Upgraded `/rmtransport <addr>` command with full validation checks and last-transport protection.
+
 ## [1.4.0] - 2026-05-16
 
 ### Changed

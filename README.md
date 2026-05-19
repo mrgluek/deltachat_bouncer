@@ -50,10 +50,14 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/help` — Show available commands and bot information (Threshold: 14 days).
 - `/donate` — Support project development ❤️
 - `/initadmin` — Claim administrative ownership (private chat only).
+- `/transports` — Show configured mail relays & stats (Admin only).
+- `/addtransport` — Add a backup mail relay (Admin only).
+- `/rmtransport <addr>` — Remove a mail relay (Admin only).
+- `/setprimary <addr>` — Switch the primary mail relay (Admin only).
 
 ## Admin Management
 
-You can manually manage the administrator or add backup transports via the server CLI:
+Admin functions can be performed directly through chat commands, or managed via the server CLI:
 
 ### Set Administrator
 
@@ -61,9 +65,9 @@ You can manually manage the administrator or add backup transports via the serve
 docker compose exec bot python set_admin.py --email your@email.com
 ```
 
-### Add Backup Relay (Transport)
+### Transport (Mail Relay) CLI Initialization
 
-To ensure the bot stays online even if one mail server is down:
+Although we recommend using `/addtransport` in chat, you can also add a backup relay via the command line:
 
 1. Stop the bot: `docker compose stop bot`
 2. Add relay: `docker compose run --rm bot python bot.py init transport backup-email@example.com password`
