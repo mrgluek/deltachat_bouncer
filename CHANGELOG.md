@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.1] - 2026-05-20
+
+### Added
+
+- Enhanced `/search` command with reply-based lookups: replying to any message with `/search` will automatically extract and search for all email addresses contained in the quoted message.
+- Upgraded `/search` to scan all configured transports/aliases (secondary addresses) for group contacts by parsing contact encryption info, rather than just matching against the primary address.
+- Updated `/search` output to list all associated transport addresses for matched contacts.
+
 ## [1.6.0] - 2026-05-20
 
 ### Added

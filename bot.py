@@ -553,8 +553,28 @@ def search_command(bot, accid, event):
     # 3. Parse and validate queries
     payload_str = event.payload.strip() if event.payload else ""
     queries = [q.lower() for q in payload_str.split() if q]
+
+    # Check if this is a reply to another message
+    has_reply = False
+    quoted_emails = []
+    if hasattr(msg, "quote") and msg.quote and isinstance(msg.quote, dict):
+        quoted_text = msg.quote.get("text", "")
+        if quoted_text:
+            has_reply = True
+            # Extract email addresses from the quoted text
+            found_emails = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', quoted_text)
+            for email in found_emails:
+                email_lower = email.lower().strip()
+                if email_lower not in queries:
+                    quoted_emails.append(email_lower)
+            
+    queries.extend(quoted_emails)
+
     if not queries:
-        _send(bot, accid, msg.chat_id, "Usage: /search <email1> <email2> ...")
+        if has_reply:
+            _send(bot, accid, msg.chat_id, "ℹ️ No email addresses found in the quoted message to search for.")
+        else:
+            _send(bot, accid, msg.chat_id, "Usage: /search <email1> <email2> ... or reply to a message containing email addresses.")
         return
 
     # Update cooldown timestamp
@@ -569,15 +589,30 @@ def search_command(bot, accid, event):
             if contact.address and contact.address.lower() == "deltachat@system.local":
                 continue # Ignore system contact
 
-            # Get name and address
+            # Get name and primary address
             name = contact.name or contact.display_name or "Unknown"
-            address = contact.address or ""
+            primary_addr = contact.address or ""
             
-            # Substring match (case-insensitive) for any query
+            # Get all addresses associated with this contact from various sources
+            all_addresses = {primary_addr.lower().strip()} if primary_addr else set()
+            try:
+                # Encryption info typically lists all associated addresses (transports)
+                enc_info = bot.rpc.get_contact_encryption_info(accid, contact_id)
+                if enc_info:
+                    emails = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', enc_info)
+                    for e in emails:
+                        all_addresses.add(e.lower().strip())
+            except Exception:
+                pass
+
+            # Substring match (case-insensitive) for any query in any of the addresses
             matched = False
             for query in queries:
-                if query in address.lower():
-                    matched = True
+                for addr in all_addresses:
+                    if query in addr:
+                        matched = True
+                        break
+                if matched:
                     break
             
             if matched:
@@ -594,7 +629,16 @@ def search_command(bot, accid, event):
                     days_ago = int((now - last_seen) / (24 * 3600))
                     status = f"last seen {date_str}, {days_ago}d ago"
 
-                found_users.append(f"• /contact{contact_id} **{name}** ({address}) [{status}]")
+                # Format the list of addresses (primary first)
+                display_addrs = [primary_addr] if primary_addr else []
+                for addr in sorted(all_addresses):
+                    if primary_addr and addr != primary_addr.lower().strip() and addr not in display_addrs:
+                        display_addrs.append(addr)
+                    elif not primary_addr and addr not in display_addrs:
+                        display_addrs.append(addr)
+                addrs_str = ", ".join(display_addrs)
+
+                found_users.append(f"• /contact{contact_id} **{name}** ({addrs_str}) [{status}]")
         except Exception as e:
             logger.error(f"Error checking contact {contact_id} in search: {e}")
 
@@ -617,7 +661,7 @@ def help_command(bot, accid, event):
         f"I monitor groups and report inactive users (no activity for {INACTIVITY_DAYS_THRESHOLD} days).\n\n"
         f"**Commands:**\n"
         f"/bounce — Trigger an inactivity check in the current group.\n"
-        f"/search <email1> <email2> ... — Search for members by email in the group.\n"
+        f"/search [email1] ... — Search for members by email (or reply to a message containing emails).\n"
         f"/relays — Find group members using regular mail providers.\n"
         f"/top    — Show top 10 posters in the last 24 hours.\n"
         f"/contact<ID> — Get a contact object for the given ID.\n"
