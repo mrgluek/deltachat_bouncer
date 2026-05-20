@@ -550,10 +550,11 @@ def search_command(bot, accid, event):
                 _send(bot, accid, msg.chat_id, f"⌛️ A search was performed recently in this group. Please wait {remaining}m before running another search.")
             return
 
-    # 3. Parse and validate query
-    query = event.payload.strip() if event.payload else ""
-    if not query:
-        _send(bot, accid, msg.chat_id, "Usage: /search <email>")
+    # 3. Parse and validate queries
+    payload_str = event.payload.strip() if event.payload else ""
+    queries = [q.lower() for q in payload_str.split() if q]
+    if not queries:
+        _send(bot, accid, msg.chat_id, "Usage: /search <email1> <email2> ...")
         return
 
     # Update cooldown timestamp
@@ -572,8 +573,14 @@ def search_command(bot, accid, event):
             name = contact.name or contact.display_name or "Unknown"
             address = contact.address or ""
             
-            # Substring match (case-insensitive)
-            if query.lower() in address.lower():
+            # Substring match (case-insensitive) for any query
+            matched = False
+            for query in queries:
+                if query in address.lower():
+                    matched = True
+                    break
+            
+            if matched:
                 # Determine last_seen status
                 if isinstance(contact, dict):
                     last_seen = contact.get("last_seen", 0)
@@ -591,12 +598,13 @@ def search_command(bot, accid, event):
         except Exception as e:
             logger.error(f"Error checking contact {contact_id} in search: {e}")
 
+    queries_str = ", ".join(f"'{q}'" for q in queries)
     if found_users:
-        reply = f"🔍 **Search Results for '{query}' ({len(found_users)}):**\n\n"
+        reply = f"🔍 **Search Results for {queries_str} ({len(found_users)}):**\n\n"
         reply += "\n".join(found_users)
         _send(bot, accid, msg.chat_id, reply)
     else:
-        _send(bot, accid, msg.chat_id, f"🔍 No members matching '{query}' found in this group.")
+        _send(bot, accid, msg.chat_id, f"🔍 No members matching {queries_str} found in this group.")
 
 @dc_cli.on(events.NewMessage(command="/help"))
 def help_command(bot, accid, event):
@@ -609,7 +617,7 @@ def help_command(bot, accid, event):
         f"I monitor groups and report inactive users (no activity for {INACTIVITY_DAYS_THRESHOLD} days).\n\n"
         f"**Commands:**\n"
         f"/bounce — Trigger an inactivity check in the current group.\n"
-        f"/search <email> — Search for members by email in the group.\n"
+        f"/search <email1> <email2> ... — Search for members by email in the group.\n"
         f"/relays — Find group members using regular mail providers.\n"
         f"/top    — Show top 10 posters in the last 24 hours.\n"
         f"/contact<ID> — Get a contact object for the given ID.\n"
