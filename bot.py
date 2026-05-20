@@ -30,7 +30,8 @@ INACTIVITY_SECONDS_THRESHOLD = INACTIVITY_DAYS_THRESHOLD * 24 * 3600
 _chat_anti_spam: dict[int, float] = {}
 _chat_relays_anti_spam: dict[int, float] = {}
 _chat_search_anti_spam: dict[int, float] = {}
-BOUNCE_COOLDOWN_SECONDS = 600  # 10 minutes
+BOUNCE_COOLDOWN_SECONDS = 60   # 1 minute for general commands (/bounce, /top, /relays)
+SEARCH_COOLDOWN_SECONDS = 10   # 10 seconds for /search command
 
 REGULAR_MAIL_DOMAINS = {
     "yandex.ru", "yandex.com", "ya.ru",
@@ -505,12 +506,14 @@ def bounce_command(bot, accid, event):
     
     if not is_admin:
         last_bounce = _chat_anti_spam.get(msg.chat_id, 0)
-        if now - last_bounce < BOUNCE_COOLDOWN_SECONDS:
-            remaining = int((BOUNCE_COOLDOWN_SECONDS - (now - last_bounce)) / 60)
-            if remaining < 1:
-                 _send(bot, accid, msg.chat_id, "⌛️ Please wait a moment before running another check.")
+        diff = now - last_bounce
+        if diff < BOUNCE_COOLDOWN_SECONDS:
+            remaining_sec = max(1, int(BOUNCE_COOLDOWN_SECONDS - diff))
+            if remaining_sec < 60:
+                 _send(bot, accid, msg.chat_id, f"⌛️ This group was checked recently. Please wait {remaining_sec}s before running another check.")
             else:
-                 _send(bot, accid, msg.chat_id, f"⌛️ This group was checked recently. Please wait {remaining}m before running another check.")
+                 remaining_min = int(remaining_sec / 60)
+                 _send(bot, accid, msg.chat_id, f"⌛️ This group was checked recently. Please wait {remaining_min}m before running another check.")
             return
 
     # Update timestamp
@@ -530,8 +533,14 @@ def top_command(bot, accid, event):
     now = time.time()
     
     if not _is_dc_admin(bot, accid, msg.from_id):
-        if now - last_check < BOUNCE_COOLDOWN_SECONDS:
-             _send(bot, accid, msg.chat_id, "⌛️ Please wait a moment before running another check.")
+        diff = now - last_check
+        if diff < BOUNCE_COOLDOWN_SECONDS:
+             remaining_sec = max(1, int(BOUNCE_COOLDOWN_SECONDS - diff))
+             if remaining_sec < 60:
+                  _send(bot, accid, msg.chat_id, f"⌛️ Please wait {remaining_sec}s before running another check.")
+             else:
+                  remaining_min = int(remaining_sec / 60)
+                  _send(bot, accid, msg.chat_id, f"⌛️ Please wait {remaining_min}m before running another check.")
              return
     
     _chat_anti_spam[msg.chat_id] = now
@@ -558,12 +567,14 @@ def search_command(bot, accid, event):
     
     if not is_admin:
         last_search = _chat_search_anti_spam.get(msg.chat_id, 0)
-        if now - last_search < BOUNCE_COOLDOWN_SECONDS:
-            remaining = int((BOUNCE_COOLDOWN_SECONDS - (now - last_search)) / 60)
-            if remaining < 1:
-                _send(bot, accid, msg.chat_id, "⌛️ Please wait a moment before running another search.")
+        diff = now - last_search
+        if diff < SEARCH_COOLDOWN_SECONDS:
+            remaining_sec = max(1, int(SEARCH_COOLDOWN_SECONDS - diff))
+            if remaining_sec < 60:
+                _send(bot, accid, msg.chat_id, f"⌛️ A search was performed recently in this group. Please wait {remaining_sec}s before running another search.")
             else:
-                _send(bot, accid, msg.chat_id, f"⌛️ A search was performed recently in this group. Please wait {remaining}m before running another search.")
+                remaining_min = int(remaining_sec / 60)
+                _send(bot, accid, msg.chat_id, f"⌛️ A search was performed recently in this group. Please wait {remaining_min}m before running another search.")
             return
 
     # 3. Parse and validate queries
@@ -882,12 +893,14 @@ def relays_command(bot, accid, event):
     
     if not is_admin:
         last_check = _chat_relays_anti_spam.get(msg.chat_id, 0)
-        if now - last_check < BOUNCE_COOLDOWN_SECONDS:
-            remaining = int((BOUNCE_COOLDOWN_SECONDS - (now - last_check)) / 60)
-            if remaining < 1:
-                 _send(bot, accid, msg.chat_id, "⌛️ Please wait a moment before running another check.")
+        diff = now - last_check
+        if diff < BOUNCE_COOLDOWN_SECONDS:
+            remaining_sec = max(1, int(BOUNCE_COOLDOWN_SECONDS - diff))
+            if remaining_sec < 60:
+                 _send(bot, accid, msg.chat_id, f"⌛️ Relay check was done recently. Please wait {remaining_sec}s before running another check.")
             else:
-                 _send(bot, accid, msg.chat_id, f"⌛️ Relay check was done recently. Please wait {remaining}m before running another check.")
+                 remaining_min = int(remaining_sec / 60)
+                 _send(bot, accid, msg.chat_id, f"⌛️ Relay check was done recently. Please wait {remaining_min}m before running another check.")
             return
 
     # Update timestamp
