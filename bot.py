@@ -29,6 +29,7 @@ INACTIVITY_SECONDS_THRESHOLD = INACTIVITY_DAYS_THRESHOLD * 24 * 3600
 # Anti-spam: {chat_id: timestamp}
 _chat_anti_spam: dict[int, float] = {}
 _chat_relays_anti_spam: dict[int, float] = {}
+_chat_search_anti_spam: dict[int, float] = {}
 BOUNCE_COOLDOWN_SECONDS = 600  # 10 minutes
 
 REGULAR_MAIL_DOMAINS = {
@@ -520,6 +521,83 @@ def top_command(bot, accid, event):
     _chat_anti_spam[msg.chat_id] = now
     _send(bot, accid, msg.chat_id, _get_top_posters_report(bot, accid, msg.chat_id))
 
+@dc_cli.on(events.NewMessage(command="/search"))
+def search_command(bot, accid, event):
+    msg = event.msg
+    
+    # 1. Check if this is a group chat
+    try:
+        contacts = bot.rpc.get_chat_contacts(accid, msg.chat_id)
+    except Exception as e:
+        logger.error(f"Failed to get chat contacts for {msg.chat_id}: {e}")
+        return
+
+    if len(contacts) <= 2:
+        _send(bot, accid, msg.chat_id, "ℹ️ Search is only available in group chats.")
+        return
+
+    # 2. Check cooldown (admins are exempt)
+    is_admin = _is_dc_admin(bot, accid, msg.from_id)
+    now = time.time()
+    
+    if not is_admin:
+        last_search = _chat_search_anti_spam.get(msg.chat_id, 0)
+        if now - last_search < BOUNCE_COOLDOWN_SECONDS:
+            remaining = int((BOUNCE_COOLDOWN_SECONDS - (now - last_search)) / 60)
+            if remaining < 1:
+                _send(bot, accid, msg.chat_id, "⌛️ Please wait a moment before running another search.")
+            else:
+                _send(bot, accid, msg.chat_id, f"⌛️ A search was performed recently in this group. Please wait {remaining}m before running another search.")
+            return
+
+    # 3. Parse and validate query
+    query = event.payload.strip() if event.payload else ""
+    if not query:
+        _send(bot, accid, msg.chat_id, "Usage: /search <email>")
+        return
+
+    # Update cooldown timestamp
+    _chat_search_anti_spam[msg.chat_id] = now
+
+    found_users = []
+    for contact_id in contacts:
+        if contact_id == DC_CONTACT_ID_SELF:
+            continue
+        try:
+            contact = bot.rpc.get_contact(accid, contact_id)
+            if contact.address and contact.address.lower() == "deltachat@system.local":
+                continue # Ignore system contact
+
+            # Get name and address
+            name = contact.name or contact.display_name or "Unknown"
+            address = contact.address or ""
+            
+            # Substring match (case-insensitive)
+            if query.lower() in address.lower():
+                # Determine last_seen status
+                if isinstance(contact, dict):
+                    last_seen = contact.get("last_seen", 0)
+                else:
+                    last_seen = getattr(contact, "last_seen", 0)
+
+                if last_seen == 0:
+                    status = "never seen"
+                else:
+                    date_str = datetime.fromtimestamp(last_seen).strftime("%-d %b %Y")
+                    days_ago = int((now - last_seen) / (24 * 3600))
+                    status = f"last seen {date_str}, {days_ago}d ago"
+
+                found_users.append(f"• /contact{contact_id} **{name}** ({address}) [{status}]")
+        except Exception as e:
+            logger.error(f"Error checking contact {contact_id} in search: {e}")
+
+    if found_users:
+        reply = f"🔍 **Search Results for '{query}' ({len(found_users)}):**\n\n"
+        reply += "\n".join(found_users)
+        _send(bot, accid, msg.chat_id, reply)
+    else:
+        _send(bot, accid, msg.chat_id, f"🔍 No members matching '{query}' found in this group.")
+
 @dc_cli.on(events.NewMessage(command="/help"))
 def help_command(bot, accid, event):
     msg = event.msg
@@ -531,6 +609,7 @@ def help_command(bot, accid, event):
         f"I monitor groups and report inactive users (no activity for {INACTIVITY_DAYS_THRESHOLD} days).\n\n"
         f"**Commands:**\n"
         f"/bounce — Trigger an inactivity check in the current group.\n"
+        f"/search <email> — Search for members by email in the group.\n"
         f"/relays — Find group members using regular mail providers.\n"
         f"/top    — Show top 10 posters in the last 24 hours.\n"
         f"/contact<ID> — Get a contact object for the given ID.\n"

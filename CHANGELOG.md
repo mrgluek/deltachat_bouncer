@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.0] - 2026-05-20
+
+### Added
+
+- Added `/search <email>` command to search for group members by email (via case-insensitive substring matching). Matches are formatted exactly like `/bounce` reports with bold names, contact links, and last-seen activity timestamps. Available to all users with a 10-minute cooldown.
+
 ## [1.5.0] - 2026-05-19
 
 ### Added

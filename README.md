@@ -5,6 +5,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 ## Features
 
 - ⚠️ **Inactivity Reports (`/bounce`):** Trigger a manual scan for inactive group members. Reports total members, active count, and a list of inactive users.
+- 🔍 **Member Search (`/search <email>`):** Find group members by email (case-insensitive substring matching) with rich activity status and contact links.
 - 📬 **Relay Check (`/relays`):** Scan for group members using regular mail providers (Yandex, Mail.ru, etc.).
 - 🏆 **Activity Ranking (`/top`):** Show the 10 most active members in the last 24 hours.
 - 👤 **Contact Sharing:** Reports include `/contact<ID>` links to quickly get a contact object for any user.
@@ -44,6 +45,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 ## Commands
 
 - `/bounce` — Trigger an immediate inactivity check in the current group.
+- `/search <email>` — Search for group members by email (case-insensitive substring match).
 - `/relays` — Find group members using regular mail providers.
 - `/top` — Show the 10 most active members in the last 24 hours.
 - `/contact<ID>` — Get a contact object for the given ID (e.g., `/contact123`).
