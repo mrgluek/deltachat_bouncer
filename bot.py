@@ -561,6 +561,12 @@ def search_command(bot, accid, event):
         _send(bot, accid, msg.chat_id, "ℹ️ Search is only available in group chats.")
         return
 
+    self_addr = ""
+    try:
+        self_addr = (bot.rpc.get_config(accid, "configured_addr") or bot.rpc.get_config(accid, "addr") or "").lower().strip()
+    except Exception:
+        pass
+
     # 2. Check cooldown (admins are exempt)
     is_admin = _is_dc_admin(bot, accid, msg.from_id)
     now = time.time()
@@ -628,7 +634,9 @@ def search_command(bot, accid, event):
                 if enc_info:
                     emails = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', enc_info)
                     for e in emails:
-                        all_addresses.add(e.lower().strip())
+                        addr_lower = e.lower().strip()
+                        if addr_lower != self_addr and addr_lower != "deltachat@system.local":
+                            all_addresses.add(addr_lower)
             except Exception:
                 pass
 
