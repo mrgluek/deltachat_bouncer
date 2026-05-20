@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [1.6.2] - 2026-05-20
 
+### Added
+
+- Upgraded `/search` command to natively support searching by domains and partial strings (e.g. `/search @testrun.org @chatmail.uk`), and configured the reply-based parser to automatically extract `@domain` handles from quoted messages.
+
 ### Changed
 
 - Configured automatic deletion of old messages (`delete_device_after` set to 36 hours / 129600 seconds) to prevent the main SQLite database (`dc.db`) from bloating while buffering /top 24h stats.

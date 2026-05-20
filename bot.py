@@ -577,8 +577,8 @@ def search_command(bot, accid, event):
         quoted_text = msg.quote.get("text", "")
         if quoted_text:
             has_reply = True
-            # Extract email addresses from the quoted text
-            found_emails = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', quoted_text)
+            # Extract email addresses and domain-like patterns (e.g. @domain.com or full emails) from the quoted text
+            found_emails = re.findall(r'(?:[a-zA-Z0-9_.+-]+)?@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', quoted_text)
             for email in found_emails:
                 email_lower = email.lower().strip()
                 if email_lower not in queries:
@@ -588,9 +588,9 @@ def search_command(bot, accid, event):
 
     if not queries:
         if has_reply:
-            _send(bot, accid, msg.chat_id, "ℹ️ No email addresses found in the quoted message to search for.")
+            _send(bot, accid, msg.chat_id, "ℹ️ No email addresses or domains found in the quoted message to search for.")
         else:
-            _send(bot, accid, msg.chat_id, "Usage: /search <email1> <email2> ... or reply to a message containing email addresses.")
+            _send(bot, accid, msg.chat_id, "Usage: /search <query1> <query2> ... (supports domains and partial matches, e.g. /search @testrun.org) or reply to a message containing email addresses or domains.")
         return
 
     # Update cooldown timestamp
@@ -677,7 +677,7 @@ def help_command(bot, accid, event):
         f"I monitor groups and report inactive users (no activity for {INACTIVITY_DAYS_THRESHOLD} days).\n\n"
         f"**Commands:**\n"
         f"/bounce — Trigger an inactivity check in the current group.\n"
-        f"/search [email1] ... — Search for members by email (or reply to a message containing emails).\n"
+        f"/search [query1] ... — Search members by email/domain (e.g. @testrun.org) or reply to a message.\n"
         f"/relays — Find group members using regular mail providers.\n"
         f"/top    — Show top 10 posters in the last 24 hours.\n"
         f"/contact<ID> — Get a contact object for the given ID.\n"
