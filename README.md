@@ -75,6 +75,21 @@ Although we recommend using `/addtransport` in chat, you can also add a backup r
 2. Add relay: `docker compose run --rm bot python bot.py init transport backup-email@example.com password`
 3. Start the bot: `docker compose up -d`
 
+## Storage Optimization & Cleanup
+
+To keep server disk usage to an absolute minimum, the bot is configured to:
+1. **Disable Auto-Downloads:** Disables downloading any attachments/media files automatically (`download_limit` is set to `1` byte). The bot only processes message text.
+2. **Auto-Delete Old Messages:** Automatically deletes messages older than 36 hours (`delete_device_after` set to `36 hours` / 1.5 days) to prevent the main SQLite database (`dc.db`) from growing while preserving a buffer for `/top` 24-hour activity stats.
+
+### Safe Disk Space Cleanup
+
+If the bot's data directory has already grown due to old media attachments, you can safely delete all cached media files (blobs) on your host system without breaking the SQLite database:
+
+```bash
+# Clean up existing downloaded attachments/blobs
+rm -rf /home/tgbridge/deltachat_bouncer/data/bouncer/accounts/*/dc.db-blobs/*
+```
+
 ## Support & Development
 
 If you find this bot useful, consider supporting its development:
