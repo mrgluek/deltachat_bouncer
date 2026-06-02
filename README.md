@@ -5,6 +5,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 ## Features
 
 - ⚠️ **Inactivity Reports (`/bounce`):** Trigger a manual scan for inactive group members. Reports total members, active count, and a list of inactive users.
+- 🔗 **Invite Link (`/invite`):** Generate a SecureJoin invite link and QR code image for the current group chat. Available to all users with a 10-minute cooldown (admins are exempt).
 - 🔍 **Member Search (`/search [email1] ...`):** Find group members by one or more email terms (case-insensitive substring matching) or by replying to a message containing email addresses. Searches across all active transports (both primary and secondary addresses) and displays all configured addresses for matching contacts.
 - 📬 **Relay Check (`/relays`):** Scan for group members using regular mail providers (Yandex, Mail.ru, etc.).
 - 🏆 **Activity Ranking (`/top`):** Show the 10 most active members in the last 24 hours.
@@ -48,6 +49,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/search [email1] ...` — Search for group members by one or more emails (case-insensitive substring match) or by replying to a message containing email addresses. Searches across all active transports/secondary addresses.
 - `/relays` — Find group members using regular mail providers.
 - `/top` — Show the 10 most active members in the last 24 hours.
+- `/invite` — Generate an invite link and QR code for this group.
 - `/contact<ID>` — Get a contact object for the given ID (e.g., `/contact123`).
 - `/help` — Show available commands and bot information (Threshold: 14 days).
 - `/donate` — Support project development ❤️

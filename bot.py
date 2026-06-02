@@ -699,6 +699,7 @@ def help_command(bot, accid, event):
         f"/search [query1] ... — Search members by email/domain (e.g. @testrun.org) or reply to a message.\n"
         f"/relays — Find group members using regular mail providers.\n"
         f"/top    — Show top 10 posters in the last 24 hours.\n"
+        f"/invite — Generate an invite link/QR code for this group.\n"
         f"/contact<ID> — Get a contact object for the given ID.\n"
         f"/help   — This message.\n\n"
         f"/donate — Support development ❤️\n\n"
@@ -732,6 +733,95 @@ def donate_command(bot, accid, event):
           "☕️ Ko-fi: https://ko-fi.com/gluek (🌍 world cards, paypal)\n"
           "🚀 Tribute: https://web.tribute.tg/d/IWb (🇷🇺 russian cards, SBP)\n\n"
           "Thank you! 🙏")
+
+@dc_cli.on(events.NewMessage(command="/invite"))
+def invite_command(bot, accid, event):
+    msg = event.msg
+    
+    # 1. Check if this is a group chat
+    try:
+        chat = bot.rpc.get_basic_chat_info(accid, msg.chat_id)
+        chat_type = chat.get('chat_type', 'Single') if isinstance(chat, dict) else getattr(chat, 'chat_type', 'Single')
+    except Exception as e:
+        logger.error(f"Failed to get chat info for {msg.chat_id}: {e}")
+        return
+
+    if str(chat_type) not in {"Group", "Mailinglist", "OutBroadcast", "InBroadcast"}:
+        _send(bot, accid, msg.chat_id, "❌ Invite links can only be generated for group chats.")
+        return
+
+    # 2. Check cooldown (admins are exempt)
+    is_admin = _is_dc_admin(bot, accid, msg.from_id)
+    now = time.time()
+    
+    if not is_admin:
+        last_check = _chat_anti_spam.get(msg.chat_id, 0)
+        diff = now - last_check
+        if diff < BOUNCE_COOLDOWN_SECONDS:
+            remaining_sec = max(1, int(BOUNCE_COOLDOWN_SECONDS - diff))
+            _send(bot, accid, msg.chat_id, f"⌛️ Please wait {remaining_sec}s before running another check.")
+            return
+
+    # Update cooldown timestamp
+    _chat_anti_spam[msg.chat_id] = now
+
+    try:
+        # Generate securejoin QR link
+        qrdata = bot.rpc.get_chat_securejoin_qr_code(accid, msg.chat_id)
+        
+        # Clean/Format the invite link
+        invite_link = qrdata
+        if qrdata.startswith("OPEN-CHAT:"):
+            invite_link = "https://i.delta.chat/#" + qrdata[10:]
+        elif qrdata.startswith("OPEN:"):
+            invite_link = "https://i.delta.chat/#" + qrdata[5:]
+        elif qrdata.startswith("dcqr://"):
+            invite_link = "https://i.delta.chat/#" + qrdata[7:]
+
+        chat_name = chat.get('name') if isinstance(chat, dict) else getattr(chat, 'name', 'Group')
+        
+        invite_text = (
+            f"👥 **Invite to group: {chat_name}**\n\n"
+            f"Scan the QR code or click the link below to join:\n"
+            f"{invite_link}"
+        )
+        
+        # Try to generate QR code image
+        temp_path = None
+        try:
+            qr = qrcode.QRCode(version=1, box_size=10, border=4)
+            qr.add_data(qrdata)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+            
+            # Create a temporary file
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+                img.save(f, format="PNG")
+                temp_path = f.name
+            
+            # Send file + text
+            bot.rpc.send_msg(accid, msg.chat_id, MsgData(file=temp_path, text=invite_text))
+            
+            # Track success
+            try:
+                addr = bot.rpc.get_config(accid, "configured_addr") or bot.rpc.get_config(accid, "addr") or "unknown"
+                if addr != "unknown":
+                    database.increment_transport_sent(addr)
+            except Exception:
+                pass
+        except Exception as qr_err:
+            logger.warning(f"Could not generate QR image, falling back to text message: {qr_err}")
+            _send(bot, accid, msg.chat_id, invite_text)
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except Exception as e:
+                    logger.warning(f"Failed to delete temp QR image file {temp_path}: {e}")
+                    
+    except Exception as e:
+        logger.error(f"Failed to generate invite: {e}")
+        _send(bot, accid, msg.chat_id, f"❌ Failed to generate invite link: {e}")
 
 @dc_cli.on(events.NewMessage(command="/transports"))
 def transports_command(bot, accid, event):

@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.3] - 2026-06-02
+
+### Added
+
+- Added `/invite` command to generate and send a SecureJoin invite link and PNG QR code image for the current group chat. Available to all users with a 10-minute cooldown (admins are exempt).
+
 ## [1.6.2] - 2026-05-20
 
 ### Added
