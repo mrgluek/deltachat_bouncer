@@ -7,7 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - Added `pillow` to `requirements.txt` to resolve `No module named 'PIL'` error and enable QR code image generation for `/invite`.
-- Implemented `_can_reply` check across all user-interactive command handlers to ignore messages in chats where the bot is not a member or is blocked.
+- Implemented robust in-flight exception handling in `_send` to intercept "not a member of the chat" errors immediately, avoiding retry loops and transport rotations without breaking commands in active chats (reverted unstable `can_send` checks).
 - Fixed attempt counting logic in `_send` failure logging to correctly report actual attempts.
 
 ## [1.6.3] - 2026-06-02
