@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.4] - 2026-06-03
+
+### Fixed
+
+- Added `pillow` to `requirements.txt` to resolve `No module named 'PIL'` error and enable QR code image generation for `/invite`.
+- Implemented `_can_reply` check across all user-interactive command handlers to ignore messages in chats where the bot is not a member or is blocked.
+- Fixed attempt counting logic in `_send` failure logging to correctly report actual attempts.
+
 ## [1.6.3] - 2026-06-02
 
 ### Added

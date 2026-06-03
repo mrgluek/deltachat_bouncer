@@ -39,6 +39,16 @@ REGULAR_MAIL_DOMAINS = {
     "rambler.ru"
 }
 
+# ── Chat helpers ──
+
+def _can_reply(bot, accid, chat_id) -> bool:
+    """Check if we can send messages to the given chat (blocked/not a member)."""
+    try:
+        return bot.rpc.can_send(accid, chat_id)
+    except Exception as e:
+        logger.warning(f"Error checking can_send for chat {chat_id}: {e}")
+        return False
+
 # ── Admin helpers ──
 
 def _get_contact_fingerprint(bot, accid, contact_id, contact=None):
@@ -149,6 +159,8 @@ def _is_dc_admin(bot, accid, contact_id):
     return False
 
 def _send(bot, accid, chat_id, text):
+    if not _can_reply(bot, accid, chat_id):
+        return
     msg_data = MsgData(text=text)
     
     # Try to determine how many attempts we should make based on number of transports
@@ -159,7 +171,9 @@ def _send(bot, accid, chat_id, text):
         transports = []
         max_attempts = 2
 
+    actual_attempts = 0
     for attempt in range(max_attempts):
+        actual_attempts = attempt + 1
         try:
             bot.rpc.send_msg(accid, chat_id, msg_data)
             
@@ -212,7 +226,7 @@ def _send(bot, accid, chat_id, text):
                 # If it's not a transport error or we're out of attempts, just stop
                 break
 
-    logger.error(f"Final failure sending msg to chat {chat_id} after {max_attempts} attempts.")
+    logger.error(f"Final failure sending msg to chat {chat_id} after {actual_attempts} attempts.")
 
 def _get_top_posters(bot, accid, chat_id, limit=10, hours=24):
     """Return top posters in the given chat for the last N hours."""
@@ -499,6 +513,8 @@ def initadmin_command(bot, accid, event):
 @dc_cli.on(events.NewMessage(command="/bounce"))
 def bounce_command(bot, accid, event):
     msg = event.msg
+    if not _can_reply(bot, accid, msg.chat_id):
+        return
     
     # Allow everyone to use /bounce, but with a cooldown (admins are exempt)
     is_admin = _is_dc_admin(bot, accid, msg.from_id)
@@ -528,6 +544,8 @@ def bounce_command(bot, accid, event):
 @dc_cli.on(events.NewMessage(command="/top"))
 def top_command(bot, accid, event):
     msg = event.msg
+    if not _can_reply(bot, accid, msg.chat_id):
+        return
     # 10-minute cooldown similar to other commands
     last_check = _chat_anti_spam.get(msg.chat_id, 0) # Reuse bounce cooldown for simplicity
     now = time.time()
@@ -549,6 +567,8 @@ def top_command(bot, accid, event):
 @dc_cli.on(events.NewMessage(command="/search"))
 def search_command(bot, accid, event):
     msg = event.msg
+    if not _can_reply(bot, accid, msg.chat_id):
+        return
     
     # 1. Check if this is a group chat
     try:
@@ -737,6 +757,8 @@ def donate_command(bot, accid, event):
 @dc_cli.on(events.NewMessage(command="/invite"))
 def invite_command(bot, accid, event):
     msg = event.msg
+    if not _can_reply(bot, accid, msg.chat_id):
+        return
     
     # 1. Check if this is a group chat
     try:
@@ -984,6 +1006,8 @@ def rmtransport_command(bot, accid, event):
 def relays_command(bot, accid, event):
     """Check group members for regular mail providers, including secondary transports."""
     msg = event.msg
+    if not _can_reply(bot, accid, msg.chat_id):
+        return
     
     # Allow everyone to use /relays, but with a cooldown (admins are exempt)
     is_admin = _is_dc_admin(bot, accid, msg.from_id)
@@ -1077,6 +1101,8 @@ def relays_command(bot, accid, event):
 def handle_all_messages(bot, accid, event):
     """Handle dynamic commands like /contact123"""
     msg = event.msg
+    if not _can_reply(bot, accid, msg.chat_id):
+        return
     
     # Track receiving stats
     try:
