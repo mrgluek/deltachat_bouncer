@@ -555,16 +555,22 @@ def top_command(bot, accid, event):
 def search_command(bot, accid, event):
     msg = event.msg
     
-    # 1. Check if this is a group chat
+    # 1. Check if this is a global search (admin in private chat) or a local group search
     try:
-        contacts = bot.rpc.get_chat_contacts(accid, msg.chat_id)
+        chat = bot.rpc.get_basic_chat_info(accid, msg.chat_id)
+        chat_type = chat.get('chat_type', 'Single') if isinstance(chat, dict) else getattr(chat, 'chat_type', 'Single')
     except Exception as e:
-        logger.error(f"Failed to get chat contacts for {msg.chat_id}: {e}")
-        return
+        logger.error(f"Failed to get chat info for {msg.chat_id}: {e}")
+        chat_type = 'Single'
 
-    if len(contacts) <= 2:
-        _send(bot, accid, msg.chat_id, "ℹ️ Search is only available in group chats.")
-        return
+    is_admin = _is_dc_admin(bot, accid, msg.from_id)
+    
+    global_search = False
+    if str(chat_type) not in {"Group", "Mailinglist", "OutBroadcast", "InBroadcast"}:
+        if not is_admin:
+            _send(bot, accid, msg.chat_id, "ℹ️ Global search is only available for the bot administrator.")
+            return
+        global_search = True
 
     self_addr = ""
     try:
@@ -572,11 +578,9 @@ def search_command(bot, accid, event):
     except Exception:
         pass
 
-    # 2. Check cooldown (admins are exempt)
-    is_admin = _is_dc_admin(bot, accid, msg.from_id)
+    # 2. Check cooldown (admins/global searches are exempt)
     now = time.time()
-    
-    if not is_admin:
+    if not global_search and not is_admin:
         last_search = _chat_search_anti_spam.get(msg.chat_id, 0)
         diff = now - last_search
         if diff < SEARCH_COOLDOWN_SECONDS:
@@ -615,80 +619,143 @@ def search_command(bot, accid, event):
             _send(bot, accid, msg.chat_id, "Usage: /search <query1> <query2> ... (supports domains and partial matches, e.g. /search @testrun.org) or reply to a message containing email addresses or domains.")
         return
 
-    # Update cooldown timestamp
-    _chat_search_anti_spam[msg.chat_id] = now
+    # Update cooldown timestamp for local searches
+    if not global_search:
+        _chat_search_anti_spam[msg.chat_id] = now
 
-    found_users = []
-    for contact_id in contacts:
-        if contact_id == DC_CONTACT_ID_SELF:
-            continue
+    # Gather list of chats to search in
+    group_chats = []
+    GROUP_TYPES = {"Group", "Mailinglist", "OutBroadcast", "InBroadcast"}
+    
+    if global_search:
         try:
-            contact = bot.rpc.get_contact(accid, contact_id)
-            if contact.address and contact.address.lower() == "deltachat@system.local":
-                continue # Ignore system contact
-
-            # Get name and primary address
-            name = contact.name or contact.display_name or "Unknown"
-            primary_addr = contact.address or ""
-            
-            # Get all addresses associated with this contact from various sources
-            all_addresses = {primary_addr.lower().strip()} if primary_addr else set()
-            try:
-                # Encryption info typically lists all associated addresses (transports)
-                enc_info = bot.rpc.get_contact_encryption_info(accid, contact_id)
-                if enc_info:
-                    emails = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', enc_info)
-                    for e in emails:
-                        addr_lower = e.lower().strip()
-                        if addr_lower != self_addr and addr_lower != "deltachat@system.local":
-                            all_addresses.add(addr_lower)
-            except Exception:
-                pass
-
-            # Substring match (case-insensitive) for any query in any of the addresses
-            matched = False
-            for query in queries:
-                for addr in all_addresses:
-                    if query in addr:
-                        matched = True
-                        break
-                if matched:
-                    break
-            
-            if matched:
-                # Determine last_seen status
-                if isinstance(contact, dict):
-                    last_seen = contact.get("last_seen", 0)
-                else:
-                    last_seen = getattr(contact, "last_seen", 0)
-
-                if last_seen == 0:
-                    status = "never seen"
-                else:
-                    date_str = datetime.fromtimestamp(last_seen).strftime("%-d %b %Y")
-                    days_ago = int((now - last_seen) / (24 * 3600))
-                    status = f"last seen {date_str}, {days_ago}d ago"
-
-                # Format the list of addresses (primary first)
-                display_addrs = [primary_addr] if primary_addr else []
-                for addr in sorted(all_addresses):
-                    if primary_addr and addr != primary_addr.lower().strip() and addr not in display_addrs:
-                        display_addrs.append(addr)
-                    elif not primary_addr and addr not in display_addrs:
-                        display_addrs.append(addr)
-                addrs_str = ", ".join(display_addrs)
-
-                found_users.append(f"• /contact{contact_id} **{name}** ({addrs_str}) [{status}]")
+            all_chats = bot.rpc.get_chatlist_entries(accid, None, None, None)
         except Exception as e:
-            logger.error(f"Error checking contact {contact_id} in search: {e}")
+            logger.error(f"Failed to get chatlist entries: {e}")
+            all_chats = []
+            
+        for chat_id in all_chats:
+            if not isinstance(chat_id, int):
+                continue
+            try:
+                c_info = bot.rpc.get_basic_chat_info(accid, chat_id)
+                c_type = c_info.get('chat_type', 'Single') if isinstance(c_info, dict) else getattr(c_info, 'chat_type', 'Single')
+                if str(c_type) in GROUP_TYPES:
+                    chat_name = c_info.get('name') if isinstance(c_info, dict) else getattr(c_info, 'name', f"Group {chat_id}")
+                    group_chats.append((chat_id, chat_name or f"Group {chat_id}"))
+            except Exception as e:
+                logger.error(f"Failed to get basic chat info for chat {chat_id} in global search: {e}")
+    else:
+        # Local group search
+        try:
+            c_info = bot.rpc.get_basic_chat_info(accid, msg.chat_id)
+            chat_name = c_info.get('name') if isinstance(c_info, dict) else getattr(c_info, 'name', f"Group {msg.chat_id}")
+            group_chats.append((msg.chat_id, chat_name or f"Group {msg.chat_id}"))
+        except Exception as e:
+            logger.error(f"Failed to get basic chat info for local chat {msg.chat_id}: {e}")
+            group_chats.append((msg.chat_id, f"Group {msg.chat_id}"))
+
+    found_users_map = {}
+    
+    for chat_id, chat_name in group_chats:
+        try:
+            contacts = bot.rpc.get_chat_contacts(accid, chat_id)
+        except Exception as e:
+            logger.error(f"Failed to get chat contacts for chat {chat_id}: {e}")
+            continue
+
+        for contact_id in contacts:
+            if contact_id == DC_CONTACT_ID_SELF:
+                continue
+            
+            # If already processed, we just record the group name
+            if contact_id in found_users_map:
+                if chat_name not in found_users_map[contact_id]["groups"]:
+                    found_users_map[contact_id]["groups"].append(chat_name)
+                continue
+
+            try:
+                contact = bot.rpc.get_contact(accid, contact_id)
+                if contact.address and contact.address.lower() == "deltachat@system.local":
+                    continue # Ignore system contact
+
+                # Get name and primary address
+                name = contact.name or contact.display_name or "Unknown"
+                primary_addr = contact.address or ""
+                
+                # Get all addresses associated with this contact from various sources
+                all_addresses = {primary_addr.lower().strip()} if primary_addr else set()
+                try:
+                    enc_info = bot.rpc.get_contact_encryption_info(accid, contact_id)
+                    if enc_info:
+                        emails = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', enc_info)
+                        for e in emails:
+                            addr_lower = e.lower().strip()
+                            if addr_lower != self_addr and addr_lower != "deltachat@system.local":
+                                all_addresses.add(addr_lower)
+                except Exception:
+                    pass
+
+                # Substring match (case-insensitive) for any query in any of the addresses
+                matched = False
+                for query in queries:
+                    for addr in all_addresses:
+                        if query in addr:
+                            matched = True
+                            break
+                    if matched:
+                        break
+                
+                if matched:
+                    if isinstance(contact, dict):
+                        last_seen = contact.get("last_seen", 0)
+                    else:
+                        last_seen = getattr(contact, "last_seen", 0)
+
+                    if last_seen == 0:
+                        status = "never seen"
+                    else:
+                        date_str = datetime.fromtimestamp(last_seen).strftime("%-d %b %Y")
+                        days_ago = int((now - last_seen) / (24 * 3600))
+                        status = f"last seen {date_str}, {days_ago}d ago"
+
+                    # Format the list of addresses (primary first)
+                    display_addrs = [primary_addr] if primary_addr else []
+                    for addr in sorted(all_addresses):
+                        if primary_addr and addr != primary_addr.lower().strip() and addr not in display_addrs:
+                            display_addrs.append(addr)
+                        elif not primary_addr and addr not in display_addrs:
+                            display_addrs.append(addr)
+                    addrs_str = ", ".join(display_addrs)
+
+                    found_users_map[contact_id] = {
+                        "name": name,
+                        "addrs_str": addrs_str,
+                        "status": status,
+                        "groups": [chat_name]
+                    }
+            except Exception as e:
+                logger.error(f"Error checking contact {contact_id} in search: {e}")
 
     queries_str = ", ".join(f"'{q}'" for q in queries)
-    if found_users:
-        reply = f"🔍 **Search Results for {queries_str} ({len(found_users)}):**\n\n"
-        reply += "\n".join(found_users)
+    
+    if found_users_map:
+        if global_search:
+            reply = f"🔍 **Global Search Results for {queries_str} ({len(found_users_map)}):**\n\n"
+            for contact_id, info in found_users_map.items():
+                groups_str = ", ".join(info["groups"])
+                reply += f"• /contact{contact_id} **{info['name']}** ({info['addrs_str']}) [{info['status']}]\n  ↳ Groups: {groups_str}\n"
+        else:
+            reply = f"🔍 **Search Results for {queries_str} ({len(found_users_map)}):**\n\n"
+            for contact_id, info in found_users_map.items():
+                reply += f"• /contact{contact_id} **{info['name']}** ({info['addrs_str']}) [{info['status']}]\n"
+        
         _send(bot, accid, msg.chat_id, reply)
     else:
-        _send(bot, accid, msg.chat_id, f"🔍 No members matching {queries_str} found in this group.")
+        if global_search:
+            _send(bot, accid, msg.chat_id, f"🔍 No members matching {queries_str} found in any group chats.")
+        else:
+            _send(bot, accid, msg.chat_id, f"🔍 No members matching {queries_str} found in this group.")
 
 @dc_cli.on(events.NewMessage(command="/help"))
 def help_command(bot, accid, event):
@@ -1109,7 +1176,7 @@ def handle_all_messages(bot, accid, event):
                         except (ValueError, TypeError):
                             continue
                     
-                    if contact_id in chat_contact_ids:
+                    if contact_id in chat_contact_ids or _is_dc_admin(bot, accid, msg.from_id):
                         logger.info(f"DEBUG: Sharing contact {contact_id} in chat {msg.chat_id}")
                         temp_path = None
                         try:

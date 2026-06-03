@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.5] - 2026-06-03
+
+### Added
+
+- Added global `/search` feature for the bot administrator. Sending `/search <query>` to the bot in a private message now searches for matching users across all group chats where the bot is connected, grouping results and displaying which chats each contact belongs to.
+- Enabled `/contact<ID>` command in private messages for the bot administrator, allowing the admin to retrieve contact vCards for users found via global search.
+
 ## [1.6.4] - 2026-06-03
 
 ### Fixed
