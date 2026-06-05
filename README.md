@@ -58,6 +58,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/addtransport` — Add a backup mail relay (Admin only).
 - `/rmtransport <addr>` — Remove a mail relay (Admin only).
 - `/setprimary <addr>` — Switch the primary mail relay (Admin only).
+- `/resilient` — Toggle resilient sending mode across all relays (Admin only).
 
 ## Admin Management
 

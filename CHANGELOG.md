@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Resilient Sending Mode:** Added `/resilient` admin command to toggle resilient mode. When enabled, each outgoing message is sent through all configured mail relays sequentially to bypass chatmail blocking issues.
+
 ## [1.6.5] - 2026-06-03
 
 ### Added
