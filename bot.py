@@ -1497,13 +1497,14 @@ def welcome_command(bot, accid, event):
               "/welcome on <additional text> — enable greeting with additional text\n"
               "/welcome off — disable greeting")
 
-@dc_cli.on(events.NewMessage(is_info=True, is_bot=None))
+@dc_cli.on(events.NewMessage(is_info=True, is_bot=None, is_outgoing=None))
 def handle_dc_info_message(bot, accid, event):
     msg = event.msg
     dc_chat_id = msg.chat_id
     
     smt = msg.system_message_type
     smt_str = str(smt).lower() if smt is not None else ""
+    msg_text = (msg.text or "").lower()
     
     is_member_event = False
     is_join_event = False
@@ -1517,8 +1518,8 @@ def handle_dc_info_message(bot, accid, event):
         pass
         
     if not is_member_event:
-        is_member_event = any(kw in smt_str for kw in ("memberadded", "memberremoved", "member_added", "member_removed", "left"))
-        is_join_event = any(kw in smt_str for kw in ("memberadded", "member_added", "joined"))
+        is_member_event = any(kw in smt_str or kw in msg_text for kw in ("memberadded", "memberremoved", "member_added", "member_removed", "left", "added", "removed"))
+        is_join_event = any(kw in smt_str or kw in msg_text for kw in ("memberadded", "member_added", "joined", "added"))
         
     if is_member_event:
         catalog_chat = database.get_catalog_chat_by_chat_id(dc_chat_id)
@@ -1532,6 +1533,17 @@ def handle_dc_info_message(bot, accid, event):
                 # Check if it was a join event and welcome is enabled
                 if is_join_event and catalog_chat.get('welcome_enabled'):
                     new_member_id = getattr(msg, 'info_contact_id', None)
+                    if not new_member_id and msg.text:
+                        try:
+                            from deltachat2._utils import parse_system_add_remove
+                            parsed = parse_system_add_remove(msg.text)
+                            if parsed and parsed[0] == "added":
+                                affected_email = parsed[1]
+                                if affected_email:
+                                    new_member_id = bot.rpc.lookup_contact_id_by_address(accid, affected_email)
+                        except Exception as parse_err:
+                            logger.error(f"Failed to parse join event text: {parse_err}")
+                            
                     if new_member_id and new_member_id != 1:
                         contact = bot.rpc.get_contact(accid, new_member_id)
                         member_name = contact.name or contact.display_name or contact.address or "New member"
