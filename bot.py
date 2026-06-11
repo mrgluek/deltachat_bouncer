@@ -1531,15 +1531,16 @@ def dchanneladd_command(bot, accid, event):
     try:
         qr_info = bot.rpc.check_qr(accid, url)
         kind = qr_info.get("kind", "")
+        kind_lower = kind.lower()
         allowed_kinds = (
-            "AskVerifyGroup", "AskJoinBroadcast", "WithdrawVerifyGroup", "WithdrawJoinBroadcast", "ReviveVerifyGroup", "ReviveJoinBroadcast",
-            "AskVerifyContact", "WithdrawVerifyContact", "ReviveVerifyContact"
+            "askverifygroup", "askjoinbroadcast", "withdrawverifygroup", "withdrawjoinbroadcast", "reviveverifygroup", "revivejoinbroadcast",
+            "askverifycontact", "withdrawverifycontact", "reviveverifycontact"
         )
-        if kind not in allowed_kinds:
+        if kind_lower not in allowed_kinds:
             _send(bot, accid, msg.chat_id, "❌ Invalid invite link. Please provide a valid Delta Chat group/channel join link.")
             return
             
-        if "Contact" in kind or "Broadcast" in kind:
+        if "contact" in kind_lower or "broadcast" in kind_lower:
             chat_name = qr_info.get("name")
         else:
             chat_name = qr_info.get("grpname")
