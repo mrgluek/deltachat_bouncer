@@ -1618,14 +1618,14 @@ def handle_all_messages(bot, accid, event):
                     if message_payload:
                         req_msg = (
                             f"**{requester_name}** (💬 {user_chat_count}) wants to join this chat with following message: {message_payload}\n"
-                            f"To approve: reply with `/approve{request_id}`\n"
-                            f"To decline: reply with `/decline{request_id}` (optional comment after command)"
+                            f"To approve: reply with /approve{request_id}\n"
+                            f"To decline: reply with /decline{request_id} (optional comment after command)"
                         )
                     else:
                         req_msg = (
                             f"**{requester_name}** (💬 {user_chat_count}) wants to join this chat.\n"
-                            f"To approve: reply with `/approve{request_id}`\n"
-                            f"To decline: reply with `/decline{request_id}` (optional comment after command)"
+                            f"To approve: reply with /approve{request_id}\n"
+                            f"To decline: reply with /decline{request_id} (optional comment after command)"
                         )
                     
                     _send(bot, accid, chat_id, req_msg)
