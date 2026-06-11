@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.1] - 2026-06-11
+
+### Fixed
+- **Custom Welcome Messages:**
+  - Fixed welcome greetings for new members by adding a fallback name/display name search among group contacts when `info_contact_id` is not populated, and corrected the RPC lookup method to `lookup_contact_id_by_addr`.
+
 ## [2.0.0] - 2026-06-11
 
 ### Added

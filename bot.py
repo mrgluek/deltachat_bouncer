@@ -1537,17 +1537,35 @@ def handle_dc_info_message(bot, accid, event):
                 # Check if it was a join event and welcome is enabled
                 if is_join_event and catalog_chat.get('welcome_enabled'):
                     new_member_id = getattr(msg, 'info_contact_id', None)
+                    if not new_member_id:
+                        new_member_id = getattr(msg, 'infoContactId', None)
+                    if not new_member_id and isinstance(msg, dict):
+                        new_member_id = msg.get('info_contact_id') or msg.get('infoContactId')
+                    
+                    logger.info(f"Welcome greeting: checking join event. info_contact_id={new_member_id!r}")
+                    
                     if not new_member_id and msg.text:
                         try:
                             from deltachat2._utils import parse_system_add_remove
                             parsed = parse_system_add_remove(msg.text)
+                            logger.info(f"Welcome greeting: parsed system text={msg.text!r} -> {parsed!r}")
                             if parsed and parsed[0] == "added":
-                                affected_email = parsed[1]
-                                if affected_email:
-                                    new_member_id = bot.rpc.lookup_contact_id_by_address(accid, affected_email)
+                                affected = parsed[1]
+                                if affected:
+                                    # Try to lookup contact by address
+                                    try:
+                                        new_member_id = bot.rpc.lookup_contact_id_by_addr(accid, affected)
+                                    except Exception as lookup_err:
+                                        logger.info(f"Failed address lookup for {affected}: {lookup_err}")
+                                        new_member_id = None
+                                        
+                                    if not new_member_id:
+                                        logger.info(f"Welcome greeting: looking up display name/name {affected!r} in chat {dc_chat_id}")
+                                        new_member_id = find_contact_in_chat(bot, accid, dc_chat_id, affected)
                         except Exception as parse_err:
                             logger.error(f"Failed to parse join event text: {parse_err}")
                             
+                    logger.info(f"Welcome greeting: resolved new_member_id={new_member_id!r}")
                     if new_member_id and new_member_id != 1:
                         contact = bot.rpc.get_contact(accid, new_member_id)
                         member_name = contact.name or contact.display_name or contact.address or "New member"
@@ -1572,6 +1590,42 @@ def handle_dc_info_message(bot, accid, event):
                     database.update_catalog_chat_invite_link(dc_chat_id, None)
             except Exception as e:
                 logger.error(f"Failed to update catalog chat member count: {e}")
+
+def find_contact_in_chat(bot, accid, chat_id, name_or_address):
+    if not name_or_address:
+        return None
+    name_or_address_lower = name_or_address.strip().lower()
+    
+    # Try looking up by address directly first
+    try:
+        cid = bot.rpc.lookup_contact_id_by_addr(accid, name_or_address)
+        if cid and cid != 1:
+            return cid
+    except Exception:
+        pass
+        
+    # Search chat contacts by comparing attributes
+    try:
+        contacts = bot.rpc.get_chat_contacts(accid, chat_id)
+        for contact_id in contacts:
+            if contact_id == 1:
+                continue
+            try:
+                contact = bot.rpc.get_contact(accid, contact_id)
+                c_name = getattr(contact, 'name', None) or ""
+                c_disp = getattr(contact, 'display_name', None) or ""
+                c_addr = getattr(contact, 'address', None) or ""
+                
+                if (c_name.strip().lower() == name_or_address_lower or 
+                    c_disp.strip().lower() == name_or_address_lower or 
+                    c_addr.strip().lower() == name_or_address_lower):
+                    return contact_id
+            except Exception:
+                continue
+    except Exception as e:
+        logger.error(f"Error searching chat contacts for {name_or_address}: {e}")
+        
+    return None
 
 def get_user_chat_count(bot, accid, contact_id):
     monitored_chats = database.get_all_monitored_chats()
