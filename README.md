@@ -5,6 +5,9 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 ## Features
 
 - ⚠️ **Inactivity Reports (`/bounce`):** Trigger a manual scan for inactive group members. Reports total members, active count, and a list of inactive users.
+- 📖 **Group Chat Catalog (`/chats`):** Users can browse all group chats cataloged by the bot, complete with name, description, and real-time membership count.
+- 🔐 **Join Approval Workflows:** Supports public and private groups. Requests to join public groups immediately receive an invite link, while private groups (`🔐`) require approvals from existing members in the group via dynamic `/approve<ID>` commands.
+- 👋🏻 **Custom Welcome Messages (`/welcome`):** Configure customizable welcoming greetings for new members joining the group, with stats (total chats in common) and custom rules text.
 - 🔗 **Invite Link (`/invite`):** Generate a SecureJoin invite link and QR code image for the current group chat. Available to all users with a 10-minute cooldown (admins are exempt).
 - 🔍 **Member Search (`/search [email1] ...`):** Find group members by one or more email terms (case-insensitive substring matching) or by replying to a message containing email addresses. Searches across all active transports (both primary and secondary addresses) and displays all configured addresses for matching contacts.
 - 📬 **Relay Check (`/relays`):** Scan for group members using regular mail providers (Yandex, Mail.ru, etc.).
@@ -50,10 +53,17 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/relays` — Find group members using regular mail providers.
 - `/top` — Show the 10 most active members in the last 24 hours.
 - `/invite` — Generate an invite link and QR code for this group.
+- `/chats` — Show the catalog of registered group chats available to join.
+- `/chat<ID> [message]` — Request an invite link to the group (Private chat only).
+- `/approve<ID>` — Approve a pending join request for a private group (Group chat only).
 - `/contact<ID>` — Get a contact object for the given ID (e.g., `/contact123`).
 - `/help` — Show available commands and bot information (Threshold: 14 days).
 - `/donate` — Support project development ❤️
 - `/initadmin` — Claim administrative ownership (private chat only).
+- `/chatadd [description]` — Add the current group chat to the catalog (Admin only). Falls back to group description if not provided.
+- `/chatremove` — Remove the current group chat from the catalog (Admin only).
+- `/private <on/off>` — Toggle cataloged chat privacy status (Admin only).
+- `/welcome [on/off/on <text>]` — Configure welcome messages for new members (Admin only).
 - `/transports` — Show configured mail relays & stats (Admin only).
 - `/addtransport` — Add a backup mail relay (Admin only).
 - `/rmtransport <addr>` — Remove a mail relay (Admin only).

@@ -7,7 +7,7 @@ import threading
 import time
 from datetime import datetime
 
-from deltachat2 import events, MsgData
+from deltachat2 import events, MsgData, SystemMessageType
 from deltabot_cli import BotCli
 import qrcode
 import tempfile
@@ -890,7 +890,8 @@ def help_command(bot, accid, event):
         f"/top    — Show top 10 posters in the last 24 hours.\n"
         f"/invite — Generate an invite link/QR code for this group.\n"
         f"/contact<ID> — Get a contact object for the given ID.\n"
-        f"/help   — This message.\n\n"
+        f"/help   — This message.\n"
+        f"/chats  — Show catalog of available chats.\n\n"
         f"/donate — Support development ❤️\n\n"
         f"💡 _Commands have a 10-minute cooldown per group (except for admins)._\n\n"
         f"🤖 **Source:** Run your own bot: https://git.gluek.info/gluek/deltachat_bouncer"
@@ -910,7 +911,11 @@ def help_command(bot, accid, event):
         help_text += "/addtransport — Add a backup mail relay\n"
         help_text += "/rmtransport <addr> — Remove a mail relay\n"
         help_text += "/setprimary <addr> — Switch the primary mail relay\n"
-        help_text += "/resilient — Toggle resilient sending mode (all relays)"
+        help_text += "/resilient — Toggle resilient sending mode (all relays)\n"
+        help_text += "/chatadd [desc] — Add current chat to catalog\n"
+        help_text += "/chatremove — Remove current chat from catalog\n"
+        help_text += "/private <on/off> — Toggle privacy of current chat\n"
+        help_text += "/welcome [on/off/...] — Manage welcome message for new members"
         
     _send(bot, accid, msg.chat_id, help_text)
 
@@ -968,13 +973,28 @@ def invite_command(bot, accid, event):
         elif qrdata.startswith("dcqr://"):
             invite_link = "https://i.delta.chat/#" + qrdata[7:]
 
+        # Check if chat is private in our catalog
+        catalog_chat = database.get_catalog_chat_by_chat_id(msg.chat_id)
+        is_private = catalog_chat and catalog_chat['is_private']
+        
+        if is_private:
+            database.update_catalog_chat_invite_link(msg.chat_id, qrdata)
+
         chat_name = chat.get('name') if isinstance(chat, dict) else getattr(chat, 'name', 'Group')
         
-        invite_text = (
-            f"👥 **Invite to group: {chat_name}**\n\n"
-            f"Scan the QR code or click the link below to join:\n"
-            f"{invite_link}"
-        )
+        if is_private:
+            invite_text = (
+                f"👥 **Single-use invite link to group: {chat_name}**\n\n"
+                f"Scan the QR code or click the link below to join:\n"
+                f"{invite_link}\n\n"
+                f"⚠️ This invite link is single-use and will be invalidated after one connection."
+            )
+        else:
+            invite_text = (
+                f"👥 **Invite to group: {chat_name}**\n\n"
+                f"Scan the QR code or click the link below to join:\n"
+                f"{invite_link}"
+            )
         
         # Try to generate QR code image
         temp_path = None
@@ -1322,6 +1342,213 @@ def relays_command(bot, accid, event):
         logger.error(f"Error in /relays command: {e}")
         _send(bot, accid, msg.chat_id, f"❌ Failed to check members: {e}")
 
+@dc_cli.on(events.NewMessage(command="/chats"))
+def chats_command(bot, accid, event):
+    msg = event.msg
+    catalog_chats = database.get_all_catalog_chats()
+    if not catalog_chats:
+        _send(bot, accid, msg.chat_id, "ℹ️ The chat catalog is empty.")
+        return
+
+    lines = []
+    for ch in catalog_chats:
+        private_str = "🔐 " if ch['is_private'] else ""
+        desc = ch['description'] or ""
+        if len(desc) > 100:
+            desc = desc[:100] + "..."
+        desc_str = f" {desc}" if desc else ""
+        lines.append(f"/chat{ch['id']} {private_str}**{ch['name']}**{desc_str} 👥 {ch['member_count']}")
+
+    reply = "\n".join(lines)
+    _send(bot, accid, msg.chat_id, reply)
+
+@dc_cli.on(events.NewMessage(command="/chatadd"))
+def chatadd_command(bot, accid, event):
+    msg = event.msg
+    if not _is_dc_admin(bot, accid, msg.from_id):
+        _send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use this command.")
+        return
+
+    try:
+        chat = bot.rpc.get_basic_chat_info(accid, msg.chat_id)
+        chat_type = chat.get('chat_type', 'Single') if isinstance(chat, dict) else getattr(chat, 'chat_type', 'Single')
+    except Exception as e:
+        logger.error(f"Failed to get chat info: {e}")
+        return
+
+    GROUP_TYPES = {"Group", "Mailinglist", "OutBroadcast", "InBroadcast"}
+    if str(chat_type) not in GROUP_TYPES:
+        _send(bot, accid, msg.chat_id, "❌ Only group chats can be added to the catalog.")
+        return
+
+    description = event.payload.strip() if event.payload else ""
+    if not description:
+        try:
+            description = bot.rpc.get_chat_description(accid, msg.chat_id) or ""
+            description = description.strip()
+        except Exception as e:
+            logger.warning(f"Failed to get chat description from core: {e}")
+            description = ""
+
+    chat_name = chat.get('name') if isinstance(chat, dict) else getattr(chat, 'name', 'Group')
+
+    try:
+        contacts = bot.rpc.get_chat_contacts(accid, msg.chat_id)
+        member_count = sum(1 for c in contacts if c != 1)
+    except Exception:
+        member_count = 0
+
+    database.add_catalog_chat(msg.chat_id, chat_name, description, member_count)
+    _send(bot, accid, msg.chat_id, f"✅ Chat **{chat_name}** has been added to the catalog.")
+
+@dc_cli.on(events.NewMessage(command="/chatremove"))
+def chatremove_command(bot, accid, event):
+    msg = event.msg
+    if not _is_dc_admin(bot, accid, msg.from_id):
+        _send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use this command.")
+        return
+
+    database.remove_catalog_chat(msg.chat_id)
+    _send(bot, accid, msg.chat_id, "✅ Chat has been removed from the catalog.")
+
+@dc_cli.on(events.NewMessage(command="/private"))
+def private_command(bot, accid, event):
+    msg = event.msg
+    if not _is_dc_admin(bot, accid, msg.from_id):
+        _send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use this command.")
+        return
+
+    arg = event.payload.strip().lower() if event.payload else ""
+    if arg not in ("on", "off"):
+        _send(bot, accid, msg.chat_id, "Usage: /private on or /private off")
+        return
+
+    catalog_chat = database.get_catalog_chat_by_chat_id(msg.chat_id)
+    if not catalog_chat:
+        _send(bot, accid, msg.chat_id, "❌ Please add this chat to the catalog first using /chatadd.")
+        return
+
+    is_private = 1 if arg == "on" else 0
+    database.update_catalog_chat_privacy(msg.chat_id, is_private)
+
+    status_str = "private (by request)" if is_private else "public"
+    _send(bot, accid, msg.chat_id, f"✅ Chat is now {status_str}.")
+
+@dc_cli.on(events.NewMessage(command="/welcome"))
+def welcome_command(bot, accid, event):
+    msg = event.msg
+    if not _is_dc_admin(bot, accid, msg.from_id):
+        _send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use this command.")
+        return
+
+    catalog_chat = database.get_catalog_chat_by_chat_id(msg.chat_id)
+    if not catalog_chat:
+        _send(bot, accid, msg.chat_id, "❌ Please add this chat to the catalog first using /chatadd.")
+        return
+
+    payload = event.payload.strip() if event.payload else ""
+    if not payload:
+        status = "enabled" if catalog_chat.get('welcome_enabled') else "disabled"
+        add_text = catalog_chat.get('welcome_text') or ""
+        text_suffix = f"\nAdditional text: \"{add_text}\"" if add_text else ""
+        _send(bot, accid, msg.chat_id, f"ℹ️ Welcome greeting for new members is {status}.{text_suffix}")
+        return
+
+    payload_lower = payload.lower()
+    if payload_lower == "off":
+        database.update_catalog_chat_welcome(msg.chat_id, 0, None)
+        _send(bot, accid, msg.chat_id, "✅ Welcome greeting for new members has been disabled.")
+    elif payload_lower == "on" or payload_lower.startswith("on "):
+        welcome_text = None
+        if payload_lower.startswith("on "):
+            welcome_text = payload[3:].strip()
+            
+        database.update_catalog_chat_welcome(msg.chat_id, 1, welcome_text)
+        
+        preview_text = f" {welcome_text}" if welcome_text else ""
+        _send(bot, accid, msg.chat_id, 
+              f"✅ Welcome greeting for new members has been enabled!\n"
+              f"Example: 👋🏻 **Name** (💬 X), welcome to {catalog_chat['name']} group!{preview_text}")
+    else:
+        _send(bot, accid, msg.chat_id, 
+              "Usage:\n"
+              "/welcome — show current status\n"
+              "/welcome on — enable standard greeting\n"
+              "/welcome on <additional text> — enable greeting with additional text\n"
+              "/welcome off — disable greeting")
+
+@dc_cli.on(events.NewMessage(is_info=True))
+def handle_dc_info_message(bot, accid, event):
+    msg = event.msg
+    dc_chat_id = msg.chat_id
+    
+    smt = msg.system_message_type
+    smt_str = str(smt).lower() if smt is not None else ""
+    
+    is_member_event = False
+    is_join_event = False
+    try:
+        if smt == SystemMessageType.MEMBER_ADDED_TO_GROUP:
+            is_member_event = True
+            is_join_event = True
+        elif smt == SystemMessageType.MEMBER_REMOVED_FROM_GROUP:
+            is_member_event = True
+    except Exception:
+        pass
+        
+    if not is_member_event:
+        is_member_event = any(kw in smt_str for kw in ("memberadded", "memberremoved", "member_added", "member_removed", "left"))
+        is_join_event = any(kw in smt_str for kw in ("memberadded", "member_added", "joined"))
+        
+    if is_member_event:
+        catalog_chat = database.get_catalog_chat_by_chat_id(dc_chat_id)
+        if catalog_chat:
+            try:
+                contacts = bot.rpc.get_chat_contacts(accid, dc_chat_id)
+                member_count = sum(1 for c in contacts if c != 1)
+                database.update_catalog_chat_member_count(dc_chat_id, member_count)
+                logger.info(f"Updated member count for catalog chat {dc_chat_id} to {member_count}")
+                
+                # Check if it was a join event and welcome is enabled
+                if is_join_event and catalog_chat.get('welcome_enabled'):
+                    new_member_id = getattr(msg, 'info_contact_id', None)
+                    if new_member_id and new_member_id != 1:
+                        contact = bot.rpc.get_contact(accid, new_member_id)
+                        member_name = contact.name or contact.display_name or contact.address or "New member"
+                        user_chat_count = get_user_chat_count(bot, accid, new_member_id)
+                        
+                        chat_name = catalog_chat['name']
+                        welcome_suffix = f" {catalog_chat['welcome_text']}" if catalog_chat.get('welcome_text') else ""
+                        
+                        welcome_msg = f"👋🏻 **{member_name}** (💬 {user_chat_count}), welcome to {chat_name} group!{welcome_suffix}"
+                        _send(bot, accid, dc_chat_id, welcome_msg)
+                
+                # Check if chat is private and has an active invite link to revoke
+                if is_join_event and catalog_chat.get('is_private') and catalog_chat.get('invite_link'):
+                    invite_link = catalog_chat['invite_link']
+                    try:
+                        qr_info = bot.rpc.check_qr(accid, invite_link)
+                        if qr_info.get("kind") == "withdrawVerifyGroup":
+                            bot.rpc.set_config_from_qr(accid, invite_link)
+                            logger.info(f"Withdrew/invalidated invite link for private chat {dc_chat_id}")
+                    except Exception as qr_err:
+                        logger.error(f"Failed to withdraw invite link: {qr_err}")
+                    database.update_catalog_chat_invite_link(dc_chat_id, None)
+            except Exception as e:
+                logger.error(f"Failed to update catalog chat member count: {e}")
+
+def get_user_chat_count(bot, accid, contact_id):
+    monitored_chats = database.get_all_monitored_chats()
+    count = 0
+    for chat_id in monitored_chats:
+        try:
+            contacts = bot.rpc.get_chat_contacts(accid, chat_id)
+            if contact_id in contacts:
+                count += 1
+        except Exception:
+            continue
+    return count
+
 @dc_cli.on(events.NewMessage)
 def handle_all_messages(bot, accid, event):
     """Handle dynamic commands like /contact123"""
@@ -1336,7 +1563,128 @@ def handle_all_messages(bot, accid, event):
         pass
         
     text = (msg.text or "").strip()
-    if text.startswith("/contact"):
+    
+    # 1. Handle /chat<ID> command (but NOT /chats)
+    if text.startswith("/chat") and not (text == "/chats" or text.startswith("/chats ")):
+        m = re.match(r'^/chat(\d+)(?:\s+(.*))?$', text, re.IGNORECASE)
+        if m:
+            catalog_id = int(m.group(1))
+            message_payload = m.group(2).strip() if m.group(2) else ""
+            
+            # Lookup catalog chat
+            catalog_chat = database.get_catalog_chat_by_id(catalog_id)
+            if not catalog_chat:
+                _send(bot, accid, msg.chat_id, "❌ Chat with this number was not found in the catalog.")
+                return
+
+            chat_id = catalog_chat['chat_id']
+            
+            # Check if user is already in the chat
+            try:
+                contacts = bot.rpc.get_chat_contacts(accid, chat_id)
+                if msg.from_id in contacts:
+                    _send(bot, accid, msg.chat_id, "ℹ️ You are already a member of this chat.")
+                    return
+            except Exception as e:
+                logger.error(f"Failed to check contacts for join request: {e}")
+
+            if not catalog_chat['is_private']:
+                # Public chat: immediately generate invite link and send it
+                try:
+                    qrdata = bot.rpc.get_chat_securejoin_qr_code(accid, chat_id)
+                    invite_link = qrdata
+                    if qrdata.startswith("OPEN-CHAT:"):
+                        invite_link = "https://i.delta.chat/#" + qrdata[10:]
+                    elif qrdata.startswith("OPEN:"):
+                        invite_link = "https://i.delta.chat/#" + qrdata[5:]
+                    elif qrdata.startswith("dcqr://"):
+                        invite_link = "https://i.delta.chat/#" + qrdata[7:]
+                        
+                    _send(bot, accid, msg.chat_id, f"🔗 Invite link to chat **{catalog_chat['name']}**:\n{invite_link}")
+                except Exception as e:
+                    logger.error(f"Failed to generate invite: {e}")
+                    _send(bot, accid, msg.chat_id, "❌ Failed to generate invite link.")
+            else:
+                # Private chat: request confirmation from participants in the chat
+                try:
+                    contact = bot.rpc.get_contact(accid, msg.from_id)
+                    requester_name = contact.name or contact.display_name or contact.address or "Unknown"
+                    user_chat_count = get_user_chat_count(bot, accid, msg.from_id)
+                    
+                    request_id = database.add_pending_request(
+                        catalog_id, chat_id, msg.from_id, requester_name, message_payload
+                    )
+                    
+                    if message_payload:
+                        req_msg = (
+                            f"**{requester_name}** (💬 {user_chat_count}) wants to join this chat with following message: {message_payload}\n"
+                            f"To let him in reply with /approve{request_id}"
+                        )
+                    else:
+                        req_msg = (
+                            f"**{requester_name}** (💬 {user_chat_count}) wants to join this chat.\n"
+                            f"To let him in reply with /approve{request_id}"
+                        )
+                    
+                    _send(bot, accid, chat_id, req_msg)
+                    _send(bot, accid, msg.chat_id, "⏳ Your request to join has been sent to group members. Please wait for approval.")
+                except Exception as e:
+                    logger.error(f"Failed to create join request: {e}")
+                    _send(bot, accid, msg.chat_id, "❌ An error occurred while sending the request.")
+            return
+
+    # 2. Handle /approve<ID> command
+    elif text.startswith("/approve"):
+        m = re.match(r'^/approve(\d+)$', text, re.IGNORECASE)
+        if m:
+            request_id = int(m.group(1))
+            req = database.get_pending_request(request_id)
+            if not req:
+                _send(bot, accid, msg.chat_id, "❌ Request not found.")
+                return
+            if req['approved']:
+                _send(bot, accid, msg.chat_id, "ℹ️ This request has already been approved.")
+                return
+            if req['chat_id'] != msg.chat_id:
+                _send(bot, accid, msg.chat_id, "❌ You can only approve this request in the corresponding group chat.")
+                return
+                
+            try:
+                # Generate single-use invite link
+                qrdata = bot.rpc.get_chat_securejoin_qr_code(accid, req['chat_id'])
+                invite_link = qrdata
+                if qrdata.startswith("OPEN-CHAT:"):
+                    invite_link = "https://i.delta.chat/#" + qrdata[10:]
+                elif qrdata.startswith("OPEN:"):
+                    invite_link = "https://i.delta.chat/#" + qrdata[5:]
+                elif qrdata.startswith("dcqr://"):
+                    invite_link = "https://i.delta.chat/#" + qrdata[7:]
+                
+                # Cache the invite link in catalog_chats as the active single-use link
+                database.update_catalog_chat_invite_link(req['chat_id'], qrdata)
+                
+                # Mark request as approved
+                database.approve_pending_request(request_id)
+                
+                # Get requester's private chat_id
+                user_chat_id = bot.rpc.create_chat_by_contact_id(accid, req['requester_contact_id'])
+                
+                catalog_chat = database.get_catalog_chat_by_chat_id(req['chat_id'])
+                chat_name = catalog_chat['name'] if catalog_chat else "Group"
+                
+                _send(bot, accid, user_chat_id, 
+                      f"✅ Your request to join chat **{chat_name}** has been approved!\n\n"
+                      f"Single-use invite link:\n{invite_link}\n\n"
+                      f"⚠️ This invite link is single-use and will be invalidated after one connection.")
+                      
+                _send(bot, accid, msg.chat_id, f"✅ Request approved. A single-use invite link has been sent to **{req['requester_name']}**.")
+            except Exception as e:
+                logger.error(f"Failed to approve request: {e}")
+                _send(bot, accid, msg.chat_id, f"❌ Error while approving request: {e}")
+            return
+
+    # 3. Original contact sharing logic
+    elif text.startswith("/contact"):
         logger.info(f"DEBUG: Processing contact request: {text}")
         try:
             id_str = text[8:].strip()

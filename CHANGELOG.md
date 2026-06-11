@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.0] - 2026-06-11
+
+### Added
+- **Chat Catalog System:**
+  - Added `/chats` command for users to list all cataloged public and private groups, including descriptions and member counts. Private chats are marked with a lock emoji `🔐`.
+  - Added `/chatadd [description]` admin command to register the current group to the catalog. If `[description]` is not provided, the bot queries the group's description from the Delta Chat core.
+  - Added `/chatremove` admin command to remove the current group from the catalog.
+  - Added `/private <on/off>` admin command to toggle cataloged chat privacy:
+    - **Public chats:** Requests via `/chat<ID>` immediately return a group invite link.
+    - **Private chats:** Requests via `/chat<ID>` require manual approval from existing members in the target group chat.
+  - Added join approval workflow: members reply with `/approve<ID>` to invite requests, triggering the bot to privately message a single-use SecureJoin invite link to the applicant and verify the join in the group.
+  - Implemented automatic securejoin link revocation to prevent reuse of invite links in private groups.
+  - Integrated dynamic membership tracking (via info message hooks) to keep the catalog `member_count` database column updated in real-time.
+- **Custom Welcome Messages:**
+  - Added `/welcome` admin command to manage new member greeting messages (`/welcome on`, `/welcome off`, `/welcome on <custom_text>`).
+  - Automatically greets new members with their chat presence count and optional custom rules text when they join the group.
+- **English Localization:**
+  - Standardized all bot outputs, error messages, and command responses to English.
+
 ## [1.7.0] - 2026-06-05
 
 ### Added
