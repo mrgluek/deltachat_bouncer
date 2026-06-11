@@ -541,6 +541,26 @@ def on_start(bot, args):
     global dc_bot_instance, dc_accid
     dc_bot_instance = bot
     
+    # Monkey-patch bot._process_messages to allow processing of system/info messages
+    from deltachat2 import SpecialContactId
+    from deltachat2.transport import JsonRpcError
+
+    def custom_process_messages(accid: int, retry=True) -> None:
+        try:
+            for msgid in bot.rpc.get_next_msgs(accid):
+                msg = bot.rpc.get_message(accid, msgid)
+                outgoing = msg.from_id == SpecialContactId.SELF
+                # Process the message if it's outgoing, from a contact > LAST_SPECIAL, or a system/info message
+                if outgoing or msg.from_id > SpecialContactId.LAST_SPECIAL or msg.is_info:
+                    bot._on_new_msg(accid, msg)
+                bot.rpc.set_config(accid, "last_msg_id", str(msgid))
+        except JsonRpcError as err:
+            bot.logger.exception(err)
+            if retry:
+                custom_process_messages(accid, False)
+
+    bot._process_messages = custom_process_messages
+
     accounts = bot.rpc.get_all_account_ids()
     if not accounts:
         logger.error("No accounts found.")
@@ -1477,7 +1497,7 @@ def welcome_command(bot, accid, event):
               "/welcome on <additional text> — enable greeting with additional text\n"
               "/welcome off — disable greeting")
 
-@dc_cli.on(events.NewMessage(is_info=True))
+@dc_cli.on(events.NewMessage(is_info=True, is_bot=None))
 def handle_dc_info_message(bot, accid, event):
     msg = event.msg
     dc_chat_id = msg.chat_id
