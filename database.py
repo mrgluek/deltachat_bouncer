@@ -361,5 +361,21 @@ def update_catalog_channel_member_count(chat_id: int, member_count: int):
         conn.commit()
         conn.close()
 
+def update_catalog_channel_description(catalog_id: int, description: str):
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE catalog_channels SET description = ? WHERE id = ?", (description, catalog_id))
+        conn.commit()
+        conn.close()
+
+def update_catalog_chat_description(catalog_id: int, description: str):
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE catalog_chats SET description = ? WHERE id = ?", (description, catalog_id))
+        conn.commit()
+        conn.close()
+
 init_db()
 

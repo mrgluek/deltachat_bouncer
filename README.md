@@ -66,8 +66,10 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/initadmin` — Claim administrative ownership (private chat only).
 - `/chatadd [description]` — Add the current group chat to the catalog (Admin only). Falls back to group description if not provided.
 - `/chatremove` — Remove the current group chat from the catalog (Admin only).
+- `/chatdesc<ID> <text>` — Update description of cataloged group chat (Admin only).
 - `/dchanneladd <URL>` — Join and add a channel to the catalog (Admin only).
 - `/dchannelremove [ID]` — Remove a channel from the catalog (Admin only).
+- `/dchanneldesc<ID> <text>` — Update description of cataloged channel (Admin only).
 - `/private <on/off>` — Toggle cataloged chat privacy status (Admin only).
 - `/welcome [on/off/on <text>]` — Configure welcome messages for new members (Admin only).
 - `/transports` — Show configured mail relays & stats (Admin only).

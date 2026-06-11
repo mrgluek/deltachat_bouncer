@@ -937,10 +937,12 @@ def help_command(bot, accid, event):
         help_text += "/resilient — Toggle resilient sending mode (all relays)\n"
         help_text += "/chatadd [desc] — Add current chat to catalog\n"
         help_text += "/chatremove — Remove current chat from catalog\n"
+        help_text += "/chatdesc<ID> <text> — Update chat description\n"
         help_text += "/private <on/off> — Toggle privacy of current chat\n"
         help_text += "/welcome [on/off/...] — Manage welcome message for new members\n"
         help_text += "/dchanneladd <URL> — Join and add a channel to the catalog\n"
-        help_text += "/dchannelremove [ID] — Remove channel from catalog"
+        help_text += "/dchannelremove [ID] — Remove channel from catalog\n"
+        help_text += "/dchanneldesc<ID> <text> — Update channel description"
         
     _send(bot, accid, msg.chat_id, help_text)
 
@@ -1822,8 +1824,28 @@ def handle_all_messages(bot, accid, event):
         
     text = (msg.text or "").strip()
     
+    # Handle /chatdesc<ID> command
+    if text.startswith("/chatdesc"):
+        m = re.match(r'^/chatdesc(\d+)(?:\s+(.*))?$', text, re.IGNORECASE)
+        if m:
+            if not _is_dc_admin(bot, accid, msg.from_id):
+                _send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use this command.")
+                return
+                
+            catalog_id = int(m.group(1))
+            new_desc = m.group(2).strip() if m.group(2) else ""
+            
+            catalog_chat = database.get_catalog_chat_by_id(catalog_id)
+            if not catalog_chat:
+                _send(bot, accid, msg.chat_id, "❌ Chat with this number was not found in the catalog.")
+                return
+                
+            database.update_catalog_chat_description(catalog_id, new_desc)
+            _send(bot, accid, msg.chat_id, f"✅ Description for chat **{catalog_chat['name']}** has been updated.")
+            return
+
     # 1. Handle /chat<ID> command (but NOT /chats)
-    if text.startswith("/chat") and not (text == "/chats" or text.startswith("/chats ")):
+    elif text.startswith("/chat") and not (text == "/chats" or text.startswith("/chats ")):
         m = re.match(r'^/chat(\d+)(?:\s+(.*))?$', text, re.IGNORECASE)
         if m:
             catalog_id = int(m.group(1))
@@ -1891,6 +1913,26 @@ def handle_all_messages(bot, accid, event):
                 except Exception as e:
                     logger.error(f"Failed to create join request: {e}")
                     return
+
+    # Handle /dchanneldesc<ID> command
+    elif text.startswith("/dchanneldesc"):
+        m = re.match(r'^/dchanneldesc(\d+)(?:\s+(.*))?$', text, re.IGNORECASE)
+        if m:
+            if not _is_dc_admin(bot, accid, msg.from_id):
+                _send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use this command.")
+                return
+                
+            catalog_id = int(m.group(1))
+            new_desc = m.group(2).strip() if m.group(2) else ""
+            
+            channel = database.get_catalog_channel_by_id(catalog_id)
+            if not channel:
+                _send(bot, accid, msg.chat_id, "❌ Channel with this number was not found in the catalog.")
+                return
+                
+            database.update_catalog_channel_description(catalog_id, new_desc)
+            _send(bot, accid, msg.chat_id, f"✅ Description for channel **{channel['name']}** has been updated.")
+            return
 
     # Handle /dchannel<ID> command (but NOT /dchannels)
     elif text.startswith("/dchannel") and not (text == "/dchannels" or text.startswith("/dchannels ")):
