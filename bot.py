@@ -1477,7 +1477,7 @@ def private_command(bot, accid, event):
     status_str = "private (by request)" if is_private else "public"
     _send(bot, accid, msg.chat_id, f"✅ Chat is now {status_str}.")
 
-def bg_channel_join_worker(bot, accid, admin_chat_id, url, chat_name):
+def bg_channel_join_worker(bot, accid, admin_chat_id, url, chat_name, qr_info=None):
     try:
         old_chats = set(bot.rpc.get_chatlist_entries(accid, None, None, None))
         bot.rpc.secure_join(accid, url)
@@ -1491,15 +1491,59 @@ def bg_channel_join_worker(bot, accid, admin_chat_id, url, chat_name):
                 joined_chat_id = list(added_chats)[0]
                 break
         
+        if not joined_chat_id and qr_info:
+            contact_id = qr_info.get("contact_id")
+            if contact_id:
+                try:
+                    joined_chat_id = bot.rpc.create_chat_by_contact_id(accid, int(contact_id))
+                except Exception:
+                    pass
+            
+            if not joined_chat_id:
+                try:
+                    grpid = qr_info.get("grpid")
+                    chats = bot.rpc.get_chatlist_entries(accid, None, None, None)
+                    for cid in chats:
+                        if not isinstance(cid, int):
+                            continue
+                        try:
+                            c_info = bot.rpc.get_basic_chat_info(accid, cid)
+                            c_grpid = c_info.get("grpid") if isinstance(c_info, dict) else getattr(c_info, "grpid", None)
+                            if grpid and c_grpid == grpid:
+                                joined_chat_id = cid
+                                break
+                            
+                            c_name = c_info.get("name") if isinstance(c_info, dict) else getattr(c_info, "name", None)
+                            if c_name == chat_name:
+                                joined_chat_id = cid
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
         if joined_chat_id:
             chat = bot.rpc.get_basic_chat_info(accid, joined_chat_id)
             c_name = chat.get('name') if isinstance(chat, dict) else getattr(chat, 'name', chat_name or 'Channel')
+            chat_type = chat.get('chat_type') if isinstance(chat, dict) else getattr(chat, 'chat_type', 'Single')
+            
             description = ""
-            try:
-                description = bot.rpc.get_chat_description(accid, joined_chat_id) or ""
-                description = description.strip()
-            except Exception:
-                pass
+            if str(chat_type) == "Single":
+                try:
+                    contacts = bot.rpc.get_chat_contacts(accid, joined_chat_id)
+                    other_contacts = [c for c in contacts if c != 1]
+                    if other_contacts:
+                        contact = bot.rpc.get_contact(accid, other_contacts[0])
+                        description = contact.get('status') if isinstance(contact, dict) else getattr(contact, 'status', '')
+                        description = description.strip() if description else ""
+                except Exception as e:
+                    logger.warning(f"Failed to get contact status: {e}")
+            else:
+                try:
+                    description = bot.rpc.get_chat_description(accid, joined_chat_id) or ""
+                    description = description.strip()
+                except Exception:
+                    pass
                 
             database.add_catalog_channel(joined_chat_id, c_name, description, 0, url)
             _send(bot, accid, admin_chat_id, f"✅ Channel **{c_name}** has been joined and added to the catalog.")
@@ -1549,7 +1593,7 @@ def dchanneladd_command(bot, accid, event):
         return
 
     _send(bot, accid, msg.chat_id, f"⏳ Attempting to join channel **{chat_name or 'Channel'}** in the background... This may take up to 30 seconds.")
-    threading.Thread(target=bg_channel_join_worker, args=(bot, accid, msg.chat_id, url, chat_name), daemon=True).start()
+    threading.Thread(target=bg_channel_join_worker, args=(bot, accid, msg.chat_id, url, chat_name, qr_info), daemon=True).start()
 
 @dc_cli.on(events.NewMessage(command="/dchannelremove"))
 def dchannelremove_command(bot, accid, event):
