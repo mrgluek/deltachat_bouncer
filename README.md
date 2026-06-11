@@ -6,6 +6,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 
 - ⚠️ **Inactivity Reports (`/bounce`):** Trigger a manual scan for inactive group members. Reports total members, active count, and a list of inactive users.
 - 📖 **Group Chat Catalog (`/chats`):** Users can browse all group chats cataloged by the bot, complete with name, description, and real-time membership count.
+- 📢 **Delta Chat Channels Catalog (`/dchannels`):** Users can browse all channels cataloged by the bot, complete with name and description.
 - 🔐 **Join Approval Workflows:** Supports public and private groups. Requests to join public groups immediately receive an invite link, while private groups (`🔐`) require approvals from existing members in the group via dynamic `/approve<ID>` commands.
 - 👋🏻 **Custom Welcome Messages (`/welcome`):** Configure customizable welcoming greetings for new members joining the group, with stats (total chats in common) and custom rules text.
 - 🔗 **Invite Link (`/invite`):** Generate a SecureJoin invite link and QR code image for the current group chat. Available to all users with a 10-minute cooldown (admins are exempt).
@@ -55,6 +56,8 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/invite` — Generate an invite link and QR code for this group.
 - `/chats` — Show the catalog of registered group chats available to join.
 - `/chat<ID> [message]` — Request an invite link to the group (Private chat only).
+- `/dchannels` — Show the catalog of registered Delta Chat channels.
+- `/dchannel<ID>` — Request the invite link to a channel.
 - `/approve<ID>` — Approve a pending join request for a private group (Group chat only).
 - `/decline<ID> [reason]` — Decline a pending join request for a private group with an optional reason (Group chat only).
 - `/contact<ID>` — Get a contact object for the given ID (e.g., `/contact123`).
@@ -63,6 +66,8 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/initadmin` — Claim administrative ownership (private chat only).
 - `/chatadd [description]` — Add the current group chat to the catalog (Admin only). Falls back to group description if not provided.
 - `/chatremove` — Remove the current group chat from the catalog (Admin only).
+- `/dchanneladd <URL>` — Join and add a channel to the catalog (Admin only).
+- `/dchannelremove [ID]` — Remove a channel from the catalog (Admin only).
 - `/private <on/off>` — Toggle cataloged chat privacy status (Admin only).
 - `/welcome [on/off/on <text>]` — Configure welcome messages for new members (Admin only).
 - `/transports` — Show configured mail relays & stats (Admin only).
