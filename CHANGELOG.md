@@ -7,7 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 - **Channels Catalog System:**
   - Added `/dchannels` command for users to list all cataloged channels, displaying their names and descriptions.
-  - Added `/dchanneladd <URL>` admin command to join and register a new channel to the catalog in the background.
+  - Added `/dchanneladd <URL>` admin command to join and register a new channel to the catalog in the background (supporting both group-based and contact-based channel/bot invitation QR codes).
   - Added `/dchannelremove [ID]` admin command to remove a channel from the catalog by ID or by the current chat ID.
   - Added dynamic routing for `/dchannel<ID>` commands to return the invitation URL, resolving raw protocols (like `OPEN-CHAT:`, `OPEN:`, or `dcqr://`) into clickable `https://i.delta.chat/#` URLs.
 
