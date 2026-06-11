@@ -12,7 +12,7 @@ All notable changes to this project will be documented in this file.
   - Added `/private <on/off>` admin command to toggle cataloged chat privacy:
     - **Public chats:** Requests via `/chat<ID>` immediately return a group invite link.
     - **Private chats:** Requests via `/chat<ID>` require manual approval from existing members in the target group chat.
-  - Added join approval workflow: members reply with `/approve<ID>` to invite requests, triggering the bot to privately message a single-use SecureJoin invite link to the applicant and verify the join in the group.
+  - Added join approval and decline workflow: members reply with `/approve<ID>` to approve or `/decline<ID> [reason]` to decline. Approving sends a single-use SecureJoin invite link to the applicant, while declining notifies the applicant in a private message with an optional reason.
   - Implemented automatic securejoin link revocation to prevent reuse of invite links in private groups.
   - Integrated dynamic membership tracking (via info message hooks) to keep the catalog `member_count` database column updated in real-time.
 - **Custom Welcome Messages:**

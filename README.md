@@ -56,6 +56,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/chats` — Show the catalog of registered group chats available to join.
 - `/chat<ID> [message]` — Request an invite link to the group (Private chat only).
 - `/approve<ID>` — Approve a pending join request for a private group (Group chat only).
+- `/decline<ID> [reason]` — Decline a pending join request for a private group with an optional reason (Group chat only).
 - `/contact<ID>` — Get a contact object for the given ID (e.g., `/contact123`).
 - `/help` — Show available commands and bot information (Threshold: 14 days).
 - `/donate` — Support project development ❤️

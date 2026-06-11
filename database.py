@@ -275,6 +275,14 @@ def approve_pending_request(request_id: int):
         conn.commit()
         conn.close()
 
+def decline_pending_request(request_id: int):
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE pending_requests SET approved = 2 WHERE id = ?", (request_id,))
+        conn.commit()
+        conn.close()
+
 def update_catalog_chat_welcome(chat_id: int, welcome_enabled: int, welcome_text: str):
     with _lock:
         conn = sqlite3.connect(DB_PATH)

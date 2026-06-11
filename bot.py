@@ -1618,12 +1618,14 @@ def handle_all_messages(bot, accid, event):
                     if message_payload:
                         req_msg = (
                             f"**{requester_name}** (💬 {user_chat_count}) wants to join this chat with following message: {message_payload}\n"
-                            f"To let him in reply with /approve{request_id}"
+                            f"To approve: reply with `/approve{request_id}`\n"
+                            f"To decline: reply with `/decline{request_id}` (optional comment after command)"
                         )
                     else:
                         req_msg = (
                             f"**{requester_name}** (💬 {user_chat_count}) wants to join this chat.\n"
-                            f"To let him in reply with /approve{request_id}"
+                            f"To approve: reply with `/approve{request_id}`\n"
+                            f"To decline: reply with `/decline{request_id}` (optional comment after command)"
                         )
                     
                     _send(bot, accid, chat_id, req_msg)
@@ -1642,8 +1644,11 @@ def handle_all_messages(bot, accid, event):
             if not req:
                 _send(bot, accid, msg.chat_id, "❌ Request not found.")
                 return
-            if req['approved']:
+            if req['approved'] == 1:
                 _send(bot, accid, msg.chat_id, "ℹ️ This request has already been approved.")
+                return
+            elif req['approved'] == 2:
+                _send(bot, accid, msg.chat_id, "ℹ️ This request has already been declined.")
                 return
             if req['chat_id'] != msg.chat_id:
                 _send(bot, accid, msg.chat_id, "❌ You can only approve this request in the corresponding group chat.")
@@ -1681,6 +1686,49 @@ def handle_all_messages(bot, accid, event):
             except Exception as e:
                 logger.error(f"Failed to approve request: {e}")
                 _send(bot, accid, msg.chat_id, f"❌ Error while approving request: {e}")
+            return
+
+    # 3. Handle /decline<ID> [comment] command
+    elif text.startswith("/decline"):
+        m = re.match(r'^/decline(\d+)(?:\s+(.*))?$', text, re.IGNORECASE)
+        if m:
+            request_id = int(m.group(1))
+            reason = m.group(2).strip() if m.group(2) else ""
+            
+            req = database.get_pending_request(request_id)
+            if not req:
+                _send(bot, accid, msg.chat_id, "❌ Request not found.")
+                return
+            if req['approved'] == 1:
+                _send(bot, accid, msg.chat_id, "ℹ️ This request has already been approved.")
+                return
+            elif req['approved'] == 2:
+                _send(bot, accid, msg.chat_id, "ℹ️ This request has already been declined.")
+                return
+            if req['chat_id'] != msg.chat_id:
+                _send(bot, accid, msg.chat_id, "❌ You can only decline this request in the corresponding group chat.")
+                return
+                
+            try:
+                # Mark request as declined
+                database.decline_pending_request(request_id)
+                
+                # Get requester's private chat_id
+                user_chat_id = bot.rpc.create_chat_by_contact_id(accid, req['requester_contact_id'])
+                
+                catalog_chat = database.get_catalog_chat_by_chat_id(req['chat_id'])
+                chat_name = catalog_chat['name'] if catalog_chat else "Group"
+                
+                if reason:
+                    decline_msg = f"❌ Your request to join chat **{chat_name}** has been declined.\nComment: {reason}"
+                else:
+                    decline_msg = f"❌ Your request to join chat **{chat_name}** has been declined."
+                
+                _send(bot, accid, user_chat_id, decline_msg)
+                _send(bot, accid, msg.chat_id, f"❌ Request declined. The user has been notified.")
+            except Exception as e:
+                logger.error(f"Failed to decline request: {e}")
+                _send(bot, accid, msg.chat_id, f"❌ Error while declining request: {e}")
             return
 
     # 3. Original contact sharing logic
