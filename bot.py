@@ -1480,7 +1480,7 @@ def private_command(bot, accid, event):
 def bg_channel_join_worker(bot, accid, admin_chat_id, url, chat_name):
     try:
         old_chats = set(bot.rpc.get_chatlist_entries(accid, None, None, None))
-        bot.rpc.set_config_from_qr(accid, url)
+        bot.rpc.secure_join(accid, url)
         
         joined_chat_id = None
         for _ in range(30):
