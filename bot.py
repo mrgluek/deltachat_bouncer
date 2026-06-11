@@ -515,7 +515,7 @@ def on_init(bot, args):
     if accounts:
         dc_accid = accounts[0]
         bot.rpc.set_config(dc_accid, "displayname", "Bouncer Bot")
-        bot.rpc.set_config(dc_accid, "selfstatus", "I monitor groups for inactive users. Send /bounce to check now.")
+        bot.rpc.set_config(dc_accid, "selfstatus", "I monitor group activity, manage chat/channel catalogs, welcome new members, and search contacts. Send /help for commands.")
         
         # Set icon if exists
         try:
