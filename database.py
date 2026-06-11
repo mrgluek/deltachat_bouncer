@@ -60,6 +60,18 @@ def init_db():
         if "welcome_text" not in columns:
             cursor.execute("ALTER TABLE catalog_chats ADD COLUMN welcome_text TEXT")
 
+        # Catalog channels table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS catalog_channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER UNIQUE,
+                name TEXT,
+                description TEXT,
+                member_count INTEGER DEFAULT 0,
+                invite_link TEXT
+            )
+        ''')
+
         # Pending join requests table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS pending_requests (
@@ -289,6 +301,63 @@ def update_catalog_chat_welcome(chat_id: int, welcome_enabled: int, welcome_text
         cursor = conn.cursor()
         cursor.execute("UPDATE catalog_chats SET welcome_enabled = ?, welcome_text = ? WHERE chat_id = ?", 
                        (welcome_enabled, welcome_text, chat_id))
+        conn.commit()
+        conn.close()
+
+def add_catalog_channel(chat_id: int, name: str, description: str, member_count: int, invite_link: str):
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO catalog_channels (chat_id, name, description, member_count, invite_link)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (chat_id, name, description, member_count, invite_link))
+        conn.commit()
+        conn.close()
+
+def remove_catalog_channel(chat_id: int):
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM catalog_channels WHERE chat_id = ?", (chat_id,))
+        conn.commit()
+        conn.close()
+
+def get_all_catalog_channels() -> list[dict]:
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM catalog_channels ORDER BY id ASC")
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+def get_catalog_channel_by_chat_id(chat_id: int) -> dict:
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM catalog_channels WHERE chat_id = ?", (chat_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+def get_catalog_channel_by_id(catalog_id: int) -> dict:
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM catalog_channels WHERE id = ?", (catalog_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+def update_catalog_channel_member_count(chat_id: int, member_count: int):
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE catalog_channels SET member_count = ? WHERE chat_id = ?", (member_count, chat_id))
         conn.commit()
         conn.close()
 

@@ -913,7 +913,8 @@ def help_command(bot, accid, event):
         f"/invite — Generate an invite link/QR code for this group.\n"
         f"/contact<ID> — Get a contact object for the given ID.\n"
         f"/help   — This message.\n"
-        f"/chats  — Show catalog of available chats.\n\n"
+        f"/chats  — Show catalog of available chats.\n"
+        f"/dchannels — Show catalog of available channels.\n\n"
         f"/donate — Support development ❤️\n\n"
         f"💡 _Commands have a 10-minute cooldown per group (except for admins)._\n\n"
         f"🤖 **Source:** Run your own bot: https://git.gluek.info/gluek/deltachat_bouncer"
@@ -937,7 +938,9 @@ def help_command(bot, accid, event):
         help_text += "/chatadd [desc] — Add current chat to catalog\n"
         help_text += "/chatremove — Remove current chat from catalog\n"
         help_text += "/private <on/off> — Toggle privacy of current chat\n"
-        help_text += "/welcome [on/off/...] — Manage welcome message for new members"
+        help_text += "/welcome [on/off/...] — Manage welcome message for new members\n"
+        help_text += "/dchanneladd <URL> — Join and add a channel to the catalog\n"
+        help_text += "/dchannelremove [ID] — Remove channel from catalog"
         
     _send(bot, accid, msg.chat_id, help_text)
 
@@ -1384,6 +1387,25 @@ def chats_command(bot, accid, event):
     reply = "\n".join(lines)
     _send(bot, accid, msg.chat_id, reply)
 
+@dc_cli.on(events.NewMessage(command="/dchannels"))
+def dchannels_command(bot, accid, event):
+    msg = event.msg
+    catalog_channels = database.get_all_catalog_channels()
+    if not catalog_channels:
+        _send(bot, accid, msg.chat_id, "ℹ️ The channel catalog is empty.")
+        return
+
+    lines = []
+    for ch in catalog_channels:
+        desc = ch['description'] or ""
+        if len(desc) > 100:
+            desc = desc[:100] + "..."
+        desc_str = f" {desc}" if desc else ""
+        lines.append(f"/dchannel{ch['id']} **{ch['name']}**{desc_str}")
+
+    reply = "\n".join(lines)
+    _send(bot, accid, msg.chat_id, reply)
+
 @dc_cli.on(events.NewMessage(command="/chatadd"))
 def chatadd_command(bot, accid, event):
     msg = event.msg
@@ -1452,9 +1474,103 @@ def private_command(bot, accid, event):
 
     is_private = 1 if arg == "on" else 0
     database.update_catalog_chat_privacy(msg.chat_id, is_private)
-
     status_str = "private (by request)" if is_private else "public"
     _send(bot, accid, msg.chat_id, f"✅ Chat is now {status_str}.")
+
+def bg_channel_join_worker(bot, accid, admin_chat_id, url, chat_name):
+    try:
+        old_chats = set(bot.rpc.get_chatlist_entries(accid, None, None, None))
+        bot.rpc.set_config_from_qr(accid, url)
+        
+        joined_chat_id = None
+        for _ in range(30):
+            time.sleep(1)
+            new_chats = set(bot.rpc.get_chatlist_entries(accid, None, None, None))
+            added_chats = new_chats - old_chats
+            if added_chats:
+                joined_chat_id = list(added_chats)[0]
+                break
+        
+        if joined_chat_id:
+            chat = bot.rpc.get_basic_chat_info(accid, joined_chat_id)
+            c_name = chat.get('name') if isinstance(chat, dict) else getattr(chat, 'name', chat_name or 'Channel')
+            description = ""
+            try:
+                description = bot.rpc.get_chat_description(accid, joined_chat_id) or ""
+                description = description.strip()
+            except Exception:
+                pass
+                
+            database.add_catalog_channel(joined_chat_id, c_name, description, 0, url)
+            _send(bot, accid, admin_chat_id, f"✅ Channel **{c_name}** has been joined and added to the catalog.")
+        else:
+            _send(bot, accid, admin_chat_id, f"❌ Failed to join channel **{chat_name or 'Channel'}**. The securejoin handshake timed out. Please check that the link is correct and try again.")
+            
+    except Exception as e:
+        logger.error(f"Error in bg_channel_join_worker: {e}")
+        _send(bot, accid, admin_chat_id, f"❌ An error occurred while adding the channel: {e}")
+
+@dc_cli.on(events.NewMessage(command="/dchanneladd"))
+def dchanneladd_command(bot, accid, event):
+    msg = event.msg
+    if not _is_dc_admin(bot, accid, msg.from_id):
+        _send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use this command.")
+        return
+
+    url = event.payload.strip() if event.payload else ""
+    if not url:
+        _send(bot, accid, msg.chat_id, "Usage: /dchanneladd <invite_link_url>")
+        return
+
+    existing_channels = database.get_all_catalog_channels()
+    for ch in existing_channels:
+        if ch.get('invite_link') == url:
+            _send(bot, accid, msg.chat_id, f"ℹ️ This channel is already in the catalog (ID: {ch['id']}).")
+            return
+
+    try:
+        qr_info = bot.rpc.check_qr(accid, url)
+        kind = qr_info.get("kind", "")
+        if kind not in ("AskVerifyGroup", "AskJoinBroadcast", "WithdrawVerifyGroup", "WithdrawJoinBroadcast", "ReviveVerifyGroup", "ReviveJoinBroadcast"):
+            _send(bot, accid, msg.chat_id, "❌ Invalid invite link. Please provide a valid Delta Chat group/channel join link.")
+            return
+            
+        chat_name = qr_info.get("name") if "Broadcast" in kind else qr_info.get("grpname")
+    except Exception as e:
+        _send(bot, accid, msg.chat_id, f"❌ Failed to parse invite link: {e}")
+        return
+
+    _send(bot, accid, msg.chat_id, f"⏳ Attempting to join channel **{chat_name or 'Channel'}** in the background... This may take up to 30 seconds.")
+    threading.Thread(target=bg_channel_join_worker, args=(bot, accid, msg.chat_id, url, chat_name), daemon=True).start()
+
+@dc_cli.on(events.NewMessage(command="/dchannelremove"))
+def dchannelremove_command(bot, accid, event):
+    msg = event.msg
+    if not _is_dc_admin(bot, accid, msg.from_id):
+        _send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use this command.")
+        return
+
+    payload = event.payload.strip() if event.payload else ""
+    if payload:
+        try:
+            catalog_id = int(payload)
+            channel = database.get_catalog_channel_by_id(catalog_id)
+            if channel:
+                database.remove_catalog_channel(channel['chat_id'])
+                _send(bot, accid, msg.chat_id, f"✅ Channel **{channel['name']}** has been removed from the catalog.")
+                return
+            else:
+                _send(bot, accid, msg.chat_id, "❌ Channel not found in the catalog.")
+                return
+        except ValueError:
+            pass
+
+    channel = database.get_catalog_channel_by_chat_id(msg.chat_id)
+    if channel:
+        database.remove_catalog_channel(msg.chat_id)
+        _send(bot, accid, msg.chat_id, f"✅ Channel **{channel['name']}** has been removed from the catalog.")
+    else:
+        _send(bot, accid, msg.chat_id, "❌ This chat is not registered as a channel in the catalog. Use `/dchannelremove <ID>` to remove by ID.")
 
 @dc_cli.on(events.NewMessage(command="/welcome"))
 def welcome_command(bot, accid, event):
@@ -1722,9 +1838,32 @@ def handle_all_messages(bot, accid, event):
                     _send(bot, accid, msg.chat_id, "⏳ Your request to join has been sent to group members. Please wait for approval.")
                 except Exception as e:
                     logger.error(f"Failed to create join request: {e}")
-                    _send(bot, accid, msg.chat_id, "❌ An error occurred while sending the request.")
-            return
+                    return
 
+    # Handle /dchannel<ID> command (but NOT /dchannels)
+    elif text.startswith("/dchannel") and not (text == "/dchannels" or text.startswith("/dchannels ")):
+        m = re.match(r'^/dchannel(\d+)', text, re.IGNORECASE)
+        if m:
+            catalog_id = int(m.group(1))
+            channel = database.get_catalog_channel_by_id(catalog_id)
+            if not channel:
+                _send(bot, accid, msg.chat_id, "❌ Channel with this number was not found in the catalog.")
+                return
+                
+            invite_link = channel.get('invite_link')
+            if invite_link:
+                if invite_link.startswith("OPEN-CHAT:"):
+                    invite_link = "https://i.delta.chat/#" + invite_link[10:]
+                elif invite_link.startswith("OPEN:"):
+                    invite_link = "https://i.delta.chat/#" + invite_link[5:]
+                elif invite_link.startswith("dcqr://"):
+                    invite_link = "https://i.delta.chat/#" + invite_link[7:]
+                
+                _send(bot, accid, msg.chat_id, f"🔗 Invite link to channel **{channel['name']}**:\n{invite_link}")
+            else:
+                _send(bot, accid, msg.chat_id, "❌ No invite link registered for this channel.")
+            return
+ 
     # 2. Handle /approve<ID> command
     elif text.startswith("/approve"):
         m = re.match(r'^/approve(\d+)$', text, re.IGNORECASE)
