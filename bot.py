@@ -550,8 +550,10 @@ def on_start(bot, args):
             for msgid in bot.rpc.get_next_msgs(accid):
                 msg = bot.rpc.get_message(accid, msgid)
                 outgoing = msg.from_id == SpecialContactId.SELF
+                bot.logger.info(f"custom_process_messages: msgid={msgid}, from_id={msg.from_id}, is_info={msg.is_info}, text={msg.text!r}")
                 # Process the message if it's outgoing, from a contact > LAST_SPECIAL, or a system/info message
                 if outgoing or msg.from_id > SpecialContactId.LAST_SPECIAL or msg.is_info:
+                    bot.logger.info(f"custom_process_messages: calling _on_new_msg for msgid={msgid}")
                     bot._on_new_msg(accid, msg)
                 bot.rpc.set_config(accid, "last_msg_id", str(msgid))
         except JsonRpcError as err:
@@ -1505,6 +1507,8 @@ def handle_dc_info_message(bot, accid, event):
     smt = msg.system_message_type
     smt_str = str(smt).lower() if smt is not None else ""
     msg_text = (msg.text or "").lower()
+    
+    bot.logger.info(f"handle_dc_info_message: dc_chat_id={dc_chat_id}, smt={smt!r}, smt_str={smt_str!r}, msg_text={msg_text!r}")
     
     is_member_event = False
     is_join_event = False
