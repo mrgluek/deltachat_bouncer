@@ -85,6 +85,14 @@ def init_db():
                 approved INTEGER DEFAULT 0
             )
         ''')
+
+        # Contact first-seen tracking
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS contact_first_seen (
+                contact_id INTEGER PRIMARY KEY,
+                first_seen_at REAL
+            )
+        ''')
         
         conn.commit()
         conn.close()
@@ -131,6 +139,28 @@ def get_admin_fingerprint():
 def set_admin_fingerprint(fp):
     """Set the admin DC fingerprint."""
     set_config("admin_dc_fingerprint", fp)
+
+def get_contact_first_seen(contact_id: int) -> float:
+    """Get the timestamp when the bot first saw this contact. Returns None if unknown."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT first_seen_at FROM contact_first_seen WHERE contact_id = ?", (contact_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+
+def ensure_contact_first_seen(contact_id: int, timestamp: float):
+    """Record first-seen time for a contact if not already known (INSERT OR IGNORE)."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR IGNORE INTO contact_first_seen (contact_id, first_seen_at) VALUES (?, ?)",
+            (contact_id, timestamp)
+        )
+        conn.commit()
+        conn.close()
 
 def increment_transport_sent(addr: str):
     """Increment the sent counter for a transport address."""

@@ -39,6 +39,21 @@ REGULAR_MAIL_DOMAINS = {
     "rambler.ru"
 }
 
+# Age indicator: each circle = 1 week of bot knowing the user
+_AGE_CIRCLES = ["🔴", "🟠", "🟡", "🟢", "🔵", "🟣", "🟤", "⚫", "⚪"]
+
+def _get_contact_age_indicator(contact_id: int) -> str:
+    """Return a colored circle emoji based on how long the bot has known this contact.
+    🔴 = <1 week, 🟠 = 1-2 weeks, ... ⚪ = 8+ weeks."""
+    now = time.time()
+    first_seen = database.get_contact_first_seen(contact_id)
+    if first_seen is None:
+        database.ensure_contact_first_seen(contact_id, now)
+        first_seen = now
+    weeks = int((now - first_seen) / (7 * 24 * 3600))
+    idx = min(weeks, len(_AGE_CIRCLES) - 1)
+    return _AGE_CIRCLES[idx]
+
 # ── Admin helpers ──
 
 def _get_contact_fingerprint(bot, accid, contact_id, contact=None):
@@ -402,7 +417,12 @@ def _refresh_catalog_member_counts(bot, accid):
             try:
                 chat_id = cat_chat['chat_id']
                 contacts = bot.rpc.get_chat_contacts(accid, chat_id)
+                now = time.time()
                 member_count = sum(1 for c in contacts if c != 1)
+                # Seed first_seen for all contacts
+                for c in contacts:
+                    if c != 1:
+                        database.ensure_contact_first_seen(c, now)
                 old_count = cat_chat.get('member_count', 0)
                 if member_count != old_count:
                     database.update_catalog_chat_member_count(chat_id, member_count)
@@ -420,7 +440,12 @@ def _refresh_catalog_member_counts(bot, accid):
             try:
                 chat_id = cat_chan['chat_id']
                 contacts = bot.rpc.get_chat_contacts(accid, chat_id)
+                now = time.time()
                 member_count = sum(1 for c in contacts if c != 1)
+                # Seed first_seen for all contacts
+                for c in contacts:
+                    if c != 1:
+                        database.ensure_contact_first_seen(c, now)
                 old_count = cat_chan.get('member_count', 0)
                 if member_count != old_count:
                     database.update_catalog_channel_member_count(chat_id, member_count)
@@ -913,11 +938,16 @@ def search_command(bot, accid, event):
                         elif not primary_addr and addr not in display_addrs:
                             display_addrs.append(addr)
                     addrs_str = ", ".join(display_addrs)
+                    
+                    # Track first-seen and get age indicator
+                    database.ensure_contact_first_seen(contact_id, now)
+                    age = _get_contact_age_indicator(contact_id)
 
                     found_users_map[contact_id] = {
                         "name": name,
                         "addrs_str": addrs_str,
                         "status": status,
+                        "age": age,
                         "groups": [chat_name]
                     }
             except Exception as e:
@@ -930,11 +960,11 @@ def search_command(bot, accid, event):
             reply = f"🔍 **Global Search Results for {queries_str} ({len(found_users_map)}):**\n\n"
             for contact_id, info in found_users_map.items():
                 groups_str = ", ".join(info["groups"])
-                reply += f"• /contact{contact_id} **{info['name']}** ({info['addrs_str']}) [{info['status']}]\n  ↳ Groups: {groups_str}\n"
+                reply += f"• /contact{contact_id} {info['age']} **{info['name']}** ({info['addrs_str']}) [{info['status']}]\n  ↳ Groups: {groups_str}\n"
         else:
             reply = f"🔍 **Search Results for {queries_str} ({len(found_users_map)}):**\n\n"
             for contact_id, info in found_users_map.items():
-                reply += f"• /contact{contact_id} **{info['name']}** ({info['addrs_str']}) [{info['status']}]\n"
+                reply += f"• /contact{contact_id} {info['age']} **{info['name']}** ({info['addrs_str']}) [{info['status']}]\n"
         
         _send(bot, accid, msg.chat_id, reply)
     else:
@@ -1980,6 +2010,8 @@ def handle_all_messages(bot, accid, event):
                     contact = bot.rpc.get_contact(accid, msg.from_id)
                     requester_name = contact.name or contact.display_name or contact.address or "Unknown"
                     user_chat_count = get_user_chat_count(bot, accid, msg.from_id)
+                    database.ensure_contact_first_seen(msg.from_id, time.time())
+                    age = _get_contact_age_indicator(msg.from_id)
                     
                     request_id = database.add_pending_request(
                         catalog_id, chat_id, msg.from_id, requester_name, message_payload
@@ -1987,13 +2019,13 @@ def handle_all_messages(bot, accid, event):
                     
                     if message_payload:
                         req_msg = (
-                            f"**{requester_name}** (💬 {user_chat_count}) wants to join this chat with following message: {message_payload}\n"
+                            f"{age} **{requester_name}** (💬 {user_chat_count}) wants to join this chat with following message: {message_payload}\n"
                             f"To approve: reply with /approve{request_id}\n"
                             f"To decline: reply with /decline{request_id} (optional comment after command)"
                         )
                     else:
                         req_msg = (
-                            f"**{requester_name}** (💬 {user_chat_count}) wants to join this chat.\n"
+                            f"{age} **{requester_name}** (💬 {user_chat_count}) wants to join this chat.\n"
                             f"To approve: reply with /approve{request_id}\n"
                             f"To decline: reply with /decline{request_id} (optional comment after command)"
                         )
