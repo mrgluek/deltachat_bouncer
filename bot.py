@@ -1706,46 +1706,89 @@ def handle_dc_info_message(bot, accid, event):
                 
                 # Check if it was a join event and welcome is enabled
                 if is_join_event and catalog_chat.get('welcome_enabled'):
-                    new_member_id = getattr(msg, 'info_contact_id', None)
-                    if not new_member_id:
-                        new_member_id = getattr(msg, 'infoContactId', None)
+                    new_member_id = None
+                    
+                    # Try msg attributes first (may not exist in all deltachat2 versions)
+                    for attr_name in ('info_contact_id', 'infoContactId'):
+                        val = getattr(msg, attr_name, None)
+                        if val:
+                            new_member_id = val
+                            break
                     if not new_member_id and isinstance(msg, dict):
                         new_member_id = msg.get('info_contact_id') or msg.get('infoContactId')
                     
-                    logger.info(f"Welcome greeting: checking join event. info_contact_id={new_member_id!r}")
+                    logger.info(f"Welcome greeting: join event in chat {dc_chat_id}, msg.text={msg.text!r}, info_contact_id={new_member_id!r}")
                     
+                    # Parse the system message text to extract who was added
+                    # DC system messages look like:
+                    #   "Member Name added by Admin Name."
+                    #   "Member added by Admin."  
+                    #   "You added Member Name."
+                    #   "Member Name (addr@example.com) added by ..."
                     if not new_member_id and msg.text:
-                        try:
-                            from deltachat2._utils import parse_system_add_remove
-                            parsed = parse_system_add_remove(msg.text)
-                            logger.info(f"Welcome greeting: parsed system text={msg.text!r} -> {parsed!r}")
-                            if parsed and parsed[0] == "added":
-                                affected = parsed[1]
-                                if affected:
-                                    # Try to lookup contact by address
-                                    try:
-                                        new_member_id = bot.rpc.lookup_contact_id_by_addr(accid, affected)
-                                    except Exception as lookup_err:
-                                        logger.info(f"Failed address lookup for {affected}: {lookup_err}")
-                                        new_member_id = None
-                                        
-                                    if not new_member_id:
-                                        logger.info(f"Welcome greeting: looking up display name/name {affected!r} in chat {dc_chat_id}")
-                                        new_member_id = find_contact_in_chat(bot, accid, dc_chat_id, affected)
-                        except Exception as parse_err:
-                            logger.error(f"Failed to parse join event text: {parse_err}")
+                        text = msg.text.strip().rstrip('.')
+                        added_name = None
+                        
+                        # Pattern: "You added <name>"
+                        m = re.match(r'^[Yy]ou added (.+)$', text)
+                        if m:
+                            added_name = m.group(1).strip()
+                        
+                        # Pattern: "<name> added by <someone>"
+                        if not added_name:
+                            m = re.match(r'^(.+?)\s+added\s+by\s+.+$', text, re.IGNORECASE)
+                            if m:
+                                added_name = m.group(1).strip()
+                        
+                        # Pattern: "<name> added" (no "by")
+                        if not added_name:
+                            m = re.match(r'^(.+?)\s+added$', text, re.IGNORECASE)
+                            if m:
+                                added_name = m.group(1).strip()
+                        
+                        # Pattern: "Member <name> joined" or "<name> joined"
+                        if not added_name:
+                            m = re.match(r'^(?:Member\s+)?(.+?)\s+joined$', text, re.IGNORECASE)
+                            if m:
+                                added_name = m.group(1).strip()
+                        
+                        logger.info(f"Welcome greeting: parsed added_name={added_name!r} from text={msg.text!r}")
+                        
+                        if added_name:
+                            # Try lookup by email address first
+                            try:
+                                new_member_id = bot.rpc.lookup_contact_id_by_addr(accid, added_name)
+                            except Exception:
+                                new_member_id = None
                             
+                            # Try finding in chat contacts by name/address
+                            if not new_member_id:
+                                new_member_id = find_contact_in_chat(bot, accid, dc_chat_id, added_name)
+                            
+                            logger.info(f"Welcome greeting: lookup for {added_name!r} -> contact_id={new_member_id!r}")
+                    
+                    # Last resort: if we detected a join but couldn't identify who,
+                    # check from_id (the person who triggered the event)
+                    if not new_member_id and msg.from_id and msg.from_id != 1:
+                        # from_id in a join info message is usually the person who added,
+                        # not the person who was added — so skip this for self-join scenarios
+                        logger.info(f"Welcome greeting: could not resolve new member, from_id={msg.from_id}")
+                    
                     logger.info(f"Welcome greeting: resolved new_member_id={new_member_id!r}")
                     if new_member_id and new_member_id != 1:
-                        contact = bot.rpc.get_contact(accid, new_member_id)
-                        member_name = contact.name or contact.display_name or contact.address or "New member"
-                        user_chat_count = get_user_chat_count(bot, accid, new_member_id)
-                        
-                        chat_name = catalog_chat['name']
-                        welcome_suffix = f" {catalog_chat['welcome_text']}" if catalog_chat.get('welcome_text') else ""
-                        
-                        welcome_msg = f"👋🏻 **{member_name}** (💬 {user_chat_count}), welcome to {chat_name} group!{welcome_suffix}"
-                        _send(bot, accid, dc_chat_id, welcome_msg)
+                        try:
+                            contact = bot.rpc.get_contact(accid, new_member_id)
+                            member_name = contact.name or contact.display_name or contact.address or "New member"
+                            user_chat_count = get_user_chat_count(bot, accid, new_member_id)
+                            
+                            chat_name = catalog_chat['name']
+                            welcome_suffix = f" {catalog_chat['welcome_text']}" if catalog_chat.get('welcome_text') else ""
+                            
+                            welcome_msg = f"👋🏻 **{member_name}** (💬 {user_chat_count}), welcome to {chat_name} group!{welcome_suffix}"
+                            _send(bot, accid, dc_chat_id, welcome_msg)
+                            logger.info(f"Welcome greeting sent for {member_name} in chat {dc_chat_id}")
+                        except Exception as welcome_err:
+                            logger.error(f"Failed to send welcome greeting: {welcome_err}")
                 
                 # Check if chat is private and has an active invite link to revoke
                 if is_join_event and catalog_chat.get('is_private') and catalog_chat.get('invite_link'):
