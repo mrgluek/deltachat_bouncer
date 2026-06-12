@@ -381,10 +381,57 @@ def _background_monitor_loop(bot, accid):
                             database.set_chat_monitored_since(chat_id, time.time())
                 except Exception as e:
                     logger.error(f"Error checking chat {chat_id} in background monitor: {e}")
+            
+            # Refresh member counts for all catalog chats and channels
+            _refresh_catalog_member_counts(bot, accid)
+            
         except Exception as e:
             logger.error(f"Background loop error: {e}")
             
-        time.sleep(3600) # Check every hour for new chats
+        time.sleep(3600) # Check every hour
+
+
+def _refresh_catalog_member_counts(bot, accid):
+    """Refresh member counts for all catalog chats and channels."""
+    updated = 0
+    
+    # Catalog chats
+    try:
+        catalog_chats = database.get_all_catalog_chats()
+        for cat_chat in catalog_chats:
+            try:
+                chat_id = cat_chat['chat_id']
+                contacts = bot.rpc.get_chat_contacts(accid, chat_id)
+                member_count = sum(1 for c in contacts if c != 1)
+                old_count = cat_chat.get('member_count', 0)
+                if member_count != old_count:
+                    database.update_catalog_chat_member_count(chat_id, member_count)
+                    logger.info(f"Refreshed catalog chat {cat_chat['name']!r} member count: {old_count} -> {member_count}")
+                    updated += 1
+            except Exception as e:
+                logger.error(f"Failed to refresh member count for catalog chat {cat_chat.get('name', '?')}: {e}")
+    except Exception as e:
+        logger.error(f"Failed to load catalog chats for member refresh: {e}")
+    
+    # Catalog channels
+    try:
+        catalog_channels = database.get_all_catalog_channels()
+        for cat_chan in catalog_channels:
+            try:
+                chat_id = cat_chan['chat_id']
+                contacts = bot.rpc.get_chat_contacts(accid, chat_id)
+                member_count = sum(1 for c in contacts if c != 1)
+                old_count = cat_chan.get('member_count', 0)
+                if member_count != old_count:
+                    database.update_catalog_channel_member_count(chat_id, member_count)
+                    logger.info(f"Refreshed catalog channel {cat_chan['name']!r} member count: {old_count} -> {member_count}")
+                    updated += 1
+            except Exception as e:
+                logger.error(f"Failed to refresh member count for catalog channel {cat_chan.get('name', '?')}: {e}")
+    except Exception as e:
+        logger.error(f"Failed to load catalog channels for member refresh: {e}")
+    
+    logger.info(f"Catalog member count refresh complete: {updated} updated")
 
 
 resilient_lock = threading.Lock()
