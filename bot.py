@@ -5,6 +5,8 @@ import os
 import re
 import threading
 import time
+import shutil
+import subprocess
 from datetime import datetime
 
 from deltachat2 import events, MsgData, SystemMessageType
@@ -30,8 +32,10 @@ INACTIVITY_SECONDS_THRESHOLD = INACTIVITY_DAYS_THRESHOLD * 24 * 3600
 _chat_anti_spam: dict[int, float] = {}
 _chat_relays_anti_spam: dict[int, float] = {}
 _chat_search_anti_spam: dict[int, float] = {}
+_chat_cmping_anti_spam: dict[int, float] = {}
 BOUNCE_COOLDOWN_SECONDS = 60   # 1 minute for general commands (/bounce, /top, /relays)
 SEARCH_COOLDOWN_SECONDS = 10   # 10 seconds for /search command
+CMPING_COOLDOWN_SECONDS = 15   # 15 seconds for /cmping command
 
 REGULAR_MAIL_DOMAINS = {
     "yandex.ru", "yandex.com", "ya.ru",
@@ -233,6 +237,13 @@ def _send(bot, accid, chat_id, text):
                 break
 
     logger.error(f"Final failure sending msg to chat {chat_id} after {actual_attempts} attempts.")
+
+def _react(bot, accid, msg_id, reaction):
+    """Add a reaction to a message."""
+    try:
+        bot.rpc.send_reaction(accid, msg_id, [reaction] if reaction else [])
+    except Exception as e:
+        logger.warning(f"Failed to send reaction {reaction}: {e}")
 
 def _get_top_posters(bot, accid, chat_id, limit=10, hours=24):
     """Return top posters in the given chat for the last N hours."""
@@ -991,7 +1002,8 @@ def help_command(bot, accid, event):
         f"/contact<ID> — Get a contact object for the given ID.\n"
         f"/help   — This message.\n"
         f"/chats  — Show catalog of available chats.\n"
-        f"/dchannels — Show catalog of available channels.\n\n"
+        f"/dchannels — Show catalog of available channels.\n"
+        f"/cmping <server1> ... — Ping relays to/from specified servers.\n\n"
         f"/donate — Support development ❤️\n\n"
         f"💡 _Commands have a 10-minute cooldown per group (except for admins)._\n\n"
         f"🤖 **Source:** Run your own bot: https://git.gluek.info/gluek/deltachat_bouncer"
@@ -1740,11 +1752,202 @@ def welcome_command(bot, accid, event):
               f"Example: 👋🏻 **Name** (💬 X), welcome to {catalog_chat['name']} group!{preview_text}")
     else:
         _send(bot, accid, msg.chat_id, 
-              "Usage:\n"
-              "/welcome — show current status\n"
-              "/welcome on — enable standard greeting\n"
               "/welcome on <additional text> — enable greeting with additional text\n"
               "/welcome off — disable greeting")
+
+def _parse_single_cmping(stdout, stderr, returncode):
+    # Split by lines and remove carriage returns, comment lines
+    lines = []
+    combined = (stdout or "") + "\n" + (stderr or "")
+    for raw_line in combined.splitlines():
+        line = raw_line.split('\r')[-1].strip()
+        if not line or line.startswith('#'):
+            continue
+        lines.append(line)
+        
+    rtt_line = None
+    for line in lines:
+        if "rtt min/avg/max/mdev" in line:
+            rtt_line = line
+            break
+            
+    if returncode == 0 and rtt_line:
+        match = re.search(r'rtt min/avg/max/mdev\s*=\s*([0-9.]+)/([0-9.]+)/([0-9.]+)/([0-9.]+)', rtt_line)
+        if match:
+            try:
+                return {
+                    "success": True,
+                    "min": float(match.group(1)),
+                    "avg": float(match.group(2)),
+                    "max": float(match.group(3)),
+                    "mdev": float(match.group(4))
+                }
+            except Exception:
+                pass
+                
+    err_lines = [l for l in lines if l.startswith('✗') or 'fail' in l.lower() or 'error' in l.lower() or 'connect' in l.lower()]
+    if not err_lines:
+        err_lines = [l for l in lines if l]
+    clean_errs = []
+    for el in err_lines:
+        if "cmping" in el.lower() and "usage" in el.lower():
+            continue
+        if el.startswith('✗'):
+            el = el.lstrip('✗').strip()
+        clean_errs.append(el)
+        
+    err_msg = " / ".join(clean_errs[-2:]) or "Unknown failure"
+    return {
+        "success": False,
+        "error": err_msg
+    }
+
+def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers):
+    cmping_path = shutil.which("cmping") or "/Users/gluek/.local/bin/cmping"
+    
+    results = []
+    all_failed = True
+    
+    for host1 in bot_domains:
+        for host2 in specified_servers:
+            pair_name = f"{host1} ⇄ {host2}"
+            pair_result = {
+                "pair": pair_name,
+                "forward": None,
+                "backward": None
+            }
+            
+            # --- 1. Forward Ping: host1 -> host2 ---
+            try:
+                cmd = [cmping_path, "-c", "3", host1, host2]
+                logger.info(f"Running: {' '.join(cmd)}")
+                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=45)
+                res = _parse_single_cmping(proc.stdout, proc.stderr, proc.returncode)
+                pair_result["forward"] = res
+            except subprocess.TimeoutExpired:
+                pair_result["forward"] = {"success": False, "error": "Timeout expired (45s)"}
+            except Exception as e:
+                pair_result["forward"] = {"success": False, "error": str(e)}
+                
+            # --- 2. Backward Ping (only if forward succeeded) ---
+            if pair_result["forward"].get("success"):
+                try:
+                    cmd = [cmping_path, "-c", "3", host2, host1]
+                    logger.info(f"Running: {' '.join(cmd)}")
+                    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=45)
+                    res = _parse_single_cmping(proc.stdout, proc.stderr, proc.returncode)
+                    pair_result["backward"] = res
+                except subprocess.TimeoutExpired:
+                    pair_result["backward"] = {"success": False, "error": "Timeout expired (45s)"}
+                except Exception as e:
+                    pair_result["backward"] = {"success": False, "error": str(e)}
+            else:
+                pair_result["backward"] = {"success": False, "error": "Skipped (forward failed)"}
+                
+            results.append(pair_result)
+            
+            if pair_result["forward"].get("success") and pair_result["backward"].get("success"):
+                all_failed = False
+            elif pair_result["forward"].get("success") or pair_result["backward"].get("success"):
+                all_failed = False
+
+    # Format the final report message
+    report_lines = ["🏓 **cmping report**\n"]
+    for r in results:
+        pair_str = r["pair"]
+        report_lines.append(f"**{pair_str}**")
+        
+        host1, host2 = pair_str.split(" ⇄ ")
+        f_res = r["forward"]
+        if f_res.get("success"):
+            report_lines.append(f"• `{host1}` → `{host2}`: avg **{f_res['avg']:.1f} ms** (min/avg/max = {f_res['min']:.1f}/{f_res['avg']:.1f}/{f_res['max']:.1f} ms)")
+        else:
+            err = f_res.get("error", "Unknown error")
+            report_lines.append(f"• `{host1}` → `{host2}`: ❌ Error: {err}")
+            
+        b_res = r["backward"]
+        if b_res.get("success"):
+            report_lines.append(f"• `{host2}` → `{host1}`: avg **{b_res['avg']:.1f} ms** (min/avg/max = {b_res['min']:.1f}/{b_res['avg']:.1f}/{b_res['max']:.1f} ms)")
+        elif b_res.get("error") != "Skipped (forward failed)":
+            err = b_res.get("error", "Unknown error")
+            report_lines.append(f"• `{host2}` → `{host1}`: ❌ Error: {err}")
+            
+        report_lines.append("") # empty line between pairs
+
+    # Update reaction based on result
+    if all_failed:
+        _react(bot, accid, msg_id, "❌")
+    else:
+        _react(bot, accid, msg_id, "☑️")
+        
+    # Send report
+    _send(bot, accid, chat_id, "\n".join(report_lines).strip())
+
+@dc_cli.on(events.NewMessage(command="/cmping"))
+def cmping_command(bot, accid, event):
+    msg = event.msg
+    
+    # 1. Check cooldown (debounce) - 15 seconds
+    now = time.time()
+    last_run = _chat_cmping_anti_spam.get(msg.chat_id, 0)
+    diff = now - last_run
+    if diff < CMPING_COOLDOWN_SECONDS:
+        remaining_sec = max(1, int(CMPING_COOLDOWN_SECONDS - diff))
+        _send(bot, accid, msg.chat_id, f"⌛️ Please wait {remaining_sec}s before running /cmping again.")
+        return
+        
+    # 2. Parse command arguments
+    payload_str = event.payload.strip() if event.payload else ""
+    specified_servers = [s.strip().lower() for s in payload_str.split() if s.strip()]
+    
+    if not specified_servers:
+        _send(bot, accid, msg.chat_id, "Usage: /cmping <server1> <server2> ...")
+        return
+
+    # Update cooldown
+    _chat_cmping_anti_spam[msg.chat_id] = now
+    
+    # 3. Add reaction ⏳
+    _react(bot, accid, msg.id, "⏳")
+    
+    # 4. Get bot transport domains
+    bot_domains = []
+    try:
+        transports = bot.rpc.list_transports(accid)
+    except Exception:
+        transports = []
+
+    for t in transports:
+        addr = t.get('addr', '') if isinstance(t, dict) else getattr(t, 'addr', '')
+        if addr:
+            domain = addr.split('@')[-1] if '@' in addr else addr
+            domain = domain.strip().lower()
+            if domain and domain not in bot_domains:
+                bot_domains.append(domain)
+
+    # Fallback to configured active address domain
+    if not bot_domains:
+        try:
+            addr = bot.rpc.get_config(accid, "configured_addr") or bot.rpc.get_config(accid, "addr")
+            if addr:
+                domain = addr.split('@')[-1] if '@' in addr else addr
+                domain = domain.strip().lower()
+                if domain and domain not in bot_domains:
+                    bot_domains.append(domain)
+        except Exception:
+            pass
+
+    if not bot_domains:
+        _react(bot, accid, msg.id, "❌")
+        _send(bot, accid, msg.chat_id, "❌ Error: Could not determine bot's own transport domain.")
+        return
+
+    # 5. Spawn background thread to run cmping
+    threading.Thread(
+        target=bg_cmping_worker,
+        args=(bot, accid, msg.chat_id, msg.id, bot_domains, specified_servers),
+        daemon=True
+    ).start()
 
 @dc_cli.on(events.NewMessage(is_info=True, is_bot=None, is_outgoing=None))
 def handle_dc_info_message(bot, accid, event):

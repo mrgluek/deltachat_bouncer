@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.0] - 2026-06-13
+
+### Added
+- **MTA Ping Command (`/cmping`):**
+  - Added `/cmping <server1> <server2> ...` command to ping chatmail relays (transports) to/from specified target servers using the `cmping` utility.
+  - Features real-time reaction-based status updates: displays `⏳` while pinging, `☑️` on success, and `❌` on all-failed.
+  - Runs ping tests asynchronously in a non-blocking background thread.
+  - Enforces a debounce cooldown of 15 seconds per chat.
+
 ## [2.1.0] - 2026-06-11
 
 ### Added
