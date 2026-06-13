@@ -6,9 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 - **New Admin Command `/cmfaillist`:** Shows only currently failing monitored links to quickly identify down servers without displaying the whole matrix.
+- **CMPing Results Persistence:** Save and load monitoring results state to SQLite database, so the bot remembers which servers were already down when it restarts (e.g. during code updates/deployments) and does not send duplicate failure alerts.
 
 ### Changed
 - **Robust Updates:** `update.sh` now uses `git reset --hard` instead of `git pull` to gracefully handle force-pushed updates on production instances.
+
 
 ## [2.5.0] - 2026-06-13
 

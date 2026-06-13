@@ -109,6 +109,19 @@ def init_db():
                 enabled_at REAL
             )
         ''')
+
+        # CMPing monitoring: results persistence
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cmping_results (
+                src TEXT,
+                dst TEXT,
+                success INTEGER,
+                error TEXT,
+                avg REAL,
+                checked_at REAL,
+                PRIMARY KEY (src, dst)
+            )
+        ''')
         
         conn.commit()
         conn.close()
@@ -523,5 +536,55 @@ def get_cmping_report_chat_enabled_at(chat_id: int) -> float:
         conn.close()
         return row[0] if row else None
 
+# --- CMPing results persistence ---
+
+def save_cmping_result(src: str, dst: str, success: bool, error: str, avg: float, checked_at: float):
+    """Save or update a cmping test result in the database."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO cmping_results (src, dst, success, error, avg, checked_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (src.strip().lower(), dst.strip().lower(), 1 if success else 0, error, avg, checked_at)
+        )
+        conn.commit()
+        conn.close()
+
+def get_all_cmping_results() -> dict:
+    """Load all cmping results from the database."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT src, dst, success, error, avg, checked_at FROM cmping_results")
+        rows = cursor.fetchall()
+        conn.close()
+
+        results = {}
+        for r in rows:
+            src, dst, success, error, avg, checked_at = r
+            results[(src, dst)] = {
+                "success": bool(success),
+                "error": error,
+                "avg": avg,
+                "checked_at": checked_at
+            }
+        return results
+
+def delete_cmping_results_for_domain(domain: str):
+    """Delete all results involving a specific domain."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM cmping_results WHERE src = ? OR dst = ?",
+            (domain.strip().lower(), domain.strip().lower())
+        )
+        conn.commit()
+        conn.close()
+
 init_db()
+
 

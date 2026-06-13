@@ -42,7 +42,8 @@ _cmping_global_lock = threading.Lock()
 # CMPing monitoring state
 _cmping_monitor_index = 0
 _cmping_monitor_running = False
-_cmping_last_results: dict[tuple, dict] = {}  # {(src, dst, "fwd"/"bwd"): {"success": bool, "avg": float, "error": str}}
+_cmping_last_results: dict[tuple, dict] = database.get_all_cmping_results()
+
 CMPING_MONITOR_INTERVAL = int(os.environ.get("CMPING_MONITOR_INTERVAL", "1800"))  # default 30 min
 
 def _get_domain_lock(domain: str) -> threading.Lock:
@@ -594,6 +595,15 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
                 state_changes.append((src_d, dst_d, old, result))
 
             _cmping_last_results[key] = result
+            database.save_cmping_result(
+                src=src_d,
+                dst=dst_d,
+                success=result.get("success"),
+                error=result.get("error", ""),
+                avg=result.get("avg", 0.0),
+                checked_at=result.get("checked_at", 0.0)
+            )
+
 
     # Send alerts for state changes
     if state_changes:
@@ -2389,7 +2399,9 @@ def cmpingdel_command(bot, accid, event):
         keys_to_remove = [k for k in _cmping_last_results if domain in k]
         for k in keys_to_remove:
             del _cmping_last_results[k]
+        database.delete_cmping_results_for_domain(domain)
         _send(bot, accid, msg.chat_id, f"✅ {domain} removed from monitoring.")
+
     else:
         _send(bot, accid, msg.chat_id, f"❌ {domain} is not in monitoring list.")
 
