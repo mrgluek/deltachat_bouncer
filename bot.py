@@ -1875,20 +1875,26 @@ def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers
         return (h1, h2, forward_res, forward_general, backward_res)
 
     results_map = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {}
-        for host2 in specified_servers:
-            for host1 in bot_domains:
-                f = executor.submit(run_pair_ping, host1, host2)
-                futures[f] = (host1, host2)
-                
+    def run_relay_pings(h1):
+        relay_results = []
+        for h2 in specified_servers:
+            res = run_pair_ping(h1, h2)
+            relay_results.append((h2, res))
+        return h1, relay_results
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(bot_domains)) as executor:
+        futures = {executor.submit(run_relay_pings, host1): host1 for host1 in bot_domains}
+        
         for f in concurrent.futures.as_completed(futures):
-            host1, host2 = futures[f]
+            host1 = futures[f]
             try:
-                results_map[(host1, host2)] = f.result()
+                h1, relay_results = f.result()
+                for host2, res in relay_results:
+                    results_map[(h1, host2)] = res
             except Exception as e:
-                logger.error(f"Error executing ping for {host1} <-> {host2}: {e}")
-                results_map[(host1, host2)] = (host1, host2, {"success": False, "error": str(e)}, False, None)
+                logger.error(f"Error in relay pings for {host1}: {e}")
+                for host2 in specified_servers:
+                    results_map[(host1, host2)] = (host1, host2, {"success": False, "error": str(e)}, False, None)
 
     report_body_lines = []
     all_failed = True
