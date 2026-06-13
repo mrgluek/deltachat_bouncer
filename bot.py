@@ -43,8 +43,10 @@ _cmping_global_lock = threading.Lock()
 _cmping_monitor_index = 0
 _cmping_monitor_running = False
 _cmping_last_results: dict[tuple, dict] = database.get_all_cmping_results()
+_cmping_server_status: dict[str, bool] = {}
 
 CMPING_MONITOR_INTERVAL = int(os.environ.get("CMPING_MONITOR_INTERVAL", "1800"))  # default 30 min
+
 
 def _get_domain_lock(domain: str) -> threading.Lock:
     with _domain_locks_lock:
@@ -546,7 +548,7 @@ def _cmping_monitor_loop(bot, accid):
 
 def _cmping_monitor_cycle(bot, accid, cmping_path):
     """Execute one monitoring cycle: pick source, check all pairs, report changes."""
-    global _cmping_monitor_index, _cmping_monitor_running, _cmping_last_results
+    global _cmping_monitor_index, _cmping_monitor_running, _cmping_last_results, _cmping_server_status
 
     if _cmping_monitor_running:
         logger.warning("CMPing monitor: previous cycle still running, skipping.")
@@ -563,7 +565,19 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
 
     if len(all_servers) < 2:
         logger.debug("CMPing monitor: fewer than 2 servers, skipping cycle.")
+        _cmping_monitor_running = False
         return
+
+    # Initialize server status map from DB if not done yet
+    if not _cmping_server_status:
+        for srv in all_servers:
+            _cmping_server_status[srv] = True
+        for (src, dst), res in _cmping_last_results.items():
+            if not res.get("success"):
+                if src in all_servers:
+                    _cmping_server_status[src] = False
+                if dst in all_servers:
+                    _cmping_server_status[dst] = False
 
     # Pick source via round-robin
     source_idx = _cmping_monitor_index % len(all_servers)
@@ -573,8 +587,9 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
 
     logger.info(f"CMPing monitor cycle: source={source}, targets={targets}")
 
-    # Check each pair
-    state_changes = []  # list of (src, dst, direction, old_result, new_result)
+    # Track results of this cycle for health computation
+    cycle_results = {}  # (dst) -> (fwd_result, bwd_result)
+    any_source_success = False
 
     for dst in targets:
         # Forward: source -> dst
@@ -582,18 +597,20 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
         # Backward: dst -> source
         bwd_result = _run_monitor_single(cmping_path, dst, source)
 
-        # Check for state changes
+        fwd_success = fwd_result.get("success")
+        bwd_success = bwd_result.get("success")
+
+        if fwd_success or bwd_success:
+            any_source_success = True
+
+        cycle_results[dst] = (fwd_result, bwd_result)
+
+        # Update last results and database
         for direction, result, src_d, dst_d in [
             ("fwd", fwd_result, source, dst),
             ("bwd", bwd_result, dst, source),
         ]:
             key = (src_d, dst_d)
-            old = _cmping_last_results.get(key)
-            old_success = old.get("success") if old else None
-
-            if old_success != result.get("success"):
-                state_changes.append((src_d, dst_d, old, result))
-
             _cmping_last_results[key] = result
             database.save_cmping_result(
                 src=src_d,
@@ -604,10 +621,43 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
                 checked_at=result.get("checked_at", 0.0)
             )
 
+    # Compute new health states and detect changes
+    health_changes = []  # list of (server, old_state, new_state, sample_error)
 
-    # Send alerts for state changes
-    if state_changes:
-        _send_monitor_alerts(bot, accid, state_changes, all_servers, source)
+    # Update targets health
+    for dst in targets:
+        fwd_res, bwd_res = cycle_results[dst]
+        is_healthy = fwd_res.get("success") and bwd_res.get("success")
+        
+        old_healthy = _cmping_server_status.get(dst, True)
+        if old_healthy != is_healthy:
+            # Determine sample error if became unhealthy
+            sample_err = None
+            if not is_healthy:
+                if not fwd_res.get("success"):
+                    sample_err = fwd_res.get("error")
+                else:
+                    sample_err = bwd_res.get("error")
+            health_changes.append((dst, old_healthy, is_healthy, sample_err))
+            _cmping_server_status[dst] = is_healthy
+
+            # If target recovered, clear any old errors involving it from other sources
+            if is_healthy:
+                _clear_all_errors_for_server(dst)
+
+    # Update source health (source is healthy if it has at least one success with any target)
+    source_healthy = any_source_success if targets else True
+    old_source_healthy = _cmping_server_status.get(source, True)
+    if old_source_healthy != source_healthy:
+        sample_err = "No successful checks with any peer" if not source_healthy else None
+        health_changes.append((source, old_source_healthy, source_healthy, sample_err))
+        _cmping_server_status[source] = source_healthy
+        if source_healthy:
+            _clear_all_errors_for_server(source)
+
+    # Send alerts for health changes
+    if health_changes:
+        _send_server_health_alerts(bot, accid, health_changes)
 
 
 def _run_monitor_single(cmping_path, src, dst):
@@ -642,81 +692,80 @@ def _run_monitor_single(cmping_path, src, dst):
     return result
 
 
-def _send_monitor_alerts(bot, accid, state_changes, all_servers, source):
-    """Send monitoring alerts to subscribed chats for state changes."""
+def _clear_all_errors_for_server(server: str):
+    """Clear all errors involving this server, replacing them with virtual success."""
+    global _cmping_last_results
+    now = time.time()
+    keys_to_update = []
+    for (src, dst), res in _cmping_last_results.items():
+        if src == server or dst == server:
+            if not res.get("success"):
+                keys_to_update.append((src, dst))
+                
+    for key in keys_to_update:
+        src, dst = key
+        virt_res = {
+            "success": True,
+            "avg": 0.0,
+            "error": "",
+            "checked_at": now
+        }
+        _cmping_last_results[key] = virt_res
+        database.save_cmping_result(
+            src=src,
+            dst=dst,
+            success=True,
+            error="",
+            avg=0.0,
+            checked_at=now
+        )
+
+
+def _send_server_health_alerts(bot, accid, health_changes):
+    """Send notifications about server health state changes (healthy <-> unhealthy)."""
     from datetime import datetime, timezone
 
     report_chats = database.get_all_cmping_report_chats()
     if not report_chats:
         return
 
-    # Separate failures and recoveries
-    failures = [(s, d, old, new) for s, d, old, new in state_changes if not new.get("success")]
-    recoveries = [(s, d, old, new) for s, d, old, new in state_changes if new.get("success") and old is not None]
+    gmt_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M GMT")
+    bot_name = os.environ.get("DISPLAY_NAME", "Bouncer Bot")
+    
+    failures = []
+    recoveries = []
+    for server, old_healthy, new_healthy, err in health_changes:
+        if not new_healthy:
+            failures.append((server, err))
+        else:
+            recoveries.append(server)
 
     if not failures and not recoveries:
         return
 
-    # Build emoji map for involved servers
-    def get_index_emoji(idx: int) -> str:
-        emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-        if 1 <= idx <= 10:
-            return emojis[idx - 1]
-        return f"[{idx}]"
-
-    domain_to_emoji = {}
-    for idx, d in enumerate(all_servers, 1):
-        domain_to_emoji[d] = get_index_emoji(idx)
-
-    gmt_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M GMT")
-    bot_name = os.environ.get("DISPLAY_NAME", "Bouncer Bot")
     messages = []
-
-    # Failure alert
+    
+    # 🔴 Failure Alert
     if failures:
-        # Collect involved domains
-        involved = set()
-        for s, d, _, _ in failures:
-            involved.add(s)
-            involved.add(d)
-
-        legend_lines = [f"{domain_to_emoji.get(d, d)} {d}" for d in all_servers if d in involved]
-        result_lines = []
-        for s, d, old, new in failures:
-            e1 = domain_to_emoji.get(s, s)
-            e2 = domain_to_emoji.get(d, d)
-            err = new.get("error", "Unknown error")
-            result_lines.append(f"{e1}→{e2} ❌ {err}")
-
+        lines = []
+        for srv, err in failures:
+            lines.append(f"❌ **{srv}**")
+            if err:
+                lines.append(f"  └─ Error: {err}")
         parts = [
-            "🔴 **CMPing Monitor Alert:**",
-            "\n".join(legend_lines),
-            "\n".join(result_lines),
-            f"Source: {source} | Generated {gmt_time} by {bot_name}",
+            "🔴 **CMPing Monitor Alert:**\nThe following servers are now **UNHEALTHY**:",
+            "\n".join(lines),
+            f"Generated {gmt_time} by {bot_name}"
         ]
         messages.append("\n\n".join(parts))
 
-    # Recovery alert
+    # 🟢 Recovery Alert
     if recoveries:
-        involved = set()
-        for s, d, _, _ in recoveries:
-            involved.add(s)
-            involved.add(d)
-
-        legend_lines = [f"{domain_to_emoji.get(d, d)} {d}" for d in all_servers if d in involved]
-        result_lines = []
-        for s, d, old, new in recoveries:
-            e1 = domain_to_emoji.get(s, s)
-            e2 = domain_to_emoji.get(d, d)
-            avg_str = f"{new['avg']:.1f} ms" if new.get("avg") else "OK"
-            old_err = old.get("error", "error") if old else "error"
-            result_lines.append(f"{e1}→{e2} ✅ {avg_str} (was: {old_err})")
-
+        lines = [f"✅ **{srv}** (All links restored)" for srv in recoveries]
         parts = [
-            "✅ **CMPing Recovery:**",
-            "\n".join(legend_lines),
-            "\n".join(result_lines),
-            f"Source: {source} | Generated {gmt_time} by {bot_name}",
+            "🟢 **CMPing Monitor Recovery:**\nThe following servers are now **HEALTHY**:",
+            "\n".join(lines),
+            f"Generated {gmt_time} by {bot_name}"
         ]
         messages.append("\n\n".join(parts))
 
@@ -727,6 +776,7 @@ def _send_monitor_alerts(bot, accid, state_changes, all_servers, source):
                 _send(bot, accid, chat_id, msg_text)
             except Exception as e:
                 logger.error(f"CMPing monitor: failed to send alert to chat {chat_id}: {e}")
+
 
 
 resilient_lock = threading.Lock()
