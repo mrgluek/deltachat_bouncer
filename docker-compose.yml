@@ -19,6 +19,7 @@ services:
       - DISPLAY_NAME
       - STATUS_TEXT
       - AVATAR_PATH
+      - CMPING_MONITOR_INTERVAL
     deploy:
       resources:
         limits:

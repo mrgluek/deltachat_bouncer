@@ -39,6 +39,12 @@ _domain_locks: dict[str, threading.Lock] = {}
 _domain_locks_lock = threading.Lock()
 _cmping_global_lock = threading.Lock()
 
+# CMPing monitoring state
+_cmping_monitor_index = 0
+_cmping_monitor_running = False
+_cmping_last_results: dict[tuple, dict] = {}  # {(src, dst, "fwd"/"bwd"): {"success": bool, "avg": float, "error": str}}
+CMPING_MONITOR_INTERVAL = int(os.environ.get("CMPING_MONITOR_INTERVAL", "1800"))  # default 30 min
+
 def _get_domain_lock(domain: str) -> threading.Lock:
     with _domain_locks_lock:
         if domain not in _domain_locks:
@@ -482,6 +488,237 @@ def _refresh_catalog_member_counts(bot, accid):
     logger.info(f"Catalog member count refresh complete: {updated} updated")
 
 
+def _get_bot_domains(bot, accid) -> list[str]:
+    """Get the bot's transport domains. Returns a list of domain strings."""
+    bot_domains = []
+    try:
+        transports = bot.rpc.list_transports(accid)
+    except Exception:
+        transports = []
+
+    for t in transports:
+        addr = t.get('addr', '') if isinstance(t, dict) else getattr(t, 'addr', '')
+        if addr:
+            domain = addr.split('@')[-1] if '@' in addr else addr
+            domain = domain.strip().lower()
+            if domain and domain not in bot_domains:
+                bot_domains.append(domain)
+
+    # Fallback to configured active address domain
+    if not bot_domains:
+        try:
+            addr = bot.rpc.get_config(accid, "configured_addr") or bot.rpc.get_config(accid, "addr")
+            if addr:
+                domain = addr.split('@')[-1] if '@' in addr else addr
+                domain = domain.strip().lower()
+                if domain and domain not in bot_domains:
+                    bot_domains.append(domain)
+        except Exception:
+            pass
+
+    return bot_domains
+
+
+def _cmping_monitor_loop(bot, accid):
+    """Background loop: periodically checks server connectivity via cmping."""
+    global _cmping_monitor_index, _cmping_monitor_running, _cmping_last_results
+
+    if CMPING_MONITOR_INTERVAL <= 0:
+        logger.info("CMPing monitor disabled (CMPING_MONITOR_INTERVAL=0).")
+        return
+
+    logger.info(f"CMPing monitor loop started (interval={CMPING_MONITOR_INTERVAL}s).")
+    time.sleep(60)  # Initial delay — let bot fully start up
+
+    cmping_path = shutil.which("cmping") or "cmping"
+
+    while True:
+        try:
+            _cmping_monitor_cycle(bot, accid, cmping_path)
+        except Exception as e:
+            logger.error(f"CMPing monitor cycle error: {e}")
+        finally:
+            _cmping_monitor_running = False
+
+        time.sleep(CMPING_MONITOR_INTERVAL)
+
+
+def _cmping_monitor_cycle(bot, accid, cmping_path):
+    """Execute one monitoring cycle: pick source, check all pairs, report changes."""
+    global _cmping_monitor_index, _cmping_monitor_running, _cmping_last_results
+
+    if _cmping_monitor_running:
+        logger.warning("CMPing monitor: previous cycle still running, skipping.")
+        return
+    _cmping_monitor_running = True
+
+    # Build server list: bot transports + manually monitored
+    bot_domains = _get_bot_domains(bot, accid)
+    monitor_domains = database.get_all_cmping_monitors()
+    all_servers = list(bot_domains)
+    for d in monitor_domains:
+        if d not in all_servers:
+            all_servers.append(d)
+
+    if len(all_servers) < 2:
+        logger.debug("CMPing monitor: fewer than 2 servers, skipping cycle.")
+        return
+
+    # Pick source via round-robin
+    source_idx = _cmping_monitor_index % len(all_servers)
+    source = all_servers[source_idx]
+    _cmping_monitor_index = (_cmping_monitor_index + 1) % len(all_servers)
+    targets = [s for s in all_servers if s != source]
+
+    logger.info(f"CMPing monitor cycle: source={source}, targets={targets}")
+
+    # Check each pair
+    state_changes = []  # list of (src, dst, direction, old_result, new_result)
+
+    for dst in targets:
+        # Forward: source -> dst
+        fwd_result = _run_monitor_single(cmping_path, source, dst)
+        # Backward: dst -> source
+        bwd_result = _run_monitor_single(cmping_path, dst, source)
+
+        # Check for state changes
+        for direction, result, src_d, dst_d in [
+            ("fwd", fwd_result, source, dst),
+            ("bwd", bwd_result, dst, source),
+        ]:
+            key = (src_d, dst_d)
+            old = _cmping_last_results.get(key)
+            old_success = old.get("success") if old else None
+
+            if old_success != result.get("success"):
+                state_changes.append((src_d, dst_d, old, result))
+
+            _cmping_last_results[key] = result
+
+    # Send alerts for state changes
+    if state_changes:
+        _send_monitor_alerts(bot, accid, state_changes, all_servers, source)
+
+
+def _run_monitor_single(cmping_path, src, dst):
+    """Run a single cmping check (src -> dst) with retry on failure.
+    Uses the global lock to avoid conflicts with user /cmping commands.
+    Returns dict with 'success', 'avg' (if success), 'error' (if failed), 'checked_at'."""
+    import subprocess
+
+    def do_check():
+        cmd = [cmping_path, "-c", "1", src, dst]
+        try:
+            _cmping_global_lock.acquire()
+            try:
+                stdout, stderr, rc = _run_cmping_subprocess(cmd, timeout=60)
+            finally:
+                _cmping_global_lock.release()
+            return _parse_single_cmping(stdout, stderr, rc)
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": "Timeout expired (60s)"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    result = do_check()
+
+    # If failed, retry once to filter transient issues
+    if not result.get("success"):
+        logger.info(f"CMPing monitor: {src} -> {dst} failed ({result.get('error')}), retrying...")
+        time.sleep(2)
+        result = do_check()
+
+    result["checked_at"] = time.time()
+    return result
+
+
+def _send_monitor_alerts(bot, accid, state_changes, all_servers, source):
+    """Send monitoring alerts to subscribed chats for state changes."""
+    from datetime import datetime, timezone
+
+    report_chats = database.get_all_cmping_report_chats()
+    if not report_chats:
+        return
+
+    # Separate failures and recoveries
+    failures = [(s, d, old, new) for s, d, old, new in state_changes if not new.get("success")]
+    recoveries = [(s, d, old, new) for s, d, old, new in state_changes if new.get("success") and old is not None]
+
+    if not failures and not recoveries:
+        return
+
+    # Build emoji map for involved servers
+    def get_index_emoji(idx: int) -> str:
+        emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+        if 1 <= idx <= 10:
+            return emojis[idx - 1]
+        return f"[{idx}]"
+
+    domain_to_emoji = {}
+    for idx, d in enumerate(all_servers, 1):
+        domain_to_emoji[d] = get_index_emoji(idx)
+
+    gmt_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M GMT")
+    bot_name = os.environ.get("DISPLAY_NAME", "Bouncer Bot")
+    messages = []
+
+    # Failure alert
+    if failures:
+        # Collect involved domains
+        involved = set()
+        for s, d, _, _ in failures:
+            involved.add(s)
+            involved.add(d)
+
+        legend_lines = [f"{domain_to_emoji.get(d, d)} {d}" for d in all_servers if d in involved]
+        result_lines = []
+        for s, d, old, new in failures:
+            e1 = domain_to_emoji.get(s, s)
+            e2 = domain_to_emoji.get(d, d)
+            err = new.get("error", "Unknown error")
+            result_lines.append(f"{e1}→{e2} ❌ {err}")
+
+        parts = [
+            "🔴 **CMPing Monitor Alert:**",
+            "\n".join(legend_lines),
+            "\n".join(result_lines),
+            f"Source: {source} | Generated {gmt_time} by {bot_name}",
+        ]
+        messages.append("\n\n".join(parts))
+
+    # Recovery alert
+    if recoveries:
+        involved = set()
+        for s, d, _, _ in recoveries:
+            involved.add(s)
+            involved.add(d)
+
+        legend_lines = [f"{domain_to_emoji.get(d, d)} {d}" for d in all_servers if d in involved]
+        result_lines = []
+        for s, d, old, new in recoveries:
+            e1 = domain_to_emoji.get(s, s)
+            e2 = domain_to_emoji.get(d, d)
+            avg_str = f"{new['avg']:.1f} ms" if new.get("avg") else "OK"
+            old_err = old.get("error", "error") if old else "error"
+            result_lines.append(f"{e1}→{e2} ✅ {avg_str} (was: {old_err})")
+
+        parts = [
+            "✅ **CMPing Recovery:**",
+            "\n".join(legend_lines),
+            "\n".join(result_lines),
+            f"Source: {source} | Generated {gmt_time} by {bot_name}",
+        ]
+        messages.append("\n\n".join(parts))
+
+    # Send to all subscribed chats
+    for msg_text in messages:
+        for chat_id in report_chats:
+            try:
+                _send(bot, accid, chat_id, msg_text)
+            except Exception as e:
+                logger.error(f"CMPing monitor: failed to send alert to chat {chat_id}: {e}")
+
+
 resilient_lock = threading.Lock()
 
 def _setup_resilient_mode(bot):
@@ -728,6 +965,9 @@ def on_start(bot, args):
     
     t = threading.Thread(target=_background_monitor_loop, args=(bot, accid), daemon=True)
     t.start()
+
+    t2 = threading.Thread(target=_cmping_monitor_loop, args=(bot, accid), daemon=True)
+    t2.start()
 
 
 @dc_cli.on(events.NewMessage(command="/initadmin"))
@@ -1070,7 +1310,12 @@ def help_command(bot, accid, event):
         help_text += "/welcome [on/off/...] — Manage welcome message for new members\n"
         help_text += "/dchanneladd <URL> — Join and add a channel to the catalog\n"
         help_text += "/dchannelremove [ID] — Remove channel from catalog\n"
-        help_text += "/dchanneldesc<ID> <text> — Update channel description"
+        help_text += "/dchanneldesc<ID> <text> — Update channel description\n"
+        help_text += "/cmpingadd <server> — Add server to connectivity monitoring\n"
+        help_text += "/cmpingdel <server> — Remove server from monitoring\n"
+        help_text += "/cmpinglist — Show monitored servers\n"
+        help_text += "/cmpingstatus — Show monitoring results matrix\n"
+        help_text += "/cmreport <on/off> — Toggle monitoring alerts in this chat"
         
     _send(bot, accid, msg.chat_id, help_text)
 
@@ -1841,7 +2086,7 @@ def _parse_single_cmping(stdout, stderr, returncode):
         "error": err_msg
     }
 
-def _run_cmping_subprocess(cmd, timeout=30):
+def _run_cmping_subprocess(cmd, timeout=60):
     """Run cmping as a subprocess with proper cleanup on timeout.
     Returns (stdout, stderr, returncode)."""
     proc = subprocess.Popen(
@@ -1913,7 +2158,7 @@ def _bg_cmping_worker_inner(bot, accid, chat_id, msg_id, bot_domains, specified_
             try:
                 cmd = [cmping_path, "-c", "3", h1, h2]
                 logger.info(f"Running: {' '.join(cmd)}")
-                stdout, stderr, rc = _run_cmping_subprocess(cmd, timeout=30)
+                stdout, stderr, rc = _run_cmping_subprocess(cmd, timeout=60)
                 res = _parse_single_cmping(stdout, stderr, rc)
                 if res.get("success"):
                     forward_res = res
@@ -1921,7 +2166,7 @@ def _bg_cmping_worker_inner(bot, accid, chat_id, msg_id, bot_domains, specified_
                     forward_res = res
                     forward_general = is_general_error(res.get("error", ""))
             except subprocess.TimeoutExpired:
-                forward_res = {"success": False, "error": "Timeout expired (30s)"}
+                forward_res = {"success": False, "error": "Timeout expired (60s)"}
                 forward_general = False
             except Exception as e:
                 forward_res = {"success": False, "error": str(e)}
@@ -1934,14 +2179,14 @@ def _bg_cmping_worker_inner(bot, accid, chat_id, msg_id, bot_domains, specified_
             try:
                 cmd = [cmping_path, "-c", "3", h2, h1]
                 logger.info(f"Running: {' '.join(cmd)}")
-                stdout, stderr, rc = _run_cmping_subprocess(cmd, timeout=30)
+                stdout, stderr, rc = _run_cmping_subprocess(cmd, timeout=60)
                 res = _parse_single_cmping(stdout, stderr, rc)
                 if res.get("success"):
                     backward_res = res
                 else:
                     backward_res = res
             except subprocess.TimeoutExpired:
-                backward_res = {"success": False, "error": "Timeout expired (30s)"}
+                backward_res = {"success": False, "error": "Timeout expired (60s)"}
             except Exception as e:
                 backward_res = {"success": False, "error": str(e)}
                 
@@ -2072,31 +2317,7 @@ def cmping_command(bot, accid, event):
     _react(bot, accid, msg.id, "⏳")
     
     # 4. Get bot transport domains
-    bot_domains = []
-    try:
-        transports = bot.rpc.list_transports(accid)
-    except Exception:
-        transports = []
-
-    for t in transports:
-        addr = t.get('addr', '') if isinstance(t, dict) else getattr(t, 'addr', '')
-        if addr:
-            domain = addr.split('@')[-1] if '@' in addr else addr
-            domain = domain.strip().lower()
-            if domain and domain not in bot_domains:
-                bot_domains.append(domain)
-
-    # Fallback to configured active address domain
-    if not bot_domains:
-        try:
-            addr = bot.rpc.get_config(accid, "configured_addr") or bot.rpc.get_config(accid, "addr")
-            if addr:
-                domain = addr.split('@')[-1] if '@' in addr else addr
-                domain = domain.strip().lower()
-                if domain and domain not in bot_domains:
-                    bot_domains.append(domain)
-        except Exception:
-            pass
+    bot_domains = _get_bot_domains(bot, accid)
 
     if not bot_domains:
         _react(bot, accid, msg.id, "❌")
@@ -2109,6 +2330,201 @@ def cmping_command(bot, accid, event):
         args=(bot, accid, msg.chat_id, msg.id, bot_domains, specified_servers),
         daemon=True
     ).start()
+
+@dc_cli.on(events.NewMessage(command="/cmpingadd"))
+def cmpingadd_command(bot, accid, event):
+    msg = event.msg
+    if not _is_dc_admin(bot, accid, msg.from_id):
+        _send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use /cmpingadd.")
+        return
+
+    text = msg.text.strip()
+    parts = text.split(None, 1)
+    if len(parts) < 2 or not parts[1].strip():
+        _send(bot, accid, msg.chat_id, "Usage: /cmpingadd <server>\nExample: /cmpingadd talklink.fun")
+        return
+
+    domain = parts[1].strip().lower()
+    # Basic validation
+    if '.' not in domain or len(domain) < 3:
+        _send(bot, accid, msg.chat_id, f"❌ Invalid domain: {domain}")
+        return
+
+    # Check if already a bot transport
+    bot_domains = _get_bot_domains(bot, accid)
+    if domain in bot_domains:
+        _send(bot, accid, msg.chat_id, f"ℹ️ {domain} is already a bot transport, no need to add it.")
+        return
+
+    # Check if already monitored
+    if database.is_cmping_monitor(domain):
+        _send(bot, accid, msg.chat_id, f"ℹ️ {domain} is already in monitoring.")
+        return
+
+    database.add_cmping_monitor(domain)
+    total_monitors = len(database.get_all_cmping_monitors())
+    total = len(bot_domains) + total_monitors
+    _send(bot, accid, msg.chat_id,
+          f"✅ {domain} added to monitoring.\nTotal: {len(bot_domains)} transport + {total_monitors} monitored = {total} servers.")
+
+@dc_cli.on(events.NewMessage(command="/cmpingdel"))
+def cmpingdel_command(bot, accid, event):
+    msg = event.msg
+    if not _is_dc_admin(bot, accid, msg.from_id):
+        _send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use /cmpingdel.")
+        return
+
+    text = msg.text.strip()
+    parts = text.split(None, 1)
+    if len(parts) < 2 or not parts[1].strip():
+        _send(bot, accid, msg.chat_id, "Usage: /cmpingdel <server>\nExample: /cmpingdel talklink.fun")
+        return
+
+    domain = parts[1].strip().lower()
+    removed = database.remove_cmping_monitor(domain)
+    if removed:
+        # Clean up last results for this domain
+        keys_to_remove = [k for k in _cmping_last_results if domain in k]
+        for k in keys_to_remove:
+            del _cmping_last_results[k]
+        _send(bot, accid, msg.chat_id, f"✅ {domain} removed from monitoring.")
+    else:
+        _send(bot, accid, msg.chat_id, f"❌ {domain} is not in monitoring list.")
+
+@dc_cli.on(events.NewMessage(command="/cmpinglist"))
+def cmpinglist_command(bot, accid, event):
+    msg = event.msg
+    if not _is_dc_admin(bot, accid, msg.from_id):
+        _send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use /cmpinglist.")
+        return
+
+    bot_domains = _get_bot_domains(bot, accid)
+    monitor_domains = database.get_all_cmping_monitors()
+
+    all_servers = list(bot_domains)
+    for d in monitor_domains:
+        if d not in all_servers:
+            all_servers.append(d)
+
+    lines = ["📡 **CMPing Monitor Servers:**\n"]
+
+    if bot_domains:
+        lines.append("**Transport servers (auto):**")
+        for i, d in enumerate(bot_domains, 1):
+            lines.append(f"  {i}. {d}")
+    else:
+        lines.append("_No transport servers detected._")
+
+    if monitor_domains:
+        lines.append("\n**Monitored servers (manual):**")
+        offset = len(bot_domains)
+        for i, d in enumerate(monitor_domains, offset + 1):
+            lines.append(f"  {i}. {d}")
+    else:
+        lines.append("\n_No manually added servers._")
+
+    n = len(all_servers)
+    pairs = n * (n - 1) // 2
+    lines.append(f"\nTotal: {n} servers, {pairs} unique pairs")
+
+    if n >= 2:
+        source_idx = _cmping_monitor_index % n
+        next_source = all_servers[source_idx]
+        interval_min = CMPING_MONITOR_INTERVAL // 60
+        lines.append(f"Next check source: {next_source}")
+        lines.append(f"Interval: {interval_min} min | Full rotation: ~{n * interval_min} min")
+
+    _send(bot, accid, msg.chat_id, "\n".join(lines))
+
+@dc_cli.on(events.NewMessage(command="/cmreport"))
+def cmreport_command(bot, accid, event):
+    msg = event.msg
+    if not _is_dc_admin(bot, accid, msg.from_id):
+        _send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use /cmreport.")
+        return
+
+    text = msg.text.strip()
+    parts = text.split(None, 1)
+    arg = parts[1].strip().lower() if len(parts) > 1 else ""
+
+    if arg == "on":
+        database.add_cmping_report_chat(msg.chat_id)
+        _send(bot, accid, msg.chat_id, "✅ CMPing monitoring alerts **enabled** for this chat.")
+    elif arg == "off":
+        removed = database.remove_cmping_report_chat(msg.chat_id)
+        if removed:
+            _send(bot, accid, msg.chat_id, "✅ CMPing monitoring alerts **disabled** for this chat.")
+        else:
+            _send(bot, accid, msg.chat_id, "ℹ️ CMPing monitoring alerts were not enabled for this chat.")
+    else:
+        # Show status
+        from datetime import datetime, timezone
+        is_enabled = database.is_cmping_report_chat(msg.chat_id)
+        if is_enabled:
+            enabled_at = database.get_cmping_report_chat_enabled_at(msg.chat_id)
+            if enabled_at:
+                dt = datetime.fromtimestamp(enabled_at, tz=timezone.utc).strftime("%Y-%m-%d %H:%M GMT")
+                _send(bot, accid, msg.chat_id, f"📊 CMPing monitoring alerts: ✅ enabled (since {dt})\n\nUse `/cmreport off` to disable.")
+            else:
+                _send(bot, accid, msg.chat_id, "📊 CMPing monitoring alerts: ✅ enabled\n\nUse `/cmreport off` to disable.")
+        else:
+            _send(bot, accid, msg.chat_id, "📊 CMPing monitoring alerts: ❌ disabled\n\nUse `/cmreport on` to enable.")
+
+@dc_cli.on(events.NewMessage(command="/cmpingstatus"))
+def cmpingstatus_command(bot, accid, event):
+    msg = event.msg
+    if not _is_dc_admin(bot, accid, msg.from_id):
+        _send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use /cmpingstatus.")
+        return
+
+    from datetime import datetime, timezone
+
+    bot_domains = _get_bot_domains(bot, accid)
+    monitor_domains = database.get_all_cmping_monitors()
+    all_servers = list(bot_domains)
+    for d in monitor_domains:
+        if d not in all_servers:
+            all_servers.append(d)
+
+    if len(all_servers) < 2:
+        _send(bot, accid, msg.chat_id, "ℹ️ Fewer than 2 servers configured for monitoring.")
+        return
+
+    now = time.time()
+    lines = ["📊 **CMPing Monitor Status:**\n"]
+
+    has_any = False
+    for src in all_servers:
+        for dst in all_servers:
+            if src == dst:
+                continue
+            key = (src, dst)
+            result = _cmping_last_results.get(key)
+            if result is None:
+                continue
+            has_any = True
+            checked_at = result.get("checked_at", 0)
+            age_min = int((now - checked_at) / 60) if checked_at else 0
+
+            if result.get("success"):
+                avg = result.get("avg", 0)
+                lines.append(f"✅ {src} → {dst}: {avg:.1f} ms ({age_min} min ago)")
+            else:
+                err = result.get("error", "Unknown")
+                lines.append(f"❌ {src} → {dst}: {err} ({age_min} min ago)")
+
+    if not has_any:
+        lines.append("_No checks performed yet. Monitoring starts after bot startup._")
+
+    # Add rotation info
+    n = len(all_servers)
+    source_idx = _cmping_monitor_index % n
+    next_source = all_servers[source_idx]
+    interval_min = CMPING_MONITOR_INTERVAL // 60
+    lines.append(f"\nSource rotation: {_cmping_monitor_index % n + 1}/{n} (next: {next_source})")
+    lines.append(f"Interval: {interval_min} min")
+
+    _send(bot, accid, msg.chat_id, "\n".join(lines))
 
 @dc_cli.on(events.NewMessage(is_info=True, is_bot=None, is_outgoing=None))
 def handle_dc_info_message(bot, accid, event):

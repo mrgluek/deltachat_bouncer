@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.0] - 2026-06-13
+
+### Added
+- **Periodic CMPing Monitoring System:**
+  - Automatic server connectivity monitoring using a round-robin algorithm: each cycle picks the next server as "source" and checks its connectivity with all other servers.
+  - Uses `-c 1` for speed (~3–6 min per cycle). Full mesh coverage in N×interval (e.g., 5 hours for 20 servers at 30-min intervals).
+  - Retry on failure to filter transient issues — only reports confirmed failures.
+  - Alerts are sent **only on state changes** (OK→FAIL or FAIL→OK) to avoid spam.
+  - Recovery notifications when a previously failing pair starts working again.
+  - Configurable interval via `CMPING_MONITOR_INTERVAL` env var (default: 1800s / 30 min). Set to `0` to disable.
+- **New Admin Commands:**
+  - `/cmpingadd <server>` — Add a server to the connectivity monitoring rotation.
+  - `/cmpingdel <server>` — Remove a server from monitoring.
+  - `/cmpinglist` — Show all monitored servers (transport + manual), pair count, and rotation info.
+  - `/cmpingstatus` — Show full monitoring results matrix with per-pair status and check age.
+  - `/cmreport <on/off>` — Subscribe/unsubscribe current chat to receive monitoring alerts.
+
+### Changed
+- **Refactored** transport domain extraction into shared `_get_bot_domains()` helper, reducing code duplication between `/cmping` and the monitoring system.
+- **CMPing timeout** increased from 30s to 60s for subprocess execution.
+- **Max 5 servers** limit added per `/cmping` request.
+
 ## [2.2.0] - 2026-06-13
 
 ### Added

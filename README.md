@@ -14,6 +14,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - 📬 **Relay Check (`/relays`):** Scan for group members using regular mail providers (Yandex, Mail.ru, etc.).
 - 🏆 **Activity Ranking (`/top`):** Show the 10 most active members in the last 24 hours.
 - 🏓 **ChatMail Ping (`/cmping`):** Ping mail relays (transports) to/from specified target servers using the `cmping` utility. Features real-time reaction-based progress tracking (`⏳`, `☑️`, `❌`) and runs asynchronously.
+- 📡 **Server Connectivity Monitoring:** Automatic periodic monitoring of server connectivity using a round-robin algorithm. Checks each server pair with retry logic, reports only on state changes (OK→FAIL / FAIL→OK) to subscribed chats. Configurable interval via `CMPING_MONITOR_INTERVAL` env var (default: 30 min).
 - 👤 **Contact Sharing:** Reports include `/contact<ID>` links to quickly get a contact object for any user.
 - ⏳ **14-Day Grace Period:** The bot tracks group activity in the background and requires 14 days of observation before reporting "never seen" users.
 - 🛡️ **Secure Administration:** Claim ownership with `/initadmin`. Admins bypass rate limits and have exclusive control over bot settings.
@@ -79,6 +80,11 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/rmtransport <addr>` — Remove a mail relay (Admin only).
 - `/setprimary <addr>` — Switch the primary mail relay (Admin only).
 - `/resilient` — Toggle resilient sending mode across all relays (Admin only).
+- `/cmpingadd <server>` — Add a server to connectivity monitoring rotation (Admin only).
+- `/cmpingdel <server>` — Remove a server from monitoring (Admin only).
+- `/cmpinglist` — Show all monitored servers, pair count, and rotation info (Admin only).
+- `/cmpingstatus` — Show full monitoring results matrix (Admin only).
+- `/cmreport <on/off>` — Toggle monitoring alerts for current chat (Admin only).
 
 ## Admin Management
 

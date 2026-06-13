@@ -93,6 +93,22 @@ def init_db():
                 first_seen_at REAL
             )
         ''')
+
+        # CMPing monitoring: tracked server domains
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cmping_monitors (
+                domain TEXT PRIMARY KEY,
+                added_at REAL
+            )
+        ''')
+
+        # CMPing monitoring: chats subscribed to alerts
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cmping_report_chats (
+                chat_id INTEGER PRIMARY KEY,
+                enabled_at REAL
+            )
+        ''')
         
         conn.commit()
         conn.close()
@@ -406,6 +422,106 @@ def update_catalog_chat_description(catalog_id: int, description: str):
         cursor.execute("UPDATE catalog_chats SET description = ? WHERE id = ?", (description, catalog_id))
         conn.commit()
         conn.close()
+
+# --- CMPing monitoring functions ---
+
+def add_cmping_monitor(domain: str):
+    """Add a server domain to cmping monitoring."""
+    import time
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR IGNORE INTO cmping_monitors (domain, added_at) VALUES (?, ?)",
+            (domain.strip().lower(), time.time())
+        )
+        conn.commit()
+        conn.close()
+
+def remove_cmping_monitor(domain: str) -> bool:
+    """Remove a server domain from cmping monitoring. Returns True if removed."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM cmping_monitors WHERE domain = ?", (domain.strip().lower(),))
+        removed = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return removed
+
+def get_all_cmping_monitors() -> list[str]:
+    """Get all monitored server domains."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT domain FROM cmping_monitors ORDER BY added_at ASC")
+        rows = cursor.fetchall()
+        conn.close()
+        return [r[0] for r in rows]
+
+def is_cmping_monitor(domain: str) -> bool:
+    """Check if a domain is in cmping monitoring."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM cmping_monitors WHERE domain = ?", (domain.strip().lower(),))
+        row = cursor.fetchone()
+        conn.close()
+        return row is not None
+
+def add_cmping_report_chat(chat_id: int):
+    """Subscribe a chat to cmping monitoring alerts."""
+    import time
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO cmping_report_chats (chat_id, enabled_at) VALUES (?, ?)",
+            (chat_id, time.time())
+        )
+        conn.commit()
+        conn.close()
+
+def remove_cmping_report_chat(chat_id: int) -> bool:
+    """Unsubscribe a chat from cmping monitoring alerts. Returns True if removed."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM cmping_report_chats WHERE chat_id = ?", (chat_id,))
+        removed = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return removed
+
+def get_all_cmping_report_chats() -> list[int]:
+    """Get all chat IDs subscribed to cmping monitoring alerts."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT chat_id FROM cmping_report_chats")
+        rows = cursor.fetchall()
+        conn.close()
+        return [r[0] for r in rows]
+
+def is_cmping_report_chat(chat_id: int) -> bool:
+    """Check if a chat is subscribed to cmping monitoring alerts."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM cmping_report_chats WHERE chat_id = ?", (chat_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row is not None
+
+def get_cmping_report_chat_enabled_at(chat_id: int) -> float:
+    """Get the timestamp when a chat was subscribed to cmping monitoring."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT enabled_at FROM cmping_report_chats WHERE chat_id = ?", (chat_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
 
 init_db()
 
