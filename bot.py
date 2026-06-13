@@ -1928,7 +1928,22 @@ def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers
             else:
                 backward_str = "❌"
                 
-            group_lines.append(f"{emoji1} {forward_str} → 🌐 ← {backward_str} {emoji2}")
+            line = f"{emoji1} {forward_str} → 🌐 ← {backward_str} {emoji2}"
+            
+            err_details = []
+            if forward_res and not forward_res.get("success"):
+                err_msg = forward_res.get("error", "Unknown error")
+                err_details.append(f"↳ [{emoji1} → {emoji2}] {err_msg}")
+                
+            if backward_res and not backward_res.get("success"):
+                err_msg = backward_res.get("error", "Unknown error")
+                if err_msg != "Skipped (forward failed)":
+                    err_details.append(f"↳ [{emoji2} → {emoji1}] {err_msg}")
+                    
+            if err_details:
+                line += "\n" + "\n".join(err_details)
+                
+            group_lines.append(line)
             
         if group_lines:
             report_body_lines.extend(group_lines)
