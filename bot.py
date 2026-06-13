@@ -2058,7 +2058,11 @@ def cmping_command(bot, accid, event):
     specified_servers = [s.strip().lower() for s in payload_str.split() if s.strip()]
     
     if not specified_servers:
-        _send(bot, accid, msg.chat_id, "Usage: /cmping <server1> <server2> ...")
+        _send(bot, accid, msg.chat_id, "Usage: /cmping <server1> <server2> ... (max 5)")
+        return
+
+    if len(specified_servers) > 5:
+        _send(bot, accid, msg.chat_id, "❌ Maximum 5 servers per request.")
         return
 
     # Update cooldown
