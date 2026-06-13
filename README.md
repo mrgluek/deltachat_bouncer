@@ -84,7 +84,9 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/cmpingdel <server>` — Remove a server from monitoring (Admin only).
 - `/cmpinglist` — Show all monitored servers, pair count, and rotation info (Admin only).
 - `/cmpingstatus` — Show full monitoring results matrix (Admin only).
+- `/cmfaillist` — Show only currently failed links (Admin only).
 - `/cmreport <on/off>` — Toggle monitoring alerts for current chat (Admin only).
+
 
 ## Admin Management
 

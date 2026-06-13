@@ -1315,7 +1315,9 @@ def help_command(bot, accid, event):
         help_text += "/cmpingdel <server> — Remove server from monitoring\n"
         help_text += "/cmpinglist — Show monitored servers\n"
         help_text += "/cmpingstatus — Show monitoring results matrix\n"
+        help_text += "/cmfaillist — Show currently failed links only\n"
         help_text += "/cmreport <on/off> — Toggle monitoring alerts in this chat"
+
         
     _send(bot, accid, msg.chat_id, help_text)
 
@@ -2526,7 +2528,50 @@ def cmpingstatus_command(bot, accid, event):
 
     _send(bot, accid, msg.chat_id, "\n".join(lines))
 
+@dc_cli.on(events.NewMessage(command="/cmfaillist"))
+def cmfaillist_command(bot, accid, event):
+    msg = event.msg
+    if not _is_dc_admin(bot, accid, msg.from_id):
+        _send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use /cmfaillist.")
+        return
+
+    bot_domains = _get_bot_domains(bot, accid)
+    monitor_domains = database.get_all_cmping_monitors()
+    all_servers = list(bot_domains)
+    for d in monitor_domains:
+        if d not in all_servers:
+            all_servers.append(d)
+
+    if len(all_servers) < 2:
+        _send(bot, accid, msg.chat_id, "ℹ️ Fewer than 2 servers configured for monitoring.")
+        return
+
+    now = time.time()
+    lines = ["🔴 **Current CMPing Monitor Failures:**\n"]
+
+    failed_count = 0
+    for src in all_servers:
+        for dst in all_servers:
+            if src == dst:
+                continue
+            key = (src, dst)
+            result = _cmping_last_results.get(key)
+            if result is None:
+                continue
+            if not result.get("success"):
+                failed_count += 1
+                checked_at = result.get("checked_at", 0)
+                age_min = int((now - checked_at) / 60) if checked_at else 0
+                err = result.get("error", "Unknown")
+                lines.append(f"❌ {src} → {dst}: {err} ({age_min} min ago)")
+
+    if failed_count == 0:
+        _send(bot, accid, msg.chat_id, "✅ **All monitored links are healthy.**\nNo failures detected at the moment.")
+    else:
+        _send(bot, accid, msg.chat_id, "\n".join(lines))
+
 @dc_cli.on(events.NewMessage(is_info=True, is_bot=None, is_outgoing=None))
+
 def handle_dc_info_message(bot, accid, event):
     msg = event.msg
     dc_chat_id = msg.chat_id
