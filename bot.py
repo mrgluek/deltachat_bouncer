@@ -605,13 +605,28 @@ def on_init(bot, args):
         )
         bot.rpc.set_config(dc_accid, "selfstatus", status_text)
         
-        # Set icon if exists
+        # Set icon if configured or fallback to default icon
         try:
             base_dir = os.path.dirname(os.path.abspath(__file__))
-            for icon_name in ["icon.png", os.path.join("data", "icon.png")]:
-                icon_path = os.path.join(base_dir, icon_name)
-                if os.path.exists(icon_path):
-                    bot.rpc.set_config(dc_accid, "selfavatar", icon_path)
+            avatar_env = os.environ.get("AVATAR_PATH")
+            avatar_paths = []
+            if avatar_env:
+                if os.path.isabs(avatar_env):
+                    avatar_paths.append(avatar_env)
+                else:
+                    avatar_paths.append(os.path.join(base_dir, avatar_env))
+                    avatar_paths.append(os.path.abspath(avatar_env))
+            
+            # Default paths fallback
+            avatar_paths.extend([
+                os.path.join(base_dir, "icon.png"),
+                os.path.join(base_dir, "data", "icon.png")
+            ])
+            
+            for path in avatar_paths:
+                if os.path.exists(path):
+                    bot.rpc.set_config(dc_accid, "selfavatar", path)
+                    bot.logger.info(f"Successfully configured bot avatar from {path}")
                     break
         except Exception as e:
             bot.logger.warning(f"Could not set avatar: {e}")
@@ -995,9 +1010,16 @@ def help_command(bot, accid, event):
     contact = bot.rpc.get_contact(accid, msg.from_id)
     sender_email = contact.address
     
+    try:
+        status_text = bot.rpc.get_config(accid, "selfstatus")
+    except Exception:
+        status_text = os.environ.get("STATUS_TEXT")
+    if not status_text:
+        status_text = f"I monitor groups and report inactive users (no activity for {INACTIVITY_DAYS_THRESHOLD} days)."
+
     help_text = (
         f"👋 Hi {sender_email}!\n\n"
-        f"I monitor groups and report inactive users (no activity for {INACTIVITY_DAYS_THRESHOLD} days).\n\n"
+        f"{status_text}\n\n"
         f"**Commands:**\n"
         f"/bounce — Trigger an inactivity check in the current group.\n"
         f"/search [query1] ... — Search members by email/domain (e.g. @testrun.org) or reply to a message.\n"

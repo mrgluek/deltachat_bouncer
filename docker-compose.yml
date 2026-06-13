@@ -18,6 +18,7 @@ services:
       - TZ=UTC
       - DISPLAY_NAME
       - STATUS_TEXT
+      - AVATAR_PATH
     deploy:
       resources:
         limits:
