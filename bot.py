@@ -1803,7 +1803,7 @@ def _parse_single_cmping(stdout, stderr, returncode):
     }
 
 def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers):
-    cmping_path = shutil.which("cmping") or "/Users/gluek/.local/bin/cmping"
+    cmping_path = shutil.which("cmping") or "cmping"
     
     results = []
     all_failed = True
