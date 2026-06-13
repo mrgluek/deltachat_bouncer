@@ -1805,10 +1805,26 @@ def _parse_single_cmping(stdout, stderr, returncode):
 def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers):
     cmping_path = shutil.which("cmping") or "cmping"
     
-    from datetime import datetime, timezone
-    gmt_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M GMT")
-    
-    report_lines = [f"🏓 **CMPing Report ({gmt_time}) by Bouncer Bot:**\n"]
+    all_domains = list(bot_domains)
+    for s in specified_servers:
+        if s not in all_domains:
+            all_domains.append(s)
+            
+    def get_index_emoji(idx: int) -> str:
+        emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+        if 1 <= idx <= 10:
+            return emojis[idx - 1]
+        return f"[{idx}]"
+
+    domain_to_emoji = {}
+    for idx, d in enumerate(all_domains, 1):
+        domain_to_emoji[d] = get_index_emoji(idx)
+
+    legend_lines = []
+    for d in all_domains:
+        legend_lines.append(f"{domain_to_emoji[d]} {d}")
+
+    report_body_lines = []
     all_failed = True
     
     def is_general_error(err_str):
@@ -1822,7 +1838,11 @@ def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers
 
     for host2 in specified_servers:
         group_lines = []
+        emoji2 = domain_to_emoji[host2]
+        
         for host1 in bot_domains:
+            emoji1 = domain_to_emoji[host1]
+            
             # --- 1. Forward Ping: host1 -> host2 ---
             forward_res = None
             forward_general = False
@@ -1845,7 +1865,7 @@ def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers
                 
             if forward_res and not forward_res.get("success") and forward_general:
                 err_msg = forward_res.get("error", "General setup error")
-                group_lines.append(f"**{host1}** ❌ **{host2}**\n↳ {err_msg}")
+                group_lines.append(f"{emoji1} ❌ {emoji2}\n↳ {err_msg}")
                 continue
                 
             # --- 2. Backward Ping: host2 -> host1 ---
@@ -1876,18 +1896,32 @@ def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers
             else:
                 backward_str = "❌"
                 
-            group_lines.append(f"**{host1}** {forward_str} → 🌐 ← {backward_str} **{host2}**")
+            group_lines.append(f"{emoji1} {forward_str} → 🌐 ← {backward_str} {emoji2}")
             
         if group_lines:
-            report_lines.extend(group_lines)
-            report_lines.append("")
+            report_body_lines.extend(group_lines)
+            report_body_lines.append("")
+
+    from datetime import datetime, timezone
+    gmt_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M GMT")
+    
+    report_parts = [
+        "🏓 **CMPing Report:**",
+        "\n".join(legend_lines)
+    ]
+    
+    body_content = "\n".join(report_body_lines).strip()
+    if body_content:
+        report_parts.append(body_content)
+        
+    report_parts.append(f"Generated {gmt_time} by Bouncer Bot")
 
     if all_failed:
         _react(bot, accid, msg_id, "❌")
     else:
         _react(bot, accid, msg_id, "☑️")
         
-    _send(bot, accid, chat_id, "\n".join(report_lines).strip())
+    _send(bot, accid, chat_id, "\n\n".join(report_parts).strip())
 
 @dc_cli.on(events.NewMessage(command="/cmping"))
 def cmping_command(bot, accid, event):
