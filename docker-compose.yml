@@ -16,6 +16,8 @@ services:
       - DC_DB_DIR=/app/data
       - DB_PATH=/app/data/bouncer.db
       - TZ=UTC
+      - DISPLAY_NAME
+      - STATUS_TEXT
     deploy:
       resources:
         limits:

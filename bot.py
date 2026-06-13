@@ -597,8 +597,13 @@ def on_init(bot, args):
     accounts = bot.rpc.get_all_account_ids()
     if accounts:
         dc_accid = accounts[0]
-        bot.rpc.set_config(dc_accid, "displayname", "Bouncer Bot")
-        bot.rpc.set_config(dc_accid, "selfstatus", "I monitor group activity, manage chat/channel catalogs, welcome new members, and search contacts. Send /help for commands.")
+        bot_name = os.environ.get("DISPLAY_NAME", "Bouncer Bot")
+        bot.rpc.set_config(dc_accid, "displayname", bot_name)
+        status_text = os.environ.get(
+            "STATUS_TEXT",
+            "I monitor group activity, manage chat/channel catalogs, welcome new members, and search contacts. Send /help for commands."
+        )
+        bot.rpc.set_config(dc_accid, "selfstatus", status_text)
         
         # Set icon if exists
         try:
@@ -1954,7 +1959,8 @@ def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers
     if body_content:
         report_parts.append(body_content)
         
-    report_parts.append(f"Generated {gmt_time} by Bouncer Bot")
+    bot_name = os.environ.get("DISPLAY_NAME", "Bouncer Bot")
+    report_parts.append(f"Generated {gmt_time} by {bot_name}")
 
     if all_failed:
         _react(bot, accid, msg_id, "❌")
