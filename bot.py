@@ -2609,28 +2609,57 @@ def cmfaillist_command(bot, accid, event):
         return
 
     now = time.time()
-    lines = ["🔴 **Current CMPing Monitor Failures:**\n"]
+    
+    global _cmping_server_status
+    if not _cmping_server_status:
+        for srv in all_servers:
+            _cmping_server_status[srv] = True
+        for (src, dst), res in _cmping_last_results.items():
+            if not res.get("success"):
+                if src in all_servers:
+                    _cmping_server_status[src] = False
+                if dst in all_servers:
+                    _cmping_server_status[dst] = False
 
-    failed_count = 0
-    for src in all_servers:
-        for dst in all_servers:
-            if src == dst:
-                continue
-            key = (src, dst)
-            result = _cmping_last_results.get(key)
-            if result is None:
-                continue
-            if not result.get("success"):
-                failed_count += 1
-                checked_at = result.get("checked_at", 0)
-                age_min = int((now - checked_at) / 60) if checked_at else 0
-                err = result.get("error", "Unknown")
-                lines.append(f"❌ {src} → {dst}: {err} ({age_min} min ago)")
+    unhealthy_servers = [srv for srv in all_servers if not _cmping_server_status.get(srv, True)]
 
-    if failed_count == 0:
+    if not unhealthy_servers:
         _send(bot, accid, msg.chat_id, "✅ **All monitored links are healthy.**\nNo failures detected at the moment.")
-    else:
-        _send(bot, accid, msg.chat_id, "\n".join(lines))
+        return
+
+    lines = ["🔴 **Current CMPing Monitor Failures (Grouped by Server):**\n"]
+
+    for srv in unhealthy_servers:
+        lines.append(f"❌ **{srv}**")
+        
+        # Collect outgoing failures (srv -> dst)
+        out_fails = []
+        # Collect incoming failures (src -> srv)
+        in_fails = []
+        
+        for (src, dst), res in _cmping_last_results.items():
+            if not res.get("success"):
+                checked_at = res.get("checked_at", 0)
+                age_min = int((now - checked_at) / 60) if checked_at else 0
+                err = res.get("error", "Unknown")
+                
+                if src == srv:
+                    out_fails.append(f"  ├─ Outgoing to **{dst}**: {err} ({age_min} min ago)")
+                elif dst == srv:
+                    in_fails.append(f"  ├─ Incoming from **{src}**: {err} ({age_min} min ago)")
+                    
+        if out_fails:
+            lines.append("  *Outgoing:*")
+            lines.extend(out_fails)
+        if in_fails:
+            lines.append("  *Incoming:*")
+            lines.extend(in_fails)
+        if not out_fails and not in_fails:
+            lines.append("  └─ No active failure details found (waiting for next cycle)")
+        lines.append("")  # Empty line separator
+
+    _send(bot, accid, msg.chat_id, "\n".join(lines).strip())
+
 
 @dc_cli.on(events.NewMessage(is_info=True, is_bot=None, is_outgoing=None))
 
