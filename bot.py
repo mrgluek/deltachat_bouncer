@@ -1858,10 +1858,13 @@ def handle_dc_info_message(bot, accid, event):
                             member_name = contact.name or contact.display_name or contact.address or "New member"
                             user_chat_count = get_user_chat_count(bot, accid, new_member_id)
                             
+                            database.ensure_contact_first_seen(new_member_id, time.time())
+                            age = _get_contact_age_indicator(new_member_id)
+                            
                             chat_name = catalog_chat['name']
                             welcome_suffix = f" {catalog_chat['welcome_text']}" if catalog_chat.get('welcome_text') else ""
                             
-                            welcome_msg = f"👋🏻 **{member_name}** (💬 {user_chat_count}), welcome to {chat_name} group!{welcome_suffix}"
+                            welcome_msg = f"👋🏻 {age} **{member_name}** (💬 {user_chat_count}), welcome to {chat_name} group!{welcome_suffix}"
                             _send(bot, accid, dc_chat_id, welcome_msg)
                             logger.info(f"Welcome greeting sent for {member_name} in chat {dc_chat_id}")
                         except Exception as welcome_err:
