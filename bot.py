@@ -1803,6 +1803,7 @@ def _parse_single_cmping(stdout, stderr, returncode):
     }
 
 def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers):
+    import concurrent.futures
     cmping_path = shutil.which("cmping") or "cmping"
     
     all_domains = list(bot_domains)
@@ -1824,9 +1825,6 @@ def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers
     for d in all_domains:
         legend_lines.append(f"{domain_to_emoji[d]} {d}")
 
-    report_body_lines = []
-    all_failed = True
-    
     def is_general_error(err_str):
         err_lower = err_str.lower()
         keywords = [
@@ -1836,54 +1834,82 @@ def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers
         ]
         return any(kw in err_lower for kw in keywords)
 
+    def run_pair_ping(h1, h2):
+        forward_res = None
+        forward_general = False
+        try:
+            cmd = [cmping_path, "-c", "3", h1, h2]
+            logger.info(f"Running: {' '.join(cmd)}")
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+            res = _parse_single_cmping(proc.stdout, proc.stderr, proc.returncode)
+            if res.get("success"):
+                forward_res = res
+            else:
+                forward_res = res
+                forward_general = is_general_error(res.get("error", ""))
+        except subprocess.TimeoutExpired:
+            forward_res = {"success": False, "error": "Timeout expired (30s)"}
+            forward_general = False
+        except Exception as e:
+            forward_res = {"success": False, "error": str(e)}
+            forward_general = is_general_error(str(e))
+            
+        if forward_res and not forward_res.get("success") and forward_general:
+            return (h1, h2, forward_res, forward_general, None)
+            
+        backward_res = None
+        try:
+            cmd = [cmping_path, "-c", "3", h2, h1]
+            logger.info(f"Running: {' '.join(cmd)}")
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+            res = _parse_single_cmping(proc.stdout, proc.stderr, proc.returncode)
+            if res.get("success"):
+                backward_res = res
+            else:
+                backward_res = res
+        except subprocess.TimeoutExpired:
+            backward_res = {"success": False, "error": "Timeout expired (30s)"}
+        except Exception as e:
+            backward_res = {"success": False, "error": str(e)}
+            
+        return (h1, h2, forward_res, forward_general, backward_res)
+
+    results_map = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {}
+        for host2 in specified_servers:
+            for host1 in bot_domains:
+                f = executor.submit(run_pair_ping, host1, host2)
+                futures[f] = (host1, host2)
+                
+        for f in concurrent.futures.as_completed(futures):
+            host1, host2 = futures[f]
+            try:
+                results_map[(host1, host2)] = f.result()
+            except Exception as e:
+                logger.error(f"Error executing ping for {host1} <-> {host2}: {e}")
+                results_map[(host1, host2)] = (host1, host2, {"success": False, "error": str(e)}, False, None)
+
+    report_body_lines = []
+    all_failed = True
+
     for host2 in specified_servers:
         group_lines = []
         emoji2 = domain_to_emoji[host2]
         
         for host1 in bot_domains:
             emoji1 = domain_to_emoji[host1]
-            
-            # --- 1. Forward Ping: host1 -> host2 ---
-            forward_res = None
-            forward_general = False
-            try:
-                cmd = [cmping_path, "-c", "3", host1, host2]
-                logger.info(f"Running: {' '.join(cmd)}")
-                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
-                res = _parse_single_cmping(proc.stdout, proc.stderr, proc.returncode)
-                if res.get("success"):
-                    forward_res = res
-                else:
-                    forward_res = res
-                    forward_general = is_general_error(res.get("error", ""))
-            except subprocess.TimeoutExpired:
-                forward_res = {"success": False, "error": "Timeout expired (30s)"}
-                forward_general = False
-            except Exception as e:
-                forward_res = {"success": False, "error": str(e)}
-                forward_general = is_general_error(str(e))
+            res_tuple = results_map.get((host1, host2))
+            if not res_tuple:
+                continue
                 
+            _, _, forward_res, forward_general, backward_res = res_tuple
+            
             if forward_res and not forward_res.get("success") and forward_general:
                 err_msg = forward_res.get("error", "General setup error")
                 group_lines.append(f"{emoji1} ❌ {emoji2}\n↳ {err_msg}")
                 continue
                 
-            # --- 2. Backward Ping: host2 -> host1 ---
-            backward_res = None
-            try:
-                cmd = [cmping_path, "-c", "3", host2, host1]
-                logger.info(f"Running: {' '.join(cmd)}")
-                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
-                res = _parse_single_cmping(proc.stdout, proc.stderr, proc.returncode)
-                if res.get("success"):
-                    backward_res = res
-                else:
-                    backward_res = res
-            except subprocess.TimeoutExpired:
-                backward_res = {"success": False, "error": "Timeout expired (30s)"}
-            except Exception as e:
-                backward_res = {"success": False, "error": str(e)}
-
             if forward_res and forward_res.get("success"):
                 forward_str = f"{forward_res['avg']:.1f} ms"
                 all_failed = False
