@@ -1829,7 +1829,7 @@ def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers
             try:
                 cmd = [cmping_path, "-c", "3", host1, host2]
                 logger.info(f"Running: {' '.join(cmd)}")
-                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=45)
+                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
                 res = _parse_single_cmping(proc.stdout, proc.stderr, proc.returncode)
                 if res.get("success"):
                     forward_res = res
@@ -1837,7 +1837,7 @@ def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers
                     forward_res = res
                     forward_general = is_general_error(res.get("error", ""))
             except subprocess.TimeoutExpired:
-                forward_res = {"success": False, "error": "Timeout expired (45s)"}
+                forward_res = {"success": False, "error": "Timeout expired (30s)"}
                 forward_general = False
             except Exception as e:
                 forward_res = {"success": False, "error": str(e)}
@@ -1853,14 +1853,14 @@ def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers
             try:
                 cmd = [cmping_path, "-c", "3", host2, host1]
                 logger.info(f"Running: {' '.join(cmd)}")
-                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=45)
+                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
                 res = _parse_single_cmping(proc.stdout, proc.stderr, proc.returncode)
                 if res.get("success"):
                     backward_res = res
                 else:
                     backward_res = res
             except subprocess.TimeoutExpired:
-                backward_res = {"success": False, "error": "Timeout expired (45s)"}
+                backward_res = {"success": False, "error": "Timeout expired (30s)"}
             except Exception as e:
                 backward_res = {"success": False, "error": str(e)}
 
