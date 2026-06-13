@@ -1,8 +1,10 @@
 import asyncio
+import concurrent.futures
 import io
 import logging
 import os
 import re
+import signal
 import threading
 import time
 import shutil
@@ -35,6 +37,7 @@ _chat_search_anti_spam: dict[int, float] = {}
 _chat_cmping_anti_spam: dict[int, float] = {}
 _domain_locks: dict[str, threading.Lock] = {}
 _domain_locks_lock = threading.Lock()
+_cmping_global_lock = threading.Lock()
 
 def _get_domain_lock(domain: str) -> threading.Lock:
     with _domain_locks_lock:
@@ -1838,8 +1841,37 @@ def _parse_single_cmping(stdout, stderr, returncode):
         "error": err_msg
     }
 
+def _run_cmping_subprocess(cmd, timeout=30):
+    """Run cmping as a subprocess with proper cleanup on timeout.
+    Returns (stdout, stderr, returncode)."""
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, start_new_session=True
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return stdout, stderr, proc.returncode
+    except subprocess.TimeoutExpired:
+        # Kill entire process group (cmping + deltachat-rpc-server children)
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            proc.kill()
+        proc.communicate()  # drain pipes
+        raise
+
 def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers):
-    import concurrent.futures
+    # Acquire global lock — only one cmping test at a time
+    if not _cmping_global_lock.acquire(blocking=False):
+        _send(bot, accid, chat_id, "⏳ Another CMPing test is running, your request is queued...")
+        _cmping_global_lock.acquire()  # block until available
+
+    try:
+        _bg_cmping_worker_inner(bot, accid, chat_id, msg_id, bot_domains, specified_servers)
+    finally:
+        _cmping_global_lock.release()
+
+def _bg_cmping_worker_inner(bot, accid, chat_id, msg_id, bot_domains, specified_servers):
     cmping_path = shutil.which("cmping") or "cmping"
     
     all_domains = list(bot_domains)
@@ -1881,8 +1913,8 @@ def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers
             try:
                 cmd = [cmping_path, "-c", "3", h1, h2]
                 logger.info(f"Running: {' '.join(cmd)}")
-                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
-                res = _parse_single_cmping(proc.stdout, proc.stderr, proc.returncode)
+                stdout, stderr, rc = _run_cmping_subprocess(cmd, timeout=30)
+                res = _parse_single_cmping(stdout, stderr, rc)
                 if res.get("success"):
                     forward_res = res
                 else:
@@ -1902,8 +1934,8 @@ def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers
             try:
                 cmd = [cmping_path, "-c", "3", h2, h1]
                 logger.info(f"Running: {' '.join(cmd)}")
-                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
-                res = _parse_single_cmping(proc.stdout, proc.stderr, proc.returncode)
+                stdout, stderr, rc = _run_cmping_subprocess(cmd, timeout=30)
+                res = _parse_single_cmping(stdout, stderr, rc)
                 if res.get("success"):
                     backward_res = res
                 else:
