@@ -40,8 +40,10 @@ _domain_locks_lock = threading.Lock()
 _cmping_global_lock = threading.Lock()
 
 # CMPing monitoring state
-_cmping_monitor_index = 0
+_cmping_monitor_idx_db = database.get_config("cmping_monitor_index")
+_cmping_monitor_index = int(_cmping_monitor_idx_db) if _cmping_monitor_idx_db is not None else 0
 _cmping_monitor_running = False
+
 _cmping_last_results: dict[tuple, dict] = database.get_all_cmping_results()
 _cmping_server_status: dict[str, bool] = {}
 
@@ -583,7 +585,9 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
     source_idx = _cmping_monitor_index % len(all_servers)
     source = all_servers[source_idx]
     _cmping_monitor_index = (_cmping_monitor_index + 1) % len(all_servers)
+    database.set_config("cmping_monitor_index", str(_cmping_monitor_index))
     targets = [s for s in all_servers if s != source]
+
 
     logger.info(f"CMPing monitor cycle: source={source}, targets={targets}")
 
