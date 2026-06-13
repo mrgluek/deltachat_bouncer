@@ -11,6 +11,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./data/bouncer:/root/.config/bouncer
+      - ./data/cmping_cache:/root/.cache/cmping
     environment:
       - DC_DB_DIR=/app/data
       - DB_PATH=/app/data/bouncer.db
