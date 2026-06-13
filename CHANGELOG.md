@@ -5,7 +5,8 @@ All notable changes to this project will be documented in this file.
 ## [2.5.1] - 2026-06-13
 
 ### Added
-- **New Admin Command `/cmfaillist`:** Shows currently failing monitored links, grouped by server, to quickly identify down servers without displaying the whole matrix.
+- **New Admin Command `/cmfaillist [server]`:** Shows currently failing monitored links, grouped by server, with an optional filter by server name (supports partial matches) to quickly identify down servers without displaying the whole matrix.
+
 
 - **CMPing Results Persistence:** Save and load monitoring results state to SQLite database, so the bot remembers which servers were already down when it restarts (e.g. during code updates/deployments) and does not send duplicate failure alerts.
 - **Server Health Alerting:** Refactored notifications to alert at the **server/host level** instead of individual path pairs. The bot now tracks the overall health of each server, generating an alert only when a server first becomes `UNHEALTHY` (fails to send or receive mail) or when it is fully restored to `HEALTHY` (all links working again). This prevents notification spam during round-robin rotations.

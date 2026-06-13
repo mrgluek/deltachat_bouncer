@@ -1375,7 +1375,8 @@ def help_command(bot, accid, event):
         help_text += "/cmpingdel <server> — Remove server from monitoring\n"
         help_text += "/cmpinglist — Show monitored servers\n"
         help_text += "/cmpingstatus — Show monitoring results matrix\n"
-        help_text += "/cmfaillist — Show currently failed links only\n"
+        help_text += "/cmfaillist [server] — Show currently failed links (optional filter)\n"
+
         help_text += "/cmreport <on/off> — Toggle monitoring alerts in this chat"
 
         
@@ -2623,11 +2624,29 @@ def cmfaillist_command(bot, accid, event):
 
     unhealthy_servers = [srv for srv in all_servers if not _cmping_server_status.get(srv, True)]
 
-    if not unhealthy_servers:
-        _send(bot, accid, msg.chat_id, "✅ **All monitored links are healthy.**\nNo failures detected at the moment.")
-        return
+    # Parse optional filter argument
+    text = (msg.text or "").strip()
+    parts = text.split(None, 1)
+    filter_domain = parts[1].strip().lower() if len(parts) > 1 else None
 
-    lines = ["🔴 **Current CMPing Monitor Failures (Grouped by Server):**\n"]
+    if filter_domain:
+        matched_unhealthy = [srv for srv in unhealthy_servers if filter_domain in srv]
+        if not matched_unhealthy:
+            matched_all = [srv for srv in all_servers if filter_domain in srv]
+            if matched_all:
+                matched_names = ", ".join(matched_all)
+                _send(bot, accid, msg.chat_id, f"✅ Server(s) matching **{filter_domain}** ({matched_names}) are currently **HEALTHY**.")
+            else:
+                _send(bot, accid, msg.chat_id, f"❌ No monitored servers match **{filter_domain}**.")
+            return
+        unhealthy_servers = matched_unhealthy
+        lines = [f"🔴 **CMPing Monitor Failures for '{filter_domain}' (Grouped by Server):**\n"]
+    else:
+        if not unhealthy_servers:
+            _send(bot, accid, msg.chat_id, "✅ **All monitored links are healthy.**\nNo failures detected at the moment.")
+            return
+        lines = ["🔴 **Current CMPing Monitor Failures (Grouped by Server):**\n"]
+
 
     for srv in unhealthy_servers:
         lines.append(f"❌ **{srv}**")
