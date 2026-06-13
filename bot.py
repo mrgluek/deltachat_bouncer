@@ -1805,82 +1805,88 @@ def _parse_single_cmping(stdout, stderr, returncode):
 def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers):
     cmping_path = shutil.which("cmping") or "cmping"
     
-    results = []
+    from datetime import datetime, timezone
+    gmt_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M GMT")
+    
+    report_lines = [f"🏓 **CMPing Report ({gmt_time}) by Bouncer Bot:**\n"]
     all_failed = True
     
-    for host1 in bot_domains:
-        for host2 in specified_servers:
-            pair_name = f"{host1} ⇄ {host2}"
-            pair_result = {
-                "pair": pair_name,
-                "forward": None,
-                "backward": None
-            }
-            
+    def is_general_error(err_str):
+        err_lower = err_str.lower()
+        keywords = [
+            "dns", "configure profile", "setup receiver", "setup sender", 
+            "failed to configure", "imap failed", "smtp failed", "connect",
+            "no such file", "invalid", "usage", "failed to setup"
+        ]
+        return any(kw in err_lower for kw in keywords)
+
+    for host2 in specified_servers:
+        group_lines = []
+        for host1 in bot_domains:
             # --- 1. Forward Ping: host1 -> host2 ---
+            forward_res = None
+            forward_general = False
             try:
                 cmd = [cmping_path, "-c", "3", host1, host2]
                 logger.info(f"Running: {' '.join(cmd)}")
                 proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=45)
                 res = _parse_single_cmping(proc.stdout, proc.stderr, proc.returncode)
-                pair_result["forward"] = res
+                if res.get("success"):
+                    forward_res = res
+                else:
+                    forward_res = res
+                    forward_general = is_general_error(res.get("error", ""))
             except subprocess.TimeoutExpired:
-                pair_result["forward"] = {"success": False, "error": "Timeout expired (45s)"}
+                forward_res = {"success": False, "error": "Timeout expired (45s)"}
+                forward_general = False
             except Exception as e:
-                pair_result["forward"] = {"success": False, "error": str(e)}
+                forward_res = {"success": False, "error": str(e)}
+                forward_general = is_general_error(str(e))
                 
-            # --- 2. Backward Ping (only if forward succeeded) ---
-            if pair_result["forward"].get("success"):
-                try:
-                    cmd = [cmping_path, "-c", "3", host2, host1]
-                    logger.info(f"Running: {' '.join(cmd)}")
-                    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=45)
-                    res = _parse_single_cmping(proc.stdout, proc.stderr, proc.returncode)
-                    pair_result["backward"] = res
-                except subprocess.TimeoutExpired:
-                    pair_result["backward"] = {"success": False, "error": "Timeout expired (45s)"}
-                except Exception as e:
-                    pair_result["backward"] = {"success": False, "error": str(e)}
+            if forward_res and not forward_res.get("success") and forward_general:
+                err_msg = forward_res.get("error", "General setup error")
+                group_lines.append(f"**{host1}** ❌ **{host2}**\n↳ {err_msg}")
+                continue
+                
+            # --- 2. Backward Ping: host2 -> host1 ---
+            backward_res = None
+            try:
+                cmd = [cmping_path, "-c", "3", host2, host1]
+                logger.info(f"Running: {' '.join(cmd)}")
+                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=45)
+                res = _parse_single_cmping(proc.stdout, proc.stderr, proc.returncode)
+                if res.get("success"):
+                    backward_res = res
+                else:
+                    backward_res = res
+            except subprocess.TimeoutExpired:
+                backward_res = {"success": False, "error": "Timeout expired (45s)"}
+            except Exception as e:
+                backward_res = {"success": False, "error": str(e)}
+
+            if forward_res and forward_res.get("success"):
+                forward_str = f"{forward_res['avg']:.1f} ms"
+                all_failed = False
             else:
-                pair_result["backward"] = {"success": False, "error": "Skipped (forward failed)"}
+                forward_str = "❌"
                 
-            results.append(pair_result)
-            
-            if pair_result["forward"].get("success") and pair_result["backward"].get("success"):
+            if backward_res and backward_res.get("success"):
+                backward_str = f"{backward_res['avg']:.1f} ms"
                 all_failed = False
-            elif pair_result["forward"].get("success") or pair_result["backward"].get("success"):
-                all_failed = False
-
-    # Format the final report message
-    report_lines = ["🏓 **cmping report**\n"]
-    for r in results:
-        pair_str = r["pair"]
-        report_lines.append(f"**{pair_str}**")
-        
-        host1, host2 = pair_str.split(" ⇄ ")
-        f_res = r["forward"]
-        if f_res.get("success"):
-            report_lines.append(f"• `{host1}` → `{host2}`: avg **{f_res['avg']:.1f} ms** (min/avg/max = {f_res['min']:.1f}/{f_res['avg']:.1f}/{f_res['max']:.1f} ms)")
-        else:
-            err = f_res.get("error", "Unknown error")
-            report_lines.append(f"• `{host1}` → `{host2}`: ❌ Error: {err}")
+            else:
+                backward_str = "❌"
+                
+            group_lines.append(f"**{host1}** {forward_str} → 🌐 ← {backward_str} **{host2}**")
             
-        b_res = r["backward"]
-        if b_res.get("success"):
-            report_lines.append(f"• `{host2}` → `{host1}`: avg **{b_res['avg']:.1f} ms** (min/avg/max = {b_res['min']:.1f}/{b_res['avg']:.1f}/{b_res['max']:.1f} ms)")
-        elif b_res.get("error") != "Skipped (forward failed)":
-            err = b_res.get("error", "Unknown error")
-            report_lines.append(f"• `{host2}` → `{host1}`: ❌ Error: {err}")
-            
-        report_lines.append("") # empty line between pairs
+        if group_lines:
+            report_lines.extend(group_lines)
+            report_lines.append("")
 
-    # Update reaction based on result
     if all_failed:
         _react(bot, accid, msg_id, "❌")
     else:
         _react(bot, accid, msg_id, "☑️")
         
-    # Send report
     _send(bot, accid, chat_id, "\n".join(report_lines).strip())
 
 @dc_cli.on(events.NewMessage(command="/cmping"))
