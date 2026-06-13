@@ -33,6 +33,15 @@ _chat_anti_spam: dict[int, float] = {}
 _chat_relays_anti_spam: dict[int, float] = {}
 _chat_search_anti_spam: dict[int, float] = {}
 _chat_cmping_anti_spam: dict[int, float] = {}
+_domain_locks: dict[str, threading.Lock] = {}
+_domain_locks_lock = threading.Lock()
+
+def _get_domain_lock(domain: str) -> threading.Lock:
+    with _domain_locks_lock:
+        if domain not in _domain_locks:
+            _domain_locks[domain] = threading.Lock()
+        return _domain_locks[domain]
+
 BOUNCE_COOLDOWN_SECONDS = 60   # 1 minute for general commands (/bounce, /top, /relays)
 SEARCH_COOLDOWN_SECONDS = 10   # 10 seconds for /search command
 CMPING_COOLDOWN_SECONDS = 15   # 15 seconds for /cmping command
@@ -1862,44 +1871,52 @@ def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers
         return any(kw in err_lower for kw in keywords)
 
     def run_pair_ping(h1, h2):
-        forward_res = None
-        forward_general = False
+        unique_domains = sorted(list(set([h1, h2])))
+        locks = [_get_domain_lock(d) for d in unique_domains]
+        for lock in locks:
+            lock.acquire()
         try:
-            cmd = [cmping_path, "-c", "3", h1, h2]
-            logger.info(f"Running: {' '.join(cmd)}")
-            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
-            res = _parse_single_cmping(proc.stdout, proc.stderr, proc.returncode)
-            if res.get("success"):
-                forward_res = res
-            else:
-                forward_res = res
-                forward_general = is_general_error(res.get("error", ""))
-        except subprocess.TimeoutExpired:
-            forward_res = {"success": False, "error": "Timeout expired (30s)"}
+            forward_res = None
             forward_general = False
-        except Exception as e:
-            forward_res = {"success": False, "error": str(e)}
-            forward_general = is_general_error(str(e))
-            
-        if forward_res and not forward_res.get("success") and forward_general:
-            return (h1, h2, forward_res, forward_general, None)
-            
-        backward_res = None
-        try:
-            cmd = [cmping_path, "-c", "3", h2, h1]
-            logger.info(f"Running: {' '.join(cmd)}")
-            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
-            res = _parse_single_cmping(proc.stdout, proc.stderr, proc.returncode)
-            if res.get("success"):
-                backward_res = res
-            else:
-                backward_res = res
-        except subprocess.TimeoutExpired:
-            backward_res = {"success": False, "error": "Timeout expired (30s)"}
-        except Exception as e:
-            backward_res = {"success": False, "error": str(e)}
-            
-        return (h1, h2, forward_res, forward_general, backward_res)
+            try:
+                cmd = [cmping_path, "-c", "3", h1, h2]
+                logger.info(f"Running: {' '.join(cmd)}")
+                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+                res = _parse_single_cmping(proc.stdout, proc.stderr, proc.returncode)
+                if res.get("success"):
+                    forward_res = res
+                else:
+                    forward_res = res
+                    forward_general = is_general_error(res.get("error", ""))
+            except subprocess.TimeoutExpired:
+                forward_res = {"success": False, "error": "Timeout expired (30s)"}
+                forward_general = False
+            except Exception as e:
+                forward_res = {"success": False, "error": str(e)}
+                forward_general = is_general_error(str(e))
+                
+            if forward_res and not forward_res.get("success") and forward_general:
+                return (h1, h2, forward_res, forward_general, None)
+                
+            backward_res = None
+            try:
+                cmd = [cmping_path, "-c", "3", h2, h1]
+                logger.info(f"Running: {' '.join(cmd)}")
+                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+                res = _parse_single_cmping(proc.stdout, proc.stderr, proc.returncode)
+                if res.get("success"):
+                    backward_res = res
+                else:
+                    backward_res = res
+            except subprocess.TimeoutExpired:
+                backward_res = {"success": False, "error": "Timeout expired (30s)"}
+            except Exception as e:
+                backward_res = {"success": False, "error": str(e)}
+                
+            return (h1, h2, forward_res, forward_general, backward_res)
+        finally:
+            for lock in reversed(locks):
+                lock.release()
 
     results_map = {}
     def run_relay_pings(h1):
