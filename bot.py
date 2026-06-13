@@ -1913,37 +1913,30 @@ def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers
             
             if forward_res and not forward_res.get("success") and forward_general:
                 err_msg = forward_res.get("error", "General setup error")
-                group_lines.append(f"{emoji1} ❌ {emoji2}\n↳ {err_msg}")
+                group_lines.append(f"{emoji1}→{emoji2} ❌ {err_msg}")
                 continue
                 
+            # 1. Forward line
             if forward_res and forward_res.get("success"):
                 forward_str = f"{forward_res['avg']:.1f} ms"
+                group_lines.append(f"{emoji1}→{emoji2} {forward_str}")
                 all_failed = False
             else:
-                forward_str = "❌"
+                err_msg = forward_res.get("error", "Unknown error") if forward_res else "Unknown error"
+                err_suffix = f" {err_msg}" if err_msg else ""
+                group_lines.append(f"{emoji1}→{emoji2} ❌{err_suffix}")
                 
-            if backward_res and backward_res.get("success"):
-                backward_str = f"{backward_res['avg']:.1f} ms"
-                all_failed = False
-            else:
-                backward_str = "❌"
-                
-            line = f"{emoji1} {forward_str} → 🌐 ← {backward_str} {emoji2}"
-            
-            err_details = []
-            if forward_res and not forward_res.get("success"):
-                err_msg = forward_res.get("error", "Unknown error")
-                err_details.append(f"↳ [{emoji1} → {emoji2}] {err_msg}")
-                
-            if backward_res and not backward_res.get("success"):
-                err_msg = backward_res.get("error", "Unknown error")
+            # 2. Backward line
+            if backward_res:
+                err_msg = backward_res.get("error", "")
                 if err_msg != "Skipped (forward failed)":
-                    err_details.append(f"↳ [{emoji2} → {emoji1}] {err_msg}")
-                    
-            if err_details:
-                line += "\n" + "\n".join(err_details)
-                
-            group_lines.append(line)
+                    if backward_res.get("success"):
+                        backward_str = f"{backward_res['avg']:.1f} ms"
+                        group_lines.append(f"{emoji1}←{emoji2} {backward_str}")
+                        all_failed = False
+                    else:
+                        err_suffix = f" {err_msg}" if err_msg else ""
+                        group_lines.append(f"{emoji1}←{emoji2} ❌{err_suffix}")
             
         if group_lines:
             report_body_lines.extend(group_lines)
