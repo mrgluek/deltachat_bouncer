@@ -634,11 +634,22 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
             # Determine sample error if became unhealthy
             sample_err = None
             if not is_healthy:
-                if not fwd_res.get("success"):
-                    sample_err = fwd_res.get("error")
+                fwd_ok = fwd_res.get("success")
+                bwd_ok = bwd_res.get("success")
+                fwd_err = fwd_res.get("error", "Unknown error")
+                bwd_err = bwd_res.get("error", "Unknown error")
+                
+                if not fwd_ok and not bwd_ok:
+                    if fwd_err == bwd_err:
+                        sample_err = f"both directions failed with {source}: {fwd_err}"
+                    else:
+                        sample_err = f"both directions failed with {source} (Incoming: {fwd_err}, Outgoing: {bwd_err})"
+                elif not fwd_ok:
+                    sample_err = f"incoming from {source} failed: {fwd_err}"
                 else:
-                    sample_err = bwd_res.get("error")
+                    sample_err = f"outgoing to {source} failed: {bwd_err}"
             health_changes.append((dst, old_healthy, is_healthy, sample_err))
+
             _cmping_server_status[dst] = is_healthy
 
             # If target recovered, clear any old errors involving it from other sources

@@ -9,7 +9,8 @@ All notable changes to this project will be documented in this file.
 
 
 - **CMPing Results Persistence:** Save and load monitoring results state to SQLite database, so the bot remembers which servers were already down when it restarts (e.g. during code updates/deployments) and does not send duplicate failure alerts.
-- **Server Health Alerting:** Refactored notifications to alert at the **server/host level** instead of individual path pairs. The bot now tracks the overall health of each server, generating an alert only when a server first becomes `UNHEALTHY` (fails to send or receive mail) or when it is fully restored to `HEALTHY` (all links working again). This prevents notification spam during round-robin rotations.
+- **Server Health Alerting:** Refactored notifications to alert at the **server/host level** instead of individual path pairs. The bot now tracks the overall health of each server, generating an alert only when a server first becomes `UNHEALTHY` (fails to send or receive mail) or when it is fully restored to `HEALTHY` (all links working again). Alerts now include the check direction (incoming/outgoing) and the partner server where the failure occurred. This prevents notification spam during round-robin rotations.
+
 
 ### Changed
 - **Robust Updates:** `update.sh` now uses `git reset --hard` instead of `git pull` to gracefully handle force-pushed updates on production instances.
