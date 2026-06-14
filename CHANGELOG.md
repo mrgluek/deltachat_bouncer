@@ -13,7 +13,8 @@ All notable changes to this project will be documented in this file.
 
 - **Server Health Alerting:** Refactored notifications to alert at the **server/host level** instead of individual path pairs. The bot now tracks the overall health of each server, generating an alert only when a server first becomes `UNHEALTHY` (fails to send or receive mail) or when it is fully restored to `HEALTHY` (all links working again). Alerts now include the check direction (incoming/outgoing) and the partner server where the failure occurred. This prevents notification spam during round-robin rotations.
 - **CMPing Status Latency Visualization:** Added visual latency indicators (circles) to successful checks in `/cmpingstatus` output: `<1000ms` is 🟢, `1000-2000ms` is 🟡, `2000-3000ms` is 🟠, and `>3000ms` is 🔴.
-- **CMPing History and Avg Latency in `/cmpinglist`:** Monitored servers in `/cmpinglist` now display their average latency calculated over the last 100 successful checks, prefixed by the corresponding color-coded circle (🟢/🟡/🟠/🔴) or `⚪️` if no measurements have been collected yet. Measurements are persisted in the `cmping_history` table (capped at 5,000 entries).
+- **CMPing History and Avg Latency in `/cmpinglist`:** Monitored servers in `/cmpinglist` now display their average latency calculated over the last 100 successful checks, followed by the corresponding color-coded circle (🟢/🟡/🟠/🔴) or `⚪️` if no measurements have been collected yet. Measurements are persisted in the `cmping_history` table (capped at 5,000 entries).
+
 
 
 

@@ -2510,9 +2510,10 @@ def cmpinglist_command(bot, accid, event):
                 circle = "🟠"
             else:
                 circle = "🔴"
-            return f"  {circle} {idx}. {domain} ({avg_ping:.1f} ms, {count} samples)"
+            return f"  {idx}. {domain}: {circle} {avg_ping:.1f} ms ({count} samples)"
         else:
-            return f"  ⚪️ {idx}. {domain} (no data)"
+            return f"  {idx}. {domain}: ⚪️ no data"
+
 
     if bot_domains:
         lines.append("**Transport servers (auto):**")
