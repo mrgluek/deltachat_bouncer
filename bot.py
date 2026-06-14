@@ -1390,7 +1390,8 @@ def help_command(bot, accid, event):
         help_text += "/cmpingdel <server> — Remove server from monitoring\n"
         help_text += "/cmpinglist — Show monitored servers\n"
         help_text += "/cmpingstatus — Show monitoring results matrix\n"
-        help_text += "/cmfaillist [server] — Show currently failed links (optional filter)\n"
+        help_text += "/cmpingfail [server] — Show currently failed links (optional filter)\n"
+
 
         help_text += "/cmreport <on/off> — Toggle monitoring alerts in this chat"
 
@@ -2606,11 +2607,10 @@ def cmpingstatus_command(bot, accid, event):
 
     _send(bot, accid, msg.chat_id, "\n".join(lines))
 
-@dc_cli.on(events.NewMessage(command="/cmfaillist"))
-def cmfaillist_command(bot, accid, event):
+def _cmpingfail_impl(bot, accid, event, cmd_name="/cmpingfail"):
     msg = event.msg
     if not _is_dc_admin(bot, accid, msg.from_id):
-        _send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use /cmfaillist.")
+        _send(bot, accid, msg.chat_id, f"❌ Only the bot administrator can use {cmd_name}.")
         return
 
     bot_domains = _get_bot_domains(bot, accid)
@@ -2662,7 +2662,6 @@ def cmfaillist_command(bot, accid, event):
             return
         lines = ["🔴 **Current CMPing Monitor Failures (Grouped by Server):**\n"]
 
-
     for srv in unhealthy_servers:
         lines.append(f"❌ **{srv}**")
         
@@ -2693,6 +2692,17 @@ def cmfaillist_command(bot, accid, event):
         lines.append("")  # Empty line separator
 
     _send(bot, accid, msg.chat_id, "\n".join(lines).strip())
+
+
+@dc_cli.on(events.NewMessage(command="/cmpingfail"))
+def cmpingfail_command(bot, accid, event):
+    _cmpingfail_impl(bot, accid, event, cmd_name="/cmpingfail")
+
+
+@dc_cli.on(events.NewMessage(command="/cmfaillist"))
+def cmfaillist_command(bot, accid, event):
+    _cmpingfail_impl(bot, accid, event, cmd_name="/cmfaillist")
+
 
 
 @dc_cli.on(events.NewMessage(is_info=True, is_bot=None, is_outgoing=None))

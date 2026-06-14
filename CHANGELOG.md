@@ -5,7 +5,8 @@ All notable changes to this project will be documented in this file.
 ## [2.5.1] - 2026-06-13
 
 ### Added
-- **New Admin Command `/cmfaillist [server]`:** Shows currently failing monitored links, grouped by server, with an optional filter by server name (supports partial matches) to quickly identify down servers without displaying the whole matrix.
+- **New Admin Command `/cmpingfail [server]`:** Shows currently failing monitored links, grouped by server, with an optional filter by server name (supports partial matches). The old command `/cmfaillist` is kept as a hidden alias for backwards compatibility.
+
 
 
 - **CMPing Results & Rotation Persistence:** Save and load monitoring results state and the current round-robin index (`_cmping_monitor_index`) to SQLite database. This ensures the bot remembers which servers were already down and resumes the rotation exactly where it left off when it restarts (e.g. during code updates/deployments), avoiding duplicate failure alerts and preventing rotation starvation.
