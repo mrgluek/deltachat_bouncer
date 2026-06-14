@@ -2502,14 +2502,15 @@ def cmpinglist_command(bot, accid, event):
     def format_server_entry(idx, domain):
         avg_ping, count = database.get_average_ping_for_server(domain, limit=100)
         if avg_ping is not None:
-            if avg_ping < 1000:
+            if avg_ping < 2000:
                 circle = "🟢"
-            elif avg_ping < 2000:
+            elif avg_ping < 4000:
                 circle = "🟡"
-            elif avg_ping < 3000:
+            elif avg_ping < 6000:
                 circle = "🟠"
             else:
                 circle = "🔴"
+
             return f"  {idx}. {domain}: {circle} {avg_ping:.1f} ms (🏓 {count})"
 
         else:
@@ -2617,14 +2618,15 @@ def cmpingstatus_command(bot, accid, event):
 
             if result.get("success"):
                 avg = result.get("avg", 0.0)
-                if avg < 1000:
+                if avg < 2000:
                     circle = "🟢"
-                elif avg < 2000:
+                elif avg < 4000:
                     circle = "🟡"
-                elif avg < 3000:
+                elif avg < 6000:
                     circle = "🟠"
                 else:
                     circle = "🔴"
+
                 lines.append(f"✅ {src} → {dst}: {circle} {avg:.1f} ms ({age_min} min ago)")
 
             else:
