@@ -122,7 +122,19 @@ def init_db():
                 PRIMARY KEY (src, dst)
             )
         ''')
+
+        # CMPing monitoring: history of pings
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cmping_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                src TEXT,
+                dst TEXT,
+                avg REAL,
+                checked_at REAL
+            )
+        ''')
         
+
         conn.commit()
         conn.close()
 
@@ -585,6 +597,67 @@ def delete_cmping_results_for_domain(domain: str):
         conn.commit()
         conn.close()
 
+# --- CMPing history persistence ---
+
+def add_cmping_history(src: str, dst: str, avg: float, checked_at: float):
+    """Add a successful cmping measurement to history and keep the database small."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO cmping_history (src, dst, avg, checked_at) VALUES (?, ?, ?, ?)",
+            (src.strip().lower(), dst.strip().lower(), avg, checked_at)
+        )
+        # Keep table limited to the last 5000 records
+        cursor.execute(
+            """
+            DELETE FROM cmping_history WHERE id NOT IN (
+                SELECT id FROM cmping_history ORDER BY checked_at DESC LIMIT 5000
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
+
+def get_average_ping_for_server(domain: str, limit: int = 100) -> tuple:
+    """Calculate the average ping in ms for a server based on its last N measurements.
+    Returns a tuple (avg_ping_ms, count). If no measurements, returns (None, 0).
+    """
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        # Find latest N measurements where server was src or dst
+        cursor.execute(
+            """
+            SELECT avg FROM cmping_history
+            WHERE src = ? OR dst = ?
+            ORDER BY checked_at DESC
+            LIMIT ?
+            """,
+            (domain.strip().lower(), domain.strip().lower(), limit)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        
+        if not rows:
+            return None, 0
+            
+        pings = [r[0] for r in rows]
+        return sum(pings) / len(pings), len(pings)
+
+def delete_cmping_history_for_domain(domain: str):
+    """Delete all history records involving a specific domain."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM cmping_history WHERE src = ? OR dst = ?",
+            (domain.strip().lower(), domain.strip().lower())
+        )
+        conn.commit()
+        conn.close()
+
 init_db()
+
 
 

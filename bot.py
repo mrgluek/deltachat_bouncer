@@ -624,6 +624,14 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
                 avg=result.get("avg", 0.0),
                 checked_at=result.get("checked_at", 0.0)
             )
+            if result.get("success"):
+                database.add_cmping_history(
+                    src=src_d,
+                    dst=dst_d,
+                    avg=result.get("avg", 0.0),
+                    checked_at=result.get("checked_at", 0.0)
+                )
+
 
     # Compute new health states and detect changes
     health_changes = []  # list of (server, old_state, new_state, sample_error)
@@ -2467,7 +2475,9 @@ def cmpingdel_command(bot, accid, event):
         for k in keys_to_remove:
             del _cmping_last_results[k]
         database.delete_cmping_results_for_domain(domain)
+        database.delete_cmping_history_for_domain(domain)
         _send(bot, accid, msg.chat_id, f"✅ {domain} removed from monitoring.")
+
 
     else:
         _send(bot, accid, msg.chat_id, f"❌ {domain} is not in monitoring list.")
@@ -2489,10 +2499,25 @@ def cmpinglist_command(bot, accid, event):
 
     lines = ["📡 **CMPing Monitor Servers:**\n"]
 
+    def format_server_entry(idx, domain):
+        avg_ping, count = database.get_average_ping_for_server(domain, limit=100)
+        if avg_ping is not None:
+            if avg_ping < 1000:
+                circle = "🟢"
+            elif avg_ping < 2000:
+                circle = "🟡"
+            elif avg_ping < 3000:
+                circle = "🟠"
+            else:
+                circle = "🔴"
+            return f"  {circle} {idx}. {domain} ({avg_ping:.1f} ms, {count} samples)"
+        else:
+            return f"  ⚪️ {idx}. {domain} (no data)"
+
     if bot_domains:
         lines.append("**Transport servers (auto):**")
         for i, d in enumerate(bot_domains, 1):
-            lines.append(f"  {i}. {d}")
+            lines.append(format_server_entry(i, d))
     else:
         lines.append("_No transport servers detected._")
 
@@ -2500,9 +2525,10 @@ def cmpinglist_command(bot, accid, event):
         lines.append("\n**Monitored servers (manual):**")
         offset = len(bot_domains)
         for i, d in enumerate(monitor_domains, offset + 1):
-            lines.append(f"  {i}. {d}")
+            lines.append(format_server_entry(i, d))
     else:
         lines.append("\n_No manually added servers._")
+
 
     n = len(all_servers)
     pairs = n * (n - 1) // 2
