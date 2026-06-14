@@ -2510,7 +2510,8 @@ def cmpinglist_command(bot, accid, event):
                 circle = "🟠"
             else:
                 circle = "🔴"
-            return f"  {idx}. {domain}: {circle} {avg_ping:.1f} ms ({count} samples)"
+            return f"  {idx}. {domain}: {circle} {avg_ping:.1f} ms (🏓 {count})"
+
         else:
             return f"  {idx}. {domain}: ⚪️ no data"
 
