@@ -2588,8 +2588,17 @@ def cmpingstatus_command(bot, accid, event):
             age_min = int((now - checked_at) / 60) if checked_at else 0
 
             if result.get("success"):
-                avg = result.get("avg", 0)
-                lines.append(f"✅ {src} → {dst}: {avg:.1f} ms ({age_min} min ago)")
+                avg = result.get("avg", 0.0)
+                if avg < 1000:
+                    circle = "🟢"
+                elif avg < 2000:
+                    circle = "🟡"
+                elif avg < 3000:
+                    circle = "🟠"
+                else:
+                    circle = "🔴"
+                lines.append(f"✅ {src} → {dst}: {circle} {avg:.1f} ms ({age_min} min ago)")
+
             else:
                 err = result.get("error", "Unknown")
                 lines.append(f"❌ {src} → {dst}: {err} ({age_min} min ago)")

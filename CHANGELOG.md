@@ -12,6 +12,8 @@ All notable changes to this project will be documented in this file.
 - **CMPing Results & Rotation Persistence:** Save and load monitoring results state and the current round-robin index (`_cmping_monitor_index`) to SQLite database. This ensures the bot remembers which servers were already down and resumes the rotation exactly where it left off when it restarts (e.g. during code updates/deployments), avoiding duplicate failure alerts and preventing rotation starvation.
 
 - **Server Health Alerting:** Refactored notifications to alert at the **server/host level** instead of individual path pairs. The bot now tracks the overall health of each server, generating an alert only when a server first becomes `UNHEALTHY` (fails to send or receive mail) or when it is fully restored to `HEALTHY` (all links working again). Alerts now include the check direction (incoming/outgoing) and the partner server where the failure occurred. This prevents notification spam during round-robin rotations.
+- **CMPing Status Latency Visualization:** Added visual latency indicators (circles) to successful checks in `/cmpingstatus` output: `<1000ms` is 🟢, `1000-2000ms` is 🟡, `2000-3000ms` is 🟠, and `>3000ms` is 🔴.
+
 
 
 ### Changed
