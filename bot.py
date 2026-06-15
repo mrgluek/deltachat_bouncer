@@ -689,30 +689,31 @@ def _run_monitor_single(cmping_path, src, dst):
     Returns dict with 'success', 'avg' (if success), 'error' (if failed), 'checked_at'."""
     import subprocess
 
-    def do_check():
-        cmd = [cmping_path, "-c", "1", src, dst]
+    def do_check(count="1", timeout=60):
+        cmd = [cmping_path, "-c", count, src, dst]
         try:
             _cmping_global_lock.acquire()
             try:
-                stdout, stderr, rc = _run_cmping_subprocess(cmd, timeout=60)
+                stdout, stderr, rc = _run_cmping_subprocess(cmd, timeout=timeout)
             finally:
                 _cmping_global_lock.release()
             return _parse_single_cmping(stdout, stderr, rc)
         except subprocess.TimeoutExpired:
-            return {"success": False, "error": "Timeout expired (60s)"}
+            return {"success": False, "error": f"Timeout expired ({timeout}s)"}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    result = do_check()
+    result = do_check(count="1", timeout=60)
 
-    # If failed, retry once to filter transient issues
+    # If failed, retry once with 5 pings after 10 seconds to filter transient issues
     if not result.get("success"):
-        logger.info(f"CMPing monitor: {src} -> {dst} failed ({result.get('error')}), retrying...")
-        time.sleep(2)
-        result = do_check()
+        logger.info(f"CMPing monitor: {src} -> {dst} failed ({result.get('error')}), retrying with -c 5 in 10s...")
+        time.sleep(10)
+        result = do_check(count="5", timeout=90)
 
     result["checked_at"] = time.time()
     return result
+
 
 
 def _clear_all_errors_for_server(server: str):
