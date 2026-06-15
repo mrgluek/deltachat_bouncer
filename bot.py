@@ -1156,19 +1156,19 @@ def slap_command(bot, accid, event):
             logger.error(f"Error checking message {msg_id} in /slap: {e}")
             continue
 
+    try:
+        sender_contact = bot.rpc.get_contact(accid, msg.from_id)
+        sender_name = sender_contact.name or sender_contact.display_name or sender_contact.address or "Unknown"
+    except Exception:
+        sender_name = "Unknown"
+
     if found_msg_id and matched_contact:
-        try:
-            self_contact = bot.rpc.get_contact(accid, DC_CONTACT_ID_SELF)
-            bot_name = self_contact.name or self_contact.display_name or "Bouncer"
-        except Exception:
-            bot_name = "Bouncer"
-            
         target_name = matched_contact.name or matched_contact.display_name or matched_contact.address or query
-        
-        reply_text = f"{bot_name} slaps {target_name} around a bit with a large trout"
+        reply_text = f"_{sender_name} slaps {target_name} around a bit with a large trout_"
         _send(bot, accid, msg.chat_id, reply_text, reply_to_id=found_msg_id)
     else:
-        _send(bot, accid, msg.chat_id, f"🔍 Could not find any recent messages from '{query}' in this chat.", reply_to_id=msg.id)
+        reply_text = f"_{sender_name} slaps themself around a bit with a large trout_"
+        _send(bot, accid, msg.chat_id, reply_text)
 
 @dc_cli.on(events.NewMessage(command="/top"))
 def top_command(bot, accid, event):
