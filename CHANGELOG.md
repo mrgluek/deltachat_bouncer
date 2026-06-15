@@ -7,6 +7,8 @@ All notable changes to this project will be documented in this file.
 ### Added
 - **New Command `/slap [username]`:** Finds the last message from the specified user in the chat and replies to it with `_<sender_name> slaps <username> around a bit with a large trout_`. If no message is found, it sends a self-slap action: `_<sender_name> slaps themself around a bit with a large trout_`.
 - **New Command `/me <action>`:** Performs an IRC-style action, sending a message formatted as `_<sender_name> <action>_` in italics.
+- **New Commands `/away [text]` and `/back`:** Allows users to set or clear their away status. When away, if someone mentions them by their full name or replies to their message, the bot automatically sends a private message notification to the sender: `_<away_user_name> is away: <text>_`.
+
 
 ## [2.5.1] - 2026-06-13
 

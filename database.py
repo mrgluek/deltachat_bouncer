@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import threading
+import time
 
 DB_PATH = os.getenv("DB_PATH", "bouncer.db")
 _lock = threading.Lock()
@@ -133,7 +134,15 @@ def init_db():
                 checked_at REAL
             )
         ''')
-        
+
+        # Away status tracking table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS away_status (
+                contact_id INTEGER PRIMARY KEY,
+                away_text TEXT,
+                updated_at REAL
+            )
+        ''')
 
         conn.commit()
         conn.close()
@@ -656,6 +665,43 @@ def delete_cmping_history_for_domain(domain: str):
         )
         conn.commit()
         conn.close()
+
+def set_away_status(contact_id: int, away_text: str):
+    """Set the away status text for a contact."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO away_status (contact_id, away_text, updated_at) VALUES (?, ?, ?)",
+            (contact_id, away_text, time.time())
+        )
+        conn.commit()
+        conn.close()
+
+def remove_away_status(contact_id: int):
+    """Remove the away status for a contact."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM away_status WHERE contact_id = ?",
+            (contact_id,)
+        )
+        conn.commit()
+        conn.close()
+
+def get_away_status(contact_id: int) -> str | None:
+    """Get the away status text for a contact, or None if not away."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT away_text FROM away_status WHERE contact_id = ?",
+            (contact_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
 
 init_db()
 

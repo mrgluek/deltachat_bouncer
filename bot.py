@@ -1186,6 +1186,40 @@ def me_command(bot, accid, event):
     reply_text = f"_{sender_name} {query}_"
     _send(bot, accid, msg.chat_id, reply_text)
 
+@dc_cli.on(events.NewMessage(command="/away"))
+def away_command(bot, accid, event):
+    msg = event.msg
+    text = event.payload.strip() if event.payload else ""
+    
+    try:
+        sender_contact = bot.rpc.get_contact(accid, msg.from_id)
+        sender_name = sender_contact.name or sender_contact.display_name or sender_contact.address or "Unknown"
+    except Exception:
+        sender_name = "Unknown"
+
+    if text:
+        database.set_away_status(msg.from_id, text)
+        reply_text = f"_{sender_name} is now away: {text}_"
+    else:
+        database.remove_away_status(msg.from_id)
+        reply_text = f"_{sender_name} is back_"
+        
+    _send(bot, accid, msg.chat_id, reply_text)
+
+@dc_cli.on(events.NewMessage(command="/back"))
+def back_command(bot, accid, event):
+    msg = event.msg
+    
+    try:
+        sender_contact = bot.rpc.get_contact(accid, msg.from_id)
+        sender_name = sender_contact.name or sender_contact.display_name or sender_contact.address or "Unknown"
+    except Exception:
+        sender_name = "Unknown"
+
+    database.remove_away_status(msg.from_id)
+    reply_text = f"_{sender_name} is back_"
+    _send(bot, accid, msg.chat_id, reply_text)
+
 @dc_cli.on(events.NewMessage(command="/top"))
 def top_command(bot, accid, event):
     msg = event.msg
@@ -1442,6 +1476,8 @@ def help_command(bot, accid, event):
         f"/invite — Generate an invite link/QR code for this group.\n"
         f"/slap <username> — Reply to the user's last message with a trout slap.\n"
         f"/me <action> — Perform an IRC-style action (e.g. /me waves).\n"
+        f"/away <text> — Set your away status, auto-notifying anyone who mentions you or replies.\n"
+        f"/back — Clear your away status.\n"
         f"/contact<ID> — Get a contact object for the given ID.\n"
         f"/help   — This message.\n"
         f"/chats  — Show catalog of available chats.\n"
@@ -3026,6 +3062,68 @@ def handle_all_messages(bot, accid, event):
         pass
         
     text = (msg.text or "").strip()
+    
+    # ── Away Check ──
+    if msg.from_id > 9 and msg.from_id != DC_CONTACT_ID_SELF and not text.startswith("/"):
+        notified_away_user_ids = set()
+        message_text = (msg.text or "").lower()
+
+        # 1. Check if this message is a reply to an away user
+        if hasattr(msg, "quote") and msg.quote and isinstance(msg.quote, dict):
+            quote_msg_id = msg.quote.get('message_id')
+            if quote_msg_id:
+                try:
+                    quoted_msg = bot.rpc.get_message(accid, quote_msg_id)
+                    quoted_sender_id = quoted_msg.from_id
+                    if quoted_sender_id > 9 and quoted_sender_id != msg.from_id and quoted_sender_id != DC_CONTACT_ID_SELF:
+                        away_text = database.get_away_status(quoted_sender_id)
+                        if away_text:
+                            notified_away_user_ids.add(quoted_sender_id)
+                            private_chat_id = bot.rpc.create_chat_by_contact_id(accid, msg.from_id)
+                            away_contact = bot.rpc.get_contact(accid, quoted_sender_id)
+                            away_name = away_contact.name or away_contact.display_name or away_contact.address or "User"
+                            _send(bot, accid, private_chat_id, f"_{away_name} is away: {away_text}_")
+                except Exception as e:
+                    logger.error(f"Error checking quote sender in away check: {e}")
+
+        # 2. Check if this message mentions any away user in the current chat by their full name
+        try:
+            chat_contacts = bot.rpc.get_chat_contacts(accid, msg.chat_id)
+        except Exception as e:
+            logger.error(f"Failed to get chat contacts for away mention check: {e}")
+            chat_contacts = []
+
+        for contact_id in chat_contacts:
+            if contact_id <= 9 or contact_id == msg.from_id or contact_id == DC_CONTACT_ID_SELF:
+                continue
+            if contact_id in notified_away_user_ids:
+                continue
+
+            away_text = database.get_away_status(contact_id)
+            if not away_text:
+                continue
+
+            try:
+                contact = bot.rpc.get_contact(accid, contact_id)
+                names_to_check = []
+                if contact.name:
+                    names_to_check.append(contact.name.strip().lower())
+                if contact.display_name:
+                    names_to_check.append(contact.display_name.strip().lower())
+
+                mentioned = False
+                for name in names_to_check:
+                    if name and name in message_text:
+                        mentioned = True
+                        break
+
+                if mentioned:
+                    notified_away_user_ids.add(contact_id)
+                    private_chat_id = bot.rpc.create_chat_by_contact_id(accid, msg.from_id)
+                    away_name = contact.name or contact.display_name or contact.address or "User"
+                    _send(bot, accid, private_chat_id, f"_{away_name} is away: {away_text}_")
+            except Exception as e:
+                logger.error(f"Error checking contact {contact_id} in away check: {e}")
     
     # Handle /chatdesc<ID> command
     if text.startswith("/chatdesc"):
