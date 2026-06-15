@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.2] - 2026-06-16
+
+### Added
+- **New Command `/slap [username]`:** Finds the last message from the specified user in the chat and replies to it with `<bot_nickname> slaps <username> around a bit with a large trout`.
+
 ## [2.5.1] - 2026-06-13
 
 ### Added

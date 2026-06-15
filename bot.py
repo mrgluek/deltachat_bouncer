@@ -190,8 +190,11 @@ def _is_dc_admin(bot, accid, contact_id):
         logger.error(f"Critical error in admin check: {e}")
     return False
 
-def _send(bot, accid, chat_id, text):
+def _send(bot, accid, chat_id, text, reply_to_id=None):
     msg_data = MsgData(text=text)
+    if reply_to_id:
+        msg_data.quoted_message_id = reply_to_id
+
     
     # Try to determine how many attempts we should make based on number of transports
     try:
@@ -1108,6 +1111,65 @@ def bounce_command(bot, accid, event):
     else:
         _send(bot, accid, msg.chat_id, "✅ All users are active or this is not a group chat.")
 
+@dc_cli.on(events.NewMessage(command="/slap"))
+def slap_command(bot, accid, event):
+    msg = event.msg
+    query = event.payload.strip() if event.payload else ""
+    if not query:
+        _send(bot, accid, msg.chat_id, "Usage: /slap <username>", reply_to_id=msg.id)
+        return
+
+    clean_query = query.lstrip('@').lower()
+    
+    try:
+        msg_ids = bot.rpc.get_message_ids(accid, msg.chat_id, False, False)
+    except Exception as e:
+        logger.error(f"Failed to get message IDs for chat {msg.chat_id}: {e}")
+        _send(bot, accid, msg.chat_id, "❌ Failed to retrieve messages in this chat.")
+        return
+
+    found_msg_id = None
+    matched_contact = None
+
+    for msg_id in reversed(msg_ids[-1000:]):
+        try:
+            m = bot.rpc.get_message(accid, msg_id)
+            if m.from_id <= 9 and m.from_id != DC_CONTACT_ID_SELF:
+                continue
+            
+            contact = bot.rpc.get_contact(accid, m.from_id)
+            contact_name = (contact.name or "").lower()
+            contact_display = (contact.display_name or "").lower()
+            contact_address = (contact.address or "").lower()
+            contact_id_str = str(m.from_id)
+
+            if (clean_query == contact_id_str or
+                clean_query in contact_name or
+                clean_query in contact_display or
+                clean_query in contact_address.split('@')[0] or
+                clean_query in contact_address):
+                
+                found_msg_id = msg_id
+                matched_contact = contact
+                break
+        except Exception as e:
+            logger.error(f"Error checking message {msg_id} in /slap: {e}")
+            continue
+
+    if found_msg_id and matched_contact:
+        try:
+            self_contact = bot.rpc.get_contact(accid, DC_CONTACT_ID_SELF)
+            bot_name = self_contact.name or self_contact.display_name or "Bouncer"
+        except Exception:
+            bot_name = "Bouncer"
+            
+        target_name = matched_contact.name or matched_contact.display_name or matched_contact.address or query
+        
+        reply_text = f"{bot_name} slaps {target_name} around a bit with a large trout"
+        _send(bot, accid, msg.chat_id, reply_text, reply_to_id=found_msg_id)
+    else:
+        _send(bot, accid, msg.chat_id, f"🔍 Could not find any recent messages from '{query}' in this chat.", reply_to_id=msg.id)
+
 @dc_cli.on(events.NewMessage(command="/top"))
 def top_command(bot, accid, event):
     msg = event.msg
@@ -1362,6 +1424,7 @@ def help_command(bot, accid, event):
         f"/relays — Find group members using regular mail providers.\n"
         f"/top    — Show top 10 posters in the last 24 hours.\n"
         f"/invite — Generate an invite link/QR code for this group.\n"
+        f"/slap <username> — Reply to the user's last message with a trout slap.\n"
         f"/contact<ID> — Get a contact object for the given ID.\n"
         f"/help   — This message.\n"
         f"/chats  — Show catalog of available chats.\n"
