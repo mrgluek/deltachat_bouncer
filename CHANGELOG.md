@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [2.5.2] - 2026-06-16
 
 ### Added
-- **New Command `/slap [username]`:** Finds the last message from the specified user in the chat and replies to it with `<bot_nickname> slaps <username> around a bit with a large trout`.
+- **New Command `/slap [username]`:** Finds the last message from the specified user in the chat and replies to it with `_<sender_name> slaps <username> around a bit with a large trout_`. If no message is found, it sends a self-slap action: `_<sender_name> slaps themself around a bit with a large trout_`.
 
 ## [2.5.1] - 2026-06-13
 
