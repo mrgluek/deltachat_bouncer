@@ -1170,6 +1170,22 @@ def slap_command(bot, accid, event):
         reply_text = f"_{sender_name} slaps themself around a bit with a large trout_"
         _send(bot, accid, msg.chat_id, reply_text)
 
+@dc_cli.on(events.NewMessage(command="/me"))
+def me_command(bot, accid, event):
+    msg = event.msg
+    query = event.payload.strip() if event.payload else ""
+    if not query:
+        return
+
+    try:
+        sender_contact = bot.rpc.get_contact(accid, msg.from_id)
+        sender_name = sender_contact.name or sender_contact.display_name or sender_contact.address or "Unknown"
+    except Exception:
+        sender_name = "Unknown"
+
+    reply_text = f"_{sender_name} {query}_"
+    _send(bot, accid, msg.chat_id, reply_text)
+
 @dc_cli.on(events.NewMessage(command="/top"))
 def top_command(bot, accid, event):
     msg = event.msg
@@ -1425,6 +1441,7 @@ def help_command(bot, accid, event):
         f"/top    — Show top 10 posters in the last 24 hours.\n"
         f"/invite — Generate an invite link/QR code for this group.\n"
         f"/slap <username> — Reply to the user's last message with a trout slap.\n"
+        f"/me <action> — Perform an IRC-style action (e.g. /me waves).\n"
         f"/contact<ID> — Get a contact object for the given ID.\n"
         f"/help   — This message.\n"
         f"/chats  — Show catalog of available chats.\n"
