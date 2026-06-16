@@ -144,6 +144,16 @@ def init_db():
             )
         ''')
 
+        # Away notifications tracking table (debounce)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS away_notifications (
+                away_user_id INTEGER,
+                recipient_id INTEGER,
+                away_updated_at REAL,
+                PRIMARY KEY (away_user_id, recipient_id, away_updated_at)
+            )
+        ''')
+
         conn.commit()
         conn.close()
 
@@ -675,6 +685,8 @@ def set_away_status(contact_id: int, away_text: str):
             "INSERT OR REPLACE INTO away_status (contact_id, away_text, updated_at) VALUES (?, ?, ?)",
             (contact_id, away_text, time.time())
         )
+        # Clear debounce notifications for this user when status updates/resets
+        cursor.execute("DELETE FROM away_notifications WHERE away_user_id = ?", (contact_id,))
         conn.commit()
         conn.close()
 
@@ -687,6 +699,8 @@ def remove_away_status(contact_id: int):
             "DELETE FROM away_status WHERE contact_id = ?",
             (contact_id,)
         )
+        # Clear notifications for this user
+        cursor.execute("DELETE FROM away_notifications WHERE away_user_id = ?", (contact_id,))
         conn.commit()
         conn.close()
 
@@ -702,6 +716,57 @@ def get_away_status(contact_id: int) -> str | None:
         row = cursor.fetchone()
         conn.close()
         return row[0] if row else None
+
+def get_away_status_details(contact_id: int) -> tuple[str, float] | None:
+    """Get the away status text and updated_at timestamp for a contact, or None if not away."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT away_text, updated_at FROM away_status WHERE contact_id = ?",
+            (contact_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return (row[0], row[1]) if row else None
+
+def has_notified_away(away_user_id: int, recipient_id: int, away_updated_at: float) -> bool:
+    """Check if a recipient has already been notified about this specific away status."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM away_notifications WHERE away_user_id = ? AND recipient_id = ? AND away_updated_at = ?",
+            (away_user_id, recipient_id, away_updated_at)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row is not None
+
+def mark_notified_away(away_user_id: int, recipient_id: int, away_updated_at: float):
+    """Mark that a recipient has been notified about this specific away status."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO away_notifications (away_user_id, recipient_id, away_updated_at) VALUES (?, ?, ?)",
+            (away_user_id, recipient_id, away_updated_at)
+        )
+        conn.commit()
+        conn.close()
+
+def get_notified_recipients(away_user_id: int) -> list[int]:
+    """Get all recipient IDs who were notified about this user's away status."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT recipient_id FROM away_notifications WHERE away_user_id = ?",
+            (away_user_id,)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [r[0] for r in rows]
 
 init_db()
 

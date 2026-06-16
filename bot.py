@@ -1200,11 +1200,25 @@ def away_command(bot, accid, event):
     if text:
         database.set_away_status(msg.from_id, text)
         reply_text = f"_{sender_name} is now away: {text}_"
+        _send(bot, accid, msg.chat_id, reply_text)
     else:
+        try:
+            recipients = database.get_notified_recipients(msg.from_id)
+        except Exception as e:
+            logger.error(f"Error getting notified recipients: {e}")
+            recipients = []
+
         database.remove_away_status(msg.from_id)
         reply_text = f"_{sender_name} is back_"
-        
-    _send(bot, accid, msg.chat_id, reply_text)
+        _send(bot, accid, msg.chat_id, reply_text)
+
+        # Notify recipients in PM
+        for recipient_id in recipients:
+            try:
+                private_chat_id = bot.rpc.create_chat_by_contact_id(accid, recipient_id)
+                _send(bot, accid, private_chat_id, f"_{sender_name} is back_")
+            except Exception as e:
+                logger.error(f"Error notifying recipient {recipient_id} that sender is back: {e}")
 
 @dc_cli.on(events.NewMessage(command="/back"))
 def back_command(bot, accid, event):
@@ -1216,9 +1230,23 @@ def back_command(bot, accid, event):
     except Exception:
         sender_name = "Unknown"
 
+    try:
+        recipients = database.get_notified_recipients(msg.from_id)
+    except Exception as e:
+        logger.error(f"Error getting notified recipients: {e}")
+        recipients = []
+
     database.remove_away_status(msg.from_id)
     reply_text = f"_{sender_name} is back_"
     _send(bot, accid, msg.chat_id, reply_text)
+
+    # Notify recipients in PM
+    for recipient_id in recipients:
+        try:
+            private_chat_id = bot.rpc.create_chat_by_contact_id(accid, recipient_id)
+            _send(bot, accid, private_chat_id, f"_{sender_name} is back_")
+        except Exception as e:
+            logger.error(f"Error notifying recipient {recipient_id} that sender is back: {e}")
 
 @dc_cli.on(events.NewMessage(command="/top"))
 def top_command(bot, accid, event):
@@ -3076,13 +3104,17 @@ def handle_all_messages(bot, accid, event):
                     quoted_msg = bot.rpc.get_message(accid, quote_msg_id)
                     quoted_sender_id = quoted_msg.from_id
                     if quoted_sender_id > 9 and quoted_sender_id != msg.from_id and quoted_sender_id != DC_CONTACT_ID_SELF:
-                        away_text = database.get_away_status(quoted_sender_id)
-                        if away_text:
-                            notified_away_user_ids.add(quoted_sender_id)
-                            private_chat_id = bot.rpc.create_chat_by_contact_id(accid, msg.from_id)
-                            away_contact = bot.rpc.get_contact(accid, quoted_sender_id)
-                            away_name = away_contact.name or away_contact.display_name or away_contact.address or "User"
-                            _send(bot, accid, private_chat_id, f"_{away_name} is away: {away_text}_")
+                        details = database.get_away_status_details(quoted_sender_id)
+                        if details:
+                            away_text, away_updated_at = details
+                            # Debounce: check if we already notified this recipient about this specific away session
+                            if not database.has_notified_away(quoted_sender_id, msg.from_id, away_updated_at):
+                                database.mark_notified_away(quoted_sender_id, msg.from_id, away_updated_at)
+                                notified_away_user_ids.add(quoted_sender_id)
+                                private_chat_id = bot.rpc.create_chat_by_contact_id(accid, msg.from_id)
+                                away_contact = bot.rpc.get_contact(accid, quoted_sender_id)
+                                away_name = away_contact.name or away_contact.display_name or away_contact.address or "User"
+                                _send(bot, accid, private_chat_id, f"_{away_name} is away: {away_text}_")
                 except Exception as e:
                     logger.error(f"Error checking quote sender in away check: {e}")
 
@@ -3099,8 +3131,12 @@ def handle_all_messages(bot, accid, event):
             if contact_id in notified_away_user_ids:
                 continue
 
-            away_text = database.get_away_status(contact_id)
-            if not away_text:
+            details = database.get_away_status_details(contact_id)
+            if not details:
+                continue
+
+            away_text, away_updated_at = details
+            if database.has_notified_away(contact_id, msg.from_id, away_updated_at):
                 continue
 
             try:
@@ -3118,6 +3154,7 @@ def handle_all_messages(bot, accid, event):
                         break
 
                 if mentioned:
+                    database.mark_notified_away(contact_id, msg.from_id, away_updated_at)
                     notified_away_user_ids.add(contact_id)
                     private_chat_id = bot.rpc.create_chat_by_contact_id(accid, msg.from_id)
                     away_name = contact.name or contact.display_name or contact.address or "User"
