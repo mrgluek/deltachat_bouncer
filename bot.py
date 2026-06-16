@@ -1180,6 +1180,93 @@ def bounce_command(bot, accid, event):
                  _send(bot, accid, msg.chat_id, f"⌛️ This group was checked recently. Please wait {remaining_min}m before running another check.")
             return
 
+    query = event.payload.strip() if event.payload else ""
+    
+    # Check if this is a reply to another message
+    target_contact_id = None
+    if hasattr(msg, "quote") and msg.quote and isinstance(msg.quote, dict):
+        quote_msg_id = msg.quote.get('message_id')
+        if quote_msg_id:
+            try:
+                quoted_msg = bot.rpc.get_message(accid, quote_msg_id)
+                if quoted_msg.from_id > 9:
+                    target_contact_id = quoted_msg.from_id
+            except Exception:
+                pass
+
+    if target_contact_id or query:
+        matched_contacts = []
+        if target_contact_id:
+            try:
+                contact = bot.rpc.get_contact(accid, target_contact_id)
+                matched_contacts = [contact]
+            except Exception as e:
+                logger.error(f"Failed to get contact for quote target {target_contact_id}: {e}")
+        else:
+            clean_query = query.lstrip('@').lower()
+            try:
+                chat_contacts = bot.rpc.get_chat_contacts(accid, msg.chat_id)
+            except Exception as e:
+                logger.error(f"Failed to get chat contacts: {e}")
+                chat_contacts = []
+
+            for contact_id in chat_contacts:
+                if contact_id <= 9 or contact_id == DC_CONTACT_ID_SELF:
+                    continue
+                try:
+                    contact = bot.rpc.get_contact(accid, contact_id)
+                    contact_name = (contact.name or "").lower()
+                    contact_display = (contact.display_name or "").lower()
+                    contact_address = (contact.address or "").lower()
+                    contact_id_str = str(contact_id)
+                    
+                    if (clean_query == contact_id_str or
+                        clean_query in contact_name or
+                        clean_query in contact_display or
+                        clean_query in contact_address.split('@')[0] or
+                        clean_query in contact_address):
+                        matched_contacts.append(contact)
+                except Exception:
+                    continue
+
+        if not matched_contacts:
+            _send(bot, accid, msg.chat_id, f"🔍 User '{query}' was not found in this chat.", reply_to_id=msg.id)
+            return
+
+        # Update timestamp for cooldown since this was a successful check
+        _chat_anti_spam[msg.chat_id] = now
+
+        report_lines = []
+        for contact in matched_contacts:
+            name = contact.name or contact.display_name or "Unknown"
+            address = contact.address or "no_email@example.com"
+            last_seen = contact.last_seen if hasattr(contact, "last_seen") else contact.get("last_seen", 0)
+            
+            # Ensure contact first-seen tracking is updated
+            database.ensure_contact_first_seen(contact.id, now)
+            age = _get_contact_age_indicator(contact.id)
+            
+            if last_seen == 0:
+                report_lines.append(f"• /contact{contact.id} {age} **{name}** ({address}) — [never seen]")
+            else:
+                date_str = datetime.fromtimestamp(last_seen).strftime("%-d %b %Y")
+                days_ago = int((now - last_seen) / (24 * 3600))
+                if days_ago == 0:
+                    seen_str = "today"
+                elif days_ago == 1:
+                    seen_str = "yesterday"
+                else:
+                    seen_str = f"{days_ago}d ago"
+                report_lines.append(f"• /contact{contact.id} {age} **{name}** ({address}) — last seen {date_str} ({seen_str})")
+
+        if len(matched_contacts) > 1:
+            report = f"🔍 **Activity Check Matches ({len(matched_contacts)}):**\n\n" + "\n".join(report_lines)
+        else:
+            report = f"ℹ️ **Activity Check:**\n" + "\n".join(report_lines)
+
+        _send(bot, accid, msg.chat_id, report)
+        return
+
     # Update timestamp
     _chat_anti_spam[msg.chat_id] = now
 
@@ -1575,7 +1662,7 @@ def help_command(bot, accid, event):
         f"👋 Hi {sender_email}!\n\n"
         f"{status_text}\n\n"
         f"**Commands:**\n"
-        f"/bounce — Trigger an inactivity check in the current group.\n"
+        f"/bounce [username] — Show last activity of a user, or trigger inactivity check in this group.\n"
         f"/search [query1] ... — Search members by email/domain (e.g. @testrun.org) or reply to a message.\n"
         f"/relays — Find group members using regular mail providers.\n"
         f"/top    — Show top 10 posters in the last 24 hours.\n"

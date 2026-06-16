@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.5] - 2026-06-16
+
+### Changed
+- **Enhance `/bounce` Command:** The `/bounce` command now supports checking the activity of a specific user. Specify a user by passing their name/email/ID as an argument (e.g., `/bounce username`) or by replying to their message. Running `/bounce` without arguments still triggers the full chat inactivity report.
+
 ## [2.5.4] - 2026-06-16
 
 ### Changed
