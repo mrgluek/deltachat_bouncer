@@ -720,32 +720,19 @@ def _run_monitor_single(cmping_path, src, dst):
 
 
 def _clear_all_errors_for_server(server: str):
-    """Clear all errors involving this server, replacing them with virtual success."""
+    """Clear all errors involving this server from results."""
     global _cmping_last_results
-    now = time.time()
-    keys_to_update = []
+    keys_to_remove = []
     for (src, dst), res in _cmping_last_results.items():
         if src == server or dst == server:
             if not res.get("success"):
-                keys_to_update.append((src, dst))
+                keys_to_remove.append((src, dst))
                 
-    for key in keys_to_update:
+    for key in keys_to_remove:
         src, dst = key
-        virt_res = {
-            "success": True,
-            "avg": 0.0,
-            "error": "",
-            "checked_at": now
-        }
-        _cmping_last_results[key] = virt_res
-        database.save_cmping_result(
-            src=src,
-            dst=dst,
-            success=True,
-            error="",
-            avg=0.0,
-            checked_at=now
-        )
+        _cmping_last_results.pop(key, None)
+        database.delete_cmping_result(src, dst)
+
 
 
 def _send_server_health_alerts(bot, accid, health_changes):

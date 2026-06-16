@@ -768,7 +768,20 @@ def get_notified_recipients(away_user_id: int) -> list[int]:
         conn.close()
         return [r[0] for r in rows]
 
+def delete_cmping_result(src: str, dst: str):
+    """Delete a specific cmping result from the database."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM cmping_results WHERE src = ? AND dst = ?",
+            (src.strip().lower(), dst.strip().lower())
+        )
+        conn.commit()
+        conn.close()
+
 init_db()
+
 
 
 

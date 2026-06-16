@@ -2,7 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.4] - 2026-06-16
+
+### Changed
+- **CMPing Error Clearing:** When a server recovers, its previous failures are now deleted from the database and memory instead of being replaced by virtual "0.0 ms" success entries. This prevents confusing 0.0 ms values in `/cmpingstatus` reports.
+
 ## [2.5.3] - 2026-06-16
+
 
 ### Added
 - **Automatic Transport Failover:** Implemented a robust, event-driven transport failover mechanism. The bot now listens to the core's `MSG_FAILED` event. When a message fails to deliver, it automatically switches `configured_addr` to the next configured backup transport, resends the message, and alerts the administrator.
