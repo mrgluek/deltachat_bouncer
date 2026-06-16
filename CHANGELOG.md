@@ -7,6 +7,13 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - **Enhance `/bounce` Command:** The `/bounce` command now supports checking the activity of a specific user. Specify a user by passing their name/email/ID as an argument (e.g., `/bounce username`) or by replying to their message. Running `/bounce` without arguments still triggers the full chat inactivity report.
 
+### Fixed
+- **E2E Failover Loop & Key Fallback**:
+  - Added fallback support for both `chat_id` and `chatId` keys in message snapshots to prevent `chat 'Unknown' (ID: None)` errors.
+  - Downgraded permanent E2E and resend logs to `WARNING`.
+  - Blocked sending of admin failover alerts if the failed message itself was sent to the admin chat, preventing recursion.
+
+
 ## [2.5.4] - 2026-06-16
 
 ### Changed
