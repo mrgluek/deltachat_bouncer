@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.6] - 2026-06-17
+
+### Changed
+- **Enhance `/slap` Command:** The `/slap` command now supports replying to a message. If you reply to a message and run `/slap` (without arguments), the bot will slap the author of that message and post the slap as a reply.
+
 ## [2.5.5] - 2026-06-16
 
 ### Changed

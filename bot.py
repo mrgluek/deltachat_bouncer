@@ -1325,46 +1325,67 @@ def bounce_command(bot, accid, event):
 def slap_command(bot, accid, event):
     msg = event.msg
     query = event.payload.strip() if event.payload else ""
-    if not query:
-        _send(bot, accid, msg.chat_id, "Usage: /slap <username>", reply_to_id=msg.id)
-        return
-
-    clean_query = query.lstrip('@').lower()
     
-    try:
-        msg_ids = bot.rpc.get_message_ids(accid, msg.chat_id, False, False)
-    except Exception as e:
-        logger.error(f"Failed to get message IDs for chat {msg.chat_id}: {e}")
-        _send(bot, accid, msg.chat_id, "❌ Failed to retrieve messages in this chat.")
+    # Check if this is a reply to another message
+    target_contact_id = None
+    target_msg_id = None
+    if hasattr(msg, "quote") and msg.quote and isinstance(msg.quote, dict):
+        quote_msg_id = msg.quote.get('message_id')
+        if quote_msg_id:
+            try:
+                quoted_msg = bot.rpc.get_message(accid, quote_msg_id)
+                if quoted_msg.from_id > 9 or quoted_msg.from_id == DC_CONTACT_ID_SELF:
+                    target_contact_id = quoted_msg.from_id
+                    target_msg_id = quote_msg_id
+            except Exception:
+                pass
+
+    if not query and not target_msg_id:
+        _send(bot, accid, msg.chat_id, "Usage: /slap <username> (or reply to a message)", reply_to_id=msg.id)
         return
 
-    found_msg_id = None
+    found_msg_id = target_msg_id
     matched_contact = None
 
-    for msg_id in reversed(msg_ids[-1000:]):
+    if target_contact_id:
         try:
-            m = bot.rpc.get_message(accid, msg_id)
-            if m.from_id <= 9 and m.from_id != DC_CONTACT_ID_SELF:
-                continue
-            
-            contact = bot.rpc.get_contact(accid, m.from_id)
-            contact_name = (contact.name or "").lower()
-            contact_display = (contact.display_name or "").lower()
-            contact_address = (contact.address or "").lower()
-            contact_id_str = str(m.from_id)
-
-            if (clean_query == contact_id_str or
-                clean_query in contact_name or
-                clean_query in contact_display or
-                clean_query in contact_address.split('@')[0] or
-                clean_query in contact_address):
-                
-                found_msg_id = msg_id
-                matched_contact = contact
-                break
+            matched_contact = bot.rpc.get_contact(accid, target_contact_id)
         except Exception as e:
-            logger.error(f"Error checking message {msg_id} in /slap: {e}")
-            continue
+            logger.error(f"Failed to get contact for slap quote target {target_contact_id}: {e}")
+
+    if not matched_contact and query:
+        clean_query = query.lstrip('@').lower()
+        try:
+            msg_ids = bot.rpc.get_message_ids(accid, msg.chat_id, False, False)
+        except Exception as e:
+            logger.error(f"Failed to get message IDs for chat {msg.chat_id}: {e}")
+            _send(bot, accid, msg.chat_id, "❌ Failed to retrieve messages in this chat.")
+            return
+
+        for msg_id in reversed(msg_ids[-1000:]):
+            try:
+                m = bot.rpc.get_message(accid, msg_id)
+                if m.from_id <= 9 and m.from_id != DC_CONTACT_ID_SELF:
+                    continue
+                
+                contact = bot.rpc.get_contact(accid, m.from_id)
+                contact_name = (contact.name or "").lower()
+                contact_display = (contact.display_name or "").lower()
+                contact_address = (contact.address or "").lower()
+                contact_id_str = str(m.from_id)
+
+                if (clean_query == contact_id_str or
+                    clean_query in contact_name or
+                    clean_query in contact_display or
+                    clean_query in contact_address.split('@')[0] or
+                    clean_query in contact_address):
+                    
+                    found_msg_id = msg_id
+                    matched_contact = contact
+                    break
+            except Exception as e:
+                logger.error(f"Error checking message {msg_id} in /slap: {e}")
+                continue
 
     try:
         sender_contact = bot.rpc.get_contact(accid, msg.from_id)
@@ -1377,8 +1398,11 @@ def slap_command(bot, accid, event):
         reply_text = f"_{sender_name} slaps {target_name} around a bit with a large trout_"
         _send(bot, accid, msg.chat_id, reply_text, reply_to_id=found_msg_id)
     else:
-        reply_text = f"_{sender_name} slaps themself around a bit with a large trout_"
-        _send(bot, accid, msg.chat_id, reply_text)
+        if query:
+            reply_text = f"_{sender_name} slaps themself around a bit with a large trout_"
+            _send(bot, accid, msg.chat_id, reply_text)
+        else:
+            _send(bot, accid, msg.chat_id, "Usage: /slap <username> (or reply to a message)", reply_to_id=msg.id)
 
 @dc_cli.on(events.NewMessage(command="/me"))
 def me_command(bot, accid, event):
