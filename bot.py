@@ -1103,7 +1103,7 @@ def on_start(bot, args):
     global dc_bot_instance, dc_accid
     dc_bot_instance = bot
     
-    # Monkey-patch bot._process_messages to allow processing of system/info messages
+    # Monkey-patch bot._process_messages and bot._process_message to allow processing of system/info messages
     from deltachat2 import SpecialContactId
     from deltachat2.transport import JsonRpcError
 
@@ -1123,7 +1123,27 @@ def on_start(bot, args):
             if retry:
                 custom_process_messages(accid, False)
 
+    def custom_process_message(accid: int, msgid: int) -> None:
+        try:
+            msg = bot.rpc.get_message(accid, msgid)
+            outgoing = msg.from_id == SpecialContactId.SELF
+            logger.info(f"custom_process_message: msgid={msgid}, from_id={msg.from_id}, is_info={msg.is_info}, text={msg.text!r}")
+            # Process the message if it's outgoing, from a contact > LAST_SPECIAL, or a system/info message
+            if outgoing or msg.from_id > SpecialContactId.LAST_SPECIAL or msg.is_info:
+                logger.info(f"custom_process_message: calling _on_new_msg or dispatching for msgid={msgid}")
+                if hasattr(bot, "_on_new_msg"):
+                    bot._on_new_msg(accid, msg)
+                else:
+                    from deltachat2 import NewMsgEvent, Event
+                    event = NewMsgEvent(command="", payload="", msg=msg)
+                    if not msg.is_info and msg.text.startswith(bot.command_prefix):
+                        bot._parse_command(accid, event)
+                    bot._on_event(Event(accid, event), events.NewMessage)
+        except JsonRpcError as err:
+            logger.exception(err)
+
     bot._process_messages = custom_process_messages
+    bot._process_message = custom_process_message
 
     accounts = bot.rpc.get_all_account_ids()
     if not accounts:

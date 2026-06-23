@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.8] - 2026-06-23
+
+### Fixed
+- **Join Event Welcome & Invalidation:** Fixed a bug where system info messages (like a member joining via securejoin invite) were ignored by the bot's event processor. The `deltachat2` library's `_process_message` event filter is now monkey-patched to ensure system messages (where `from_id <= 9`, e.g. when the bot itself is the inviter) are processed correctly across all library versions. This restores welcome greetings and invite link invalidation/deletion on member join.
+
 ## [2.5.7] - 2026-06-23
 
 ### Changed
