@@ -1119,10 +1119,10 @@ def on_start(bot, args):
                     _processed_msg_ids.clear()
                 msg = bot.rpc.get_message(accid, msgid)
                 outgoing = msg.from_id == SpecialContactId.SELF
-                logger.info(f"custom_process_messages: msgid={msgid}, from_id={msg.from_id}, is_info={msg.is_info}, text={msg.text!r}")
+                logger.debug(f"custom_process_messages: msgid={msgid}, from_id={msg.from_id}, is_info={msg.is_info}, text={msg.text!r}")
                 # Process the message if it's outgoing, from a contact > LAST_SPECIAL, or a system/info message
                 if outgoing or msg.from_id > SpecialContactId.LAST_SPECIAL or msg.is_info:
-                    logger.info(f"custom_process_messages: calling _on_new_msg for msgid={msgid}")
+                    logger.debug(f"custom_process_messages: calling _on_new_msg for msgid={msgid}")
                     bot._on_new_msg(accid, msg)
                 bot.rpc.set_config(accid, "last_msg_id", str(msgid))
         except JsonRpcError as err:
@@ -1139,10 +1139,10 @@ def on_start(bot, args):
         try:
             msg = bot.rpc.get_message(accid, msgid)
             outgoing = msg.from_id == SpecialContactId.SELF
-            logger.info(f"custom_process_message: msgid={msgid}, from_id={msg.from_id}, is_info={msg.is_info}, text={msg.text!r}")
+            logger.debug(f"custom_process_message: msgid={msgid}, from_id={msg.from_id}, is_info={msg.is_info}, text={msg.text!r}")
             # Process the message if it's outgoing, from a contact > LAST_SPECIAL, or a system/info message
             if outgoing or msg.from_id > SpecialContactId.LAST_SPECIAL or msg.is_info:
-                logger.info(f"custom_process_message: calling _on_new_msg or dispatching for msgid={msgid}")
+                logger.debug(f"custom_process_message: calling _on_new_msg or dispatching for msgid={msgid}")
                 if hasattr(bot, "_on_new_msg"):
                     bot._on_new_msg(accid, msg)
                 else:

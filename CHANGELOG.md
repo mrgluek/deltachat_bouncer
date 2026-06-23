@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.10] - 2026-06-23
+
+### Changed
+- **Log Level Adjustment:** Changed the log level of custom message processing log lines from `INFO` to `DEBUG` to keep standard runtime logs cleaner.
+
 ## [2.5.9] - 2026-06-23
 
 ### Fixed
