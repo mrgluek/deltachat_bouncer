@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.9] - 2026-06-23
+
+### Fixed
+- **Local Join Event Event Loop Fix:** In newer versions of the `deltachat2` library, the event loop does not process `MSGS_CHANGED` events to dispatch new messages. Locally generated system messages (like when the bot completes the securejoin handshake and adds a member itself) only emit `MSGS_CHANGED` events rather than `INCOMING_MSG` events. Monkey-patched `Bot.run_until` to process `MSGS_CHANGED` events (using deduplication to prevent duplicate message handling) to restore join event detection for securejoins.
+
 ## [2.5.8] - 2026-06-23
 
 ### Fixed

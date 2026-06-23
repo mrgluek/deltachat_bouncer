@@ -1104,12 +1104,19 @@ def on_start(bot, args):
     dc_bot_instance = bot
     
     # Monkey-patch bot._process_messages and bot._process_message to allow processing of system/info messages
-    from deltachat2 import SpecialContactId
+    from deltachat2 import SpecialContactId, Bot, EventType
     from deltachat2.transport import JsonRpcError
+
+    _processed_msg_ids = set()
 
     def custom_process_messages(accid: int, retry=True) -> None:
         try:
             for msgid in bot.rpc.get_next_msgs(accid):
+                if msgid in _processed_msg_ids:
+                    continue
+                _processed_msg_ids.add(msgid)
+                if len(_processed_msg_ids) > 1000:
+                    _processed_msg_ids.clear()
                 msg = bot.rpc.get_message(accid, msgid)
                 outgoing = msg.from_id == SpecialContactId.SELF
                 logger.info(f"custom_process_messages: msgid={msgid}, from_id={msg.from_id}, is_info={msg.is_info}, text={msg.text!r}")
@@ -1124,6 +1131,11 @@ def on_start(bot, args):
                 custom_process_messages(accid, False)
 
     def custom_process_message(accid: int, msgid: int) -> None:
+        if msgid in _processed_msg_ids:
+            return
+        _processed_msg_ids.add(msgid)
+        if len(_processed_msg_ids) > 1000:
+            _processed_msg_ids.clear()
         try:
             msg = bot.rpc.get_message(accid, msgid)
             outgoing = msg.from_id == SpecialContactId.SELF
@@ -1142,8 +1154,33 @@ def on_start(bot, args):
         except JsonRpcError as err:
             logger.exception(err)
 
+    def custom_run_until(self, func, account_id=0):
+        if account_id:
+            if self.rpc.is_configured(account_id):
+                self.rpc.start_io(account_id)
+        else:
+            self.rpc.start_io_for_all_accounts()
+
+        def _wrapper(event):
+            if event.event.kind == EventType.INCOMING_MSG:
+                if hasattr(self, "_process_message"):
+                    self._process_message(event.account_id, event.event.msg_id)
+                else:
+                    self._process_messages(event.account_id)
+            elif event.event.kind == EventType.MSGS_CHANGED:
+                if hasattr(self, "_process_message"):
+                    msg_id = getattr(event.event, "msg_id", None)
+                    if msg_id and msg_id > 0:
+                        self._process_message(event.account_id, msg_id)
+                else:
+                    self._process_messages(event.account_id)
+            return func(event)
+
+        return super(Bot, self).run_until(_wrapper, account_id)
+
     bot._process_messages = custom_process_messages
     bot._process_message = custom_process_message
+    bot.run_until = lambda func, account_id=0: custom_run_until(bot, func, account_id)
 
     accounts = bot.rpc.get_all_account_ids()
     if not accounts:
