@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [2.5.7] - 2026-06-23
 
 ### Changed
-- **Single-use Invite Invalidation and Deletion:** For private group chats, the invite link generated via `/invite` is now single-use and will be automatically deleted from the group chat (both the message text and QR code image) as soon as a new member joins.
+- **Single-use Invite Invalidation and Deletion:** For private group chats, the invite link generated via `/invite` is now single-use and will be automatically deleted from the group chat (both the message text and QR code image) as soon as a new member joins. If the message is unencrypted (e.g. in new groups without established key exchanges) and cannot be deleted for everyone due to core security rules, it falls back to editing the text of the message to show that the link has expired.
 
 ## [2.5.6] - 2026-06-17
 

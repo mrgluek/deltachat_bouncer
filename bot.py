@@ -3266,7 +3266,12 @@ def handle_dc_info_message(bot, accid, event):
                             bot.rpc.delete_messages_for_all(accid, [invite_msg_id])
                             logger.info(f"Deleted invite message {invite_msg_id} for all in private chat {dc_chat_id}")
                         except Exception as del_err:
-                            logger.error(f"Failed to delete invite message {invite_msg_id}: {del_err}")
+                            logger.warning(f"Failed to delete invite message {invite_msg_id} for all: {del_err}. Attempting to edit instead...")
+                            try:
+                                bot.rpc.send_edit_request(accid, invite_msg_id, "❌ This single-use invite link has expired.")
+                                logger.info(f"Edited invite message {invite_msg_id} to mark as expired")
+                            except Exception as edit_err:
+                                logger.error(f"Failed to edit invite message {invite_msg_id}: {edit_err}")
 
                     database.update_catalog_chat_invite_link(dc_chat_id, None, None)
             except Exception as e:
