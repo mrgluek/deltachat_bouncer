@@ -48,6 +48,7 @@ def init_db():
                 is_private INTEGER DEFAULT 0,
                 member_count INTEGER DEFAULT 0,
                 invite_link TEXT,
+                invite_msg_id INTEGER,
                 welcome_enabled INTEGER DEFAULT 0,
                 welcome_text TEXT
             )
@@ -56,6 +57,8 @@ def init_db():
         # Upgrade existing table schema if necessary
         cursor.execute("PRAGMA table_info(catalog_chats)")
         columns = [info[1] for info in cursor.fetchall()]
+        if "invite_msg_id" not in columns:
+            cursor.execute("ALTER TABLE catalog_chats ADD COLUMN invite_msg_id INTEGER")
         if "welcome_enabled" not in columns:
             cursor.execute("ALTER TABLE catalog_chats ADD COLUMN welcome_enabled INTEGER DEFAULT 0")
         if "welcome_text" not in columns:
@@ -328,11 +331,11 @@ def update_catalog_chat_member_count(chat_id: int, member_count: int):
         conn.commit()
         conn.close()
 
-def update_catalog_chat_invite_link(chat_id: int, invite_link: str):
+def update_catalog_chat_invite_link(chat_id: int, invite_link: str, invite_msg_id: int = None):
     with _lock:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("UPDATE catalog_chats SET invite_link = ? WHERE chat_id = ?", (invite_link, chat_id))
+        cursor.execute("UPDATE catalog_chats SET invite_link = ?, invite_msg_id = ? WHERE chat_id = ?", (invite_link, invite_msg_id, chat_id))
         conn.commit()
         conn.close()
 

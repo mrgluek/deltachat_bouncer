@@ -1843,9 +1843,6 @@ def invite_command(bot, accid, event):
         catalog_chat = database.get_catalog_chat_by_chat_id(msg.chat_id)
         is_private = catalog_chat and catalog_chat['is_private']
         
-        if is_private:
-            database.update_catalog_chat_invite_link(msg.chat_id, qrdata)
-
         chat_name = chat.get('name') if isinstance(chat, dict) else getattr(chat, 'name', 'Group')
         
         if is_private:
@@ -1864,6 +1861,7 @@ def invite_command(bot, accid, event):
         
         # Try to generate QR code image
         temp_path = None
+        sent_msg_id = None
         try:
             qr = qrcode.QRCode(version=1, box_size=10, border=4)
             qr.add_data(qrdata)
@@ -1876,7 +1874,7 @@ def invite_command(bot, accid, event):
                 temp_path = f.name
             
             # Send file + text
-            bot.rpc.send_msg(accid, msg.chat_id, MsgData(file=temp_path, text=invite_text))
+            sent_msg_id = bot.rpc.send_msg(accid, msg.chat_id, MsgData(file=temp_path, text=invite_text))
             
             # Track success
             try:
@@ -1887,13 +1885,16 @@ def invite_command(bot, accid, event):
                 pass
         except Exception as qr_err:
             logger.warning(f"Could not generate QR image, falling back to text message: {qr_err}")
-            _send(bot, accid, msg.chat_id, invite_text)
+            sent_msg_id = _send(bot, accid, msg.chat_id, invite_text)
         finally:
             if temp_path and os.path.exists(temp_path):
                 try:
                     os.unlink(temp_path)
                 except Exception as e:
                     logger.warning(f"Failed to delete temp QR image file {temp_path}: {e}")
+                    
+        if is_private and sent_msg_id:
+            database.update_catalog_chat_invite_link(msg.chat_id, qrdata, sent_msg_id)
                     
     except Exception as e:
         logger.error(f"Failed to generate invite: {e}")
@@ -3251,6 +3252,7 @@ def handle_dc_info_message(bot, accid, event):
                 # Check if chat is private and has an active invite link to revoke
                 if is_join_event and catalog_chat.get('is_private') and catalog_chat.get('invite_link'):
                     invite_link = catalog_chat['invite_link']
+                    invite_msg_id = catalog_chat.get('invite_msg_id')
                     try:
                         qr_info = bot.rpc.check_qr(accid, invite_link)
                         if qr_info.get("kind") == "withdrawVerifyGroup":
@@ -3258,7 +3260,15 @@ def handle_dc_info_message(bot, accid, event):
                             logger.info(f"Withdrew/invalidated invite link for private chat {dc_chat_id}")
                     except Exception as qr_err:
                         logger.error(f"Failed to withdraw invite link: {qr_err}")
-                    database.update_catalog_chat_invite_link(dc_chat_id, None)
+
+                    if invite_msg_id:
+                        try:
+                            bot.rpc.delete_messages_for_all(accid, [invite_msg_id])
+                            logger.info(f"Deleted invite message {invite_msg_id} for all in private chat {dc_chat_id}")
+                        except Exception as del_err:
+                            logger.error(f"Failed to delete invite message {invite_msg_id}: {del_err}")
+
+                    database.update_catalog_chat_invite_link(dc_chat_id, None, None)
             except Exception as e:
                 logger.error(f"Failed to update catalog chat member count: {e}")
 
