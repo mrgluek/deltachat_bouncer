@@ -90,6 +90,11 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 
 - `/cmreport <on/off>` — Toggle monitoring alerts for current chat (Admin only).
 
+### Target-Specific Commands in Group Chats
+
+In group chats where multiple bots are present, you can address this bot specifically to prevent other bots from responding. Append the `@boun` or `@stew` suffix to any command, for example:
+- `/help@boun` or `/help@stew`
+- `/stats@boun` or `/stats@stew`
 
 ## Admin Management
 

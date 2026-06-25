@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.11] - 2026-06-25
+
+### Added
+- **Target-Specific Command Suffixes:** Added support for addressing this bot specifically in group chats using `/command@boun` or `/command@stew` suffixes.
+
 ## [2.5.10] - 2026-06-23
 
 ### Changed
