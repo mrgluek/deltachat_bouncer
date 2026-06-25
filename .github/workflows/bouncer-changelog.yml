@@ -1,0 +1,16 @@
+name: Notify Bouncer Bot Changelog
+on: [push]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    container:
+      image: curlimages/curl:latest
+    steps:
+      - name: Send notification
+        run: |
+          curl -H "Title: ${{ github.event.head_commit.message }}" \
+               -H "Tags: robot,shield" \
+               -d "Author: ${{ github.actor }}
+               Link: ${{ github.event.head_commit.url }}" \
+               https://ntfy.gluek.info/bouncer_changelog
