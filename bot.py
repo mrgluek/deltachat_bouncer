@@ -590,21 +590,44 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
     # Compute new health states and detect changes
     health_changes = []  # list of (server, old_state, new_state, sample_error)
 
+    def _is_system_thread_error(err_str):
+        if not err_str:
+            return False
+        err_lower = err_str.lower()
+        return (
+            "can't start new thread" in err_lower or
+            "cannot allocate memory" in err_lower or
+            "resource temporarily unavailable" in err_lower
+        )
+
+    # Track if we had at least one valid check (without thread errors)
+    has_valid_check = False
+
     # Update targets health
     for dst in targets:
         fwd_res, bwd_res = cycle_results[dst]
-        is_healthy = fwd_res.get("success") and bwd_res.get("success")
-        
+        fwd_ok = fwd_res.get("success")
+        bwd_ok = bwd_res.get("success")
+
+        fwd_thread_err = not fwd_ok and _is_system_thread_error(fwd_res.get("error"))
+        bwd_thread_err = not bwd_ok and _is_system_thread_error(bwd_res.get("error"))
+
         old_healthy = _cmping_server_status.get(dst, True)
+
+        if fwd_thread_err or bwd_thread_err:
+            # A system/launch error occurred. Do not change health state.
+            is_healthy = old_healthy
+        else:
+            is_healthy = fwd_ok and bwd_ok
+            has_valid_check = True
+
         if old_healthy != is_healthy:
             # Determine sample error if became unhealthy
             sample_err = None
             if not is_healthy:
-                fwd_ok = fwd_res.get("success")
-                bwd_ok = bwd_res.get("success")
                 fwd_err = fwd_res.get("error", "Unknown error")
                 bwd_err = bwd_res.get("error", "Unknown error")
-                
+
                 if not fwd_ok and not bwd_ok:
                     if fwd_err == bwd_err:
                         sample_err = f"both directions failed with {source}: {fwd_err}"
@@ -623,8 +646,17 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
                 _clear_all_errors_for_server(dst)
 
     # Update source health (source is healthy if it has at least one success with any target)
-    source_healthy = any_source_success if targets else True
     old_source_healthy = _cmping_server_status.get(source, True)
+    if not targets:
+        source_healthy = True
+    elif any_source_success:
+        source_healthy = True
+    elif not has_valid_check:
+        # No checks could be run properly due to thread errors, so keep last health state
+        source_healthy = old_source_healthy
+    else:
+        source_healthy = False
+
     if old_source_healthy != source_healthy:
         sample_err = "No successful checks with any peer" if not source_healthy else None
         health_changes.append((source, old_source_healthy, source_healthy, sample_err))

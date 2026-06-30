@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.13] - 2026-06-30
+
+### Fixed
+- **Ignore Local Thread/System Errors in Monitoring:** Prevent local thread spawning and system resource limits (like `RuntimeError: can't start new thread`) from marking monitored mail domains as unhealthy.
+
 ## [2.5.12] - 2026-06-25
 
 ### Changed
