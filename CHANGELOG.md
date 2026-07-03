@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.14] - 2026-07-03
+
+### Fixed
+- **Zombie Process Reaping:** Enabled `init: true` in Docker Compose to automatically reap zombie `deltachat-rpc-server` processes spawned by `cmping` checks, preventing PID limit exhaustion (`RuntimeError: can't start new thread`).
+
 ## [2.5.13] - 2026-06-30
 
 ### Fixed

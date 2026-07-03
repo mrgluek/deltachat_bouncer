@@ -2,6 +2,7 @@ services:
   bot:
     build: .
     container_name: deltachat_bouncer
+    init: true
     restart: always
     logging:
       driver: json-file
