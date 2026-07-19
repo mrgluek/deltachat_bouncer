@@ -2754,6 +2754,113 @@ def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers
 def _bg_cmping_worker_inner(bot, accid, chat_id, msg_id, bot_domains, specified_servers):
     cmping_path = shutil.which("cmping") or "cmping"
     
+    # Handle 2 servers case: ping between them (there and back)
+    if len(specified_servers) == 2:
+        s1, s2 = specified_servers[0], specified_servers[1]
+        
+        def get_index_emoji_two(idx: int) -> str:
+            emojis = ["1️⃣", "2️⃣"]
+            if 1 <= idx <= 2:
+                return emojis[idx - 1]
+            return f"[{idx}]"
+
+        emoji1 = get_index_emoji_two(1)
+        emoji2 = get_index_emoji_two(2)
+
+        legend_lines = [f"{emoji1} {s1}", f"{emoji2} {s2}"]
+
+        def is_general_error_two(err_str):
+            err_lower = err_str.lower()
+            keywords = [
+                "dns", "configure profile", "setup receiver", "setup sender", 
+                "failed to configure", "imap failed", "smtp failed", "connect",
+                "no such file", "invalid", "usage", "failed to setup"
+            ]
+            return any(kw in err_lower for kw in keywords)
+
+        # Ping s1 -> s2
+        forward_res = None
+        forward_general = False
+        try:
+            cmd = [cmping_path, "-c", "3", s1, s2]
+            logger.info(f"Running: {' '.join(cmd)}")
+            stdout, stderr, rc = _run_cmping_subprocess(cmd, timeout=60)
+            res = _parse_single_cmping(stdout, stderr, rc)
+            if res.get("success"):
+                forward_res = res
+            else:
+                forward_res = res
+                forward_general = is_general_error_two(res.get("error", ""))
+        except subprocess.TimeoutExpired:
+            forward_res = {"success": False, "error": "Timeout expired (60s)"}
+            forward_general = False
+        except Exception as e:
+            forward_res = {"success": False, "error": str(e)}
+            forward_general = is_general_error_two(str(e))
+
+        # Ping s2 -> s1
+        backward_res = None
+        try:
+            cmd = [cmping_path, "-c", "3", s2, s1]
+            logger.info(f"Running: {' '.join(cmd)}")
+            stdout, stderr, rc = _run_cmping_subprocess(cmd, timeout=60)
+            res = _parse_single_cmping(stdout, stderr, rc)
+            if res.get("success"):
+                backward_res = res
+            else:
+                backward_res = res
+        except subprocess.TimeoutExpired:
+            backward_res = {"success": False, "error": "Timeout expired (60s)"}
+        except Exception as e:
+            backward_res = {"success": False, "error": str(e)}
+
+        report_body_lines = []
+        all_failed = True
+        
+        # Forward line s1 -> s2
+        if forward_res and forward_res.get("success"):
+            forward_str = f"{forward_res['avg']:.1f} ms"
+            report_body_lines.append(f"{emoji1}→{emoji2} {forward_str}")
+            all_failed = False
+        else:
+            err_msg = forward_res.get("error", "Unknown error") if forward_res else "Unknown error"
+            err_suffix = f" {err_msg}" if (err_msg and not forward_general) else ""
+            report_body_lines.append(f"{emoji1}→{emoji2} ❌{err_suffix}")
+            
+        # Backward line s2 -> s1
+        if backward_res:
+            err_msg = backward_res.get("error", "")
+            if backward_res.get("success"):
+                backward_str = f"{backward_res['avg']:.1f} ms"
+                report_body_lines.append(f"{emoji1}←{emoji2} {backward_str}")
+                all_failed = False
+            else:
+                err_suffix = f" {err_msg}" if err_msg else ""
+                report_body_lines.append(f"{emoji1}←{emoji2} ❌{err_suffix}")
+
+        from datetime import datetime, timezone
+        gmt_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M GMT")
+        
+        report_parts = [
+            "🏓 **CMPing Report:**",
+            "\n".join(legend_lines)
+        ]
+        
+        body_content = "\n".join(report_body_lines).strip()
+        if body_content:
+            report_parts.append(body_content)
+            
+        bot_name = os.environ.get("DISPLAY_NAME", "Bouncer Bot")
+        report_parts.append(f"Generated {gmt_time} by {bot_name}")
+
+        if all_failed:
+            _react(bot, accid, msg_id, "❌")
+        else:
+            _react(bot, accid, msg_id, "☑️")
+            
+        _send(bot, accid, chat_id, "\n\n".join(report_parts).strip())
+        return
+
     all_domains = list(bot_domains)
     for s in specified_servers:
         if s not in all_domains:
@@ -2938,11 +3045,11 @@ def cmping_command(bot, accid, event):
     specified_servers = [s.strip().lower() for s in payload_str.split() if s.strip()]
     
     if not specified_servers:
-        _send(bot, accid, msg.chat_id, "Usage: /cmping <server1> <server2> ... (max 5)")
+        _send(bot, accid, msg.chat_id, "Usage: /cmping <server> OR /cmping <server1> <server2>")
         return
 
-    if len(specified_servers) > 5:
-        _send(bot, accid, msg.chat_id, "❌ Maximum 5 servers per request.")
+    if len(specified_servers) > 2:
+        _send(bot, accid, msg.chat_id, "❌ Only 1 or 2 server parameters are supported. Usage: /cmping <server> OR /cmping <server1> <server2>")
         return
 
     # Update cooldown
