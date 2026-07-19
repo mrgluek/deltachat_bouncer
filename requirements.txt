@@ -2,4 +2,4 @@ deltabot-cli==8.1.2
 deltachat2[full]<1.0.0
 qrcode
 pillow
-cmping @ git+https://github.com/chatmail/cmping.git
+cmping @ git+https://github.com/mrgluek/cmping.git

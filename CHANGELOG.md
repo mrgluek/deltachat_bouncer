@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.16] - 2026-07-19
+
+### Changed
+- **Use mrgluek-cmping fork:** Updated `requirements.txt` to install the `cmping` dependency from `mrgluek/cmping` instead of `chatmail/cmping`, allowing the bot to benefit from registration fallback improvements and correct `dclogin` overrides.
+
 ## [2.5.15] - 2026-07-06
 
 ### Fixed
