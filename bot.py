@@ -1912,6 +1912,9 @@ def help_command(bot, accid, event):
         f"/help   — This message.\n"
         f"/chats  — Show catalog of available chats.\n"
         f"/dchannels — Show catalog of available channels.\n"
+        f"/cmpinglist — Show monitored servers.\n"
+        f"/cmpingstatus [server] — Show monitoring results (optional filter).\n"
+        f"/cmpingfail [server] — Show currently failed links (optional filter).\n"
         f"/cmping <server1> ... — Ping relays to/from specified servers.\n\n"
         f"/donate — Support development ❤️\n\n"
         f"💡 _Commands have a 10-minute cooldown per group (except for admins)._\n\n"
@@ -1943,11 +1946,6 @@ def help_command(bot, accid, event):
         help_text += "/dchanneldesc<ID> <text> — Update channel description\n"
         help_text += "/cmpingadd <server> — Add server to connectivity monitoring\n"
         help_text += "/cmpingdel <server> — Remove server from monitoring\n"
-        help_text += "/cmpinglist — Show monitored servers\n"
-        help_text += "/cmpingstatus [server] — Show monitoring results (optional filter)\n"
-        help_text += "/cmpingfail [server] — Show currently failed links (optional filter)\n"
-
-
         help_text += "/cmreport <on/off> — Toggle monitoring alerts in this chat"
 
         
@@ -3140,9 +3138,6 @@ def cmpingdel_command(bot, accid, event):
 @dc_cli.on(events.NewMessage(command="/cmpinglist"))
 def cmpinglist_command(bot, accid, event):
     msg = event.msg
-    if not _is_dc_admin(bot, accid, msg.from_id):
-        _send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use /cmpinglist.")
-        return
 
     bot_domains = _get_bot_domains(bot, accid)
     monitor_domains = database.get_all_cmping_monitors()
@@ -3238,9 +3233,6 @@ def cmreport_command(bot, accid, event):
 @dc_cli.on(events.NewMessage(command="/cmpingstatus"))
 def cmpingstatus_command(bot, accid, event):
     msg = event.msg
-    if not _is_dc_admin(bot, accid, msg.from_id):
-        _send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use /cmpingstatus.")
-        return
 
     from datetime import datetime, timezone
 
@@ -3326,9 +3318,6 @@ def cmpingstatus_command(bot, accid, event):
 
 def _cmpingfail_impl(bot, accid, event, cmd_name="/cmpingfail"):
     msg = event.msg
-    if not _is_dc_admin(bot, accid, msg.from_id):
-        _send(bot, accid, msg.chat_id, f"❌ Only the bot administrator can use {cmd_name}.")
-        return
 
     bot_domains = _get_bot_domains(bot, accid)
     monitor_domains = database.get_all_cmping_monitors()

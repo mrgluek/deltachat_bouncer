@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 - **Server Filter and Chronological Sorting for `/cmpingstatus`:** Added an optional `[server]` argument to filter CMPing status results (partial match) and sorted the output lines chronologically from newest to oldest pings.
+- **Public CMPing Read Commands:** Removed the admin-only restriction from `/cmpinglist`, `/cmpingstatus`, and `/cmpingfail` (and `/cmfaillist` alias), making monitoring status visible to all group members, while keeping write/configuration commands strictly administrative.
 
 ## [2.5.16] - 2026-07-19
 

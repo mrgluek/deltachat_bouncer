@@ -83,16 +83,15 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/resilient` — Toggle resilient sending mode across all relays (Admin only).
 - `/cmpingadd <server>` — Add a server to connectivity monitoring rotation (Admin only).
 - `/cmpingdel <server>` — Remove a server from monitoring (Admin only).
-- `/cmpinglist` — Show all monitored servers, pair count, and rotation info (Admin only).
-- `/cmpingstatus [server]` — Show full monitoring results sorted from newest to oldest, with an optional server filter (Admin only).
-- `/cmpingfail [server]` — Show currently failed links with an optional server filter (Admin only).
-
-
+- `/cmpinglist` — Show all monitored servers, pair count, and rotation info.
+- `/cmpingstatus [server]` — Show full monitoring results sorted from newest to oldest, with an optional server filter.
+- `/cmpingfail [server]` — Show currently failed links with an optional server filter.
 - `/cmreport <on/off>` — Toggle monitoring alerts for current chat (Admin only).
 
 ### Target-Specific Commands in Group Chats
 
 In group chats where multiple bots are present, you can address this bot specifically to prevent other bots from responding. Append the `@boun` or `@stew` suffix to any command, for example:
+
 - `/help@boun` or `/help@stew`
 - `/stats@boun` or `/stats@stew`
 
@@ -117,6 +116,7 @@ Although we recommend using `/addtransport` in chat, you can also add a backup r
 ## Storage Optimization & Cleanup
 
 To keep server disk usage to an absolute minimum, the bot is configured to:
+
 1. **Disable Auto-Downloads:** Disables downloading any attachments/media files automatically (`download_limit` is set to `1` byte). The bot only processes message text.
 2. **Auto-Delete Old Messages:** Automatically deletes messages older than 36 hours (`delete_device_after` set to `36 hours` / 1.5 days) to prevent the main SQLite database (`dc.db`) from growing while preserving a buffer for `/top` 24-hour activity stats.
 
