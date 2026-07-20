@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.17] - 2026-07-20
+
+### Added
+- **Server Filter and Chronological Sorting for `/cmpingstatus`:** Added an optional `[server]` argument to filter CMPing status results (partial match) and sorted the output lines chronologically from newest to oldest pings.
+
 ## [2.5.16] - 2026-07-19
 
 ### Changed

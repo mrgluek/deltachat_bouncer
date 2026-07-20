@@ -1944,7 +1944,7 @@ def help_command(bot, accid, event):
         help_text += "/cmpingadd <server> — Add server to connectivity monitoring\n"
         help_text += "/cmpingdel <server> — Remove server from monitoring\n"
         help_text += "/cmpinglist — Show monitored servers\n"
-        help_text += "/cmpingstatus — Show monitoring results matrix\n"
+        help_text += "/cmpingstatus [server] — Show monitoring results (optional filter)\n"
         help_text += "/cmpingfail [server] — Show currently failed links (optional filter)\n"
 
 
@@ -3256,47 +3256,70 @@ def cmpingstatus_command(bot, accid, event):
         return
 
     now = time.time()
-    lines = ["📊 **CMPing Monitor Status:**\n"]
 
-    has_any = False
-    for src in all_servers:
-        for dst in all_servers:
-            if src == dst:
+    # Parse optional filter argument
+    text = (msg.text or "").strip()
+    parts = text.split(None, 1)
+    filter_domain = parts[1].strip().lower() if len(parts) > 1 else None
+
+    if filter_domain:
+        matched_servers = [srv for srv in all_servers if filter_domain in srv]
+        if not matched_servers:
+            _send(bot, accid, msg.chat_id, f"❌ No monitored servers match **{filter_domain}**.")
+            return
+        lines = [f"📊 **CMPing Monitor Status for '{filter_domain}':**\n"]
+    else:
+        matched_servers = None
+        lines = ["📊 **CMPing Monitor Status:**\n"]
+
+    # Collect relevant results
+    results_to_show = []
+    for (src, dst), result in _cmping_last_results.items():
+        if src not in all_servers or dst not in all_servers or src == dst:
+            continue
+        if matched_servers is not None:
+            if src not in matched_servers and dst not in matched_servers:
                 continue
-            key = (src, dst)
-            result = _cmping_last_results.get(key)
-            if result is None:
-                continue
-            has_any = True
-            checked_at = result.get("checked_at", 0)
-            age_min = int((now - checked_at) / 60) if checked_at else 0
+        results_to_show.append((src, dst, result))
 
-            if result.get("success"):
-                avg = result.get("avg", 0.0)
-                if avg < 2000:
-                    circle = "🟢"
-                elif avg < 4000:
-                    circle = "🟡"
-                elif avg < 6000:
-                    circle = "🟠"
-                else:
-                    circle = "🔴"
+    # Sort from newest to oldest: checked_at descending.
+    # If checked_at is missing, default to 0.
+    results_to_show.sort(key=lambda x: x[2].get("checked_at", 0), reverse=True)
 
-                lines.append(f"✅ {src} → {dst}: {circle} {avg:.1f} ms ({age_min} min ago)")
+    has_any = len(results_to_show) > 0
+    for src, dst, result in results_to_show:
+        checked_at = result.get("checked_at", 0)
+        age_min = int((now - checked_at) / 60) if checked_at else 0
 
+        if result.get("success"):
+            avg = result.get("avg", 0.0)
+            if avg < 2000:
+                circle = "🟢"
+            elif avg < 4000:
+                circle = "🟡"
+            elif avg < 6000:
+                circle = "🟠"
             else:
-                err = result.get("error", "Unknown")
-                lines.append(f"❌ {src} → {dst}: {err} ({age_min} min ago)")
+                circle = "🔴"
+
+            lines.append(f"✅ {src} → {dst}: {circle} {avg:.1f} ms ({age_min} min ago)")
+
+        else:
+            err = result.get("error", "Unknown")
+            lines.append(f"❌ {src} → {dst}: {err} ({age_min} min ago)")
 
     if not has_any:
-        lines.append("_No checks performed yet. Monitoring starts after bot startup._")
+        if filter_domain:
+            lines.append("_No checks performed yet for the matching servers._")
+        else:
+            lines.append("_No checks performed yet. Monitoring starts after bot startup._")
 
     # Add rotation info
     n = len(all_servers)
     source_idx = _cmping_monitor_index % n
     next_source = all_servers[source_idx]
     interval_min = CMPING_MONITOR_INTERVAL // 60
-    lines.append(f"\nSource rotation: {_cmping_monitor_index % n + 1}/{n} (next: {next_source})")
+    lines.append(f"\nSource rotation: {source_idx + 1}/{n} (next: {next_source})")
     lines.append(f"Interval: {interval_min} min")
 
     _send(bot, accid, msg.chat_id, "\n".join(lines))
