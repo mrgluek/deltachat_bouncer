@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.5.18] - 2026-07-23
+
+### Added
+- **Startup Version Check & Logging:** Added version detection and startup logging for Bouncer Bot, DeltaChat Core (`deltachat_core_version`), RPC Client, `deltabot-cli`, and `cmping` packages.
+
 ## [2.5.17] - 2026-07-20
 
 ### Added

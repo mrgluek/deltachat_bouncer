@@ -20,6 +20,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - ⏳ **14-Day Grace Period:** The bot tracks group activity in the background and requires 14 days of observation before reporting "never seen" users.
 - 🛡️ **Secure Administration:** Claim ownership with `/initadmin`. Admins bypass rate limits and have exclusive control over bot settings.
 - 📱 **QR Code Link:** Generates a SecureJoin QR code in the logs for easy device linking.
+- 📋 **Startup Version Check:** Automatically checks and logs versions of Bouncer Bot, DeltaChat Core, RPC Client, `deltabot-cli`, and `cmping` at startup.
 - 🐳 **Docker Ready:** Easy deployment using Docker Compose.
 
 ## Setup

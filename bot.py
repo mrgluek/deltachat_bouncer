@@ -21,6 +21,44 @@ import database
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
 
+VERSION = "2.5.18"
+
+
+def log_version_info(bot, accid=None):
+    """Log version information of Bouncer Bot, DeltaChat Core, RPC Client, and key dependencies on startup."""
+    try:
+        import importlib.metadata
+
+        def get_pkg_ver(pkg_name):
+            try:
+                return importlib.metadata.version(pkg_name)
+            except Exception:
+                return None
+
+        rpc_client_ver = get_pkg_ver("deltachat-rpc-client") or get_pkg_ver("deltachat2") or "unknown"
+        cli_ver = get_pkg_ver("deltabot-cli") or "unknown"
+        cmping_ver = get_pkg_ver("cmping") or "unknown"
+
+        core_ver = "unknown"
+        if accid is not None:
+            try:
+                sys_info = bot.rpc.get_system_info(accid)
+                if isinstance(sys_info, dict):
+                    core_ver = sys_info.get("deltachat_core_version", "unknown")
+                else:
+                    core_ver = getattr(sys_info, "deltachat_core_version", "unknown")
+            except Exception as e:
+                core_ver = f"error ({e})"
+
+        bot.logger.info(f"=== Bouncer Bot v{VERSION} Startup Version Check ===")
+        bot.logger.info(
+            f"Bouncer Bot: {VERSION} | DeltaChat Core: {core_ver} | "
+            f"RPC Client: {rpc_client_ver} | deltabot-cli: {cli_ver} | cmping: {cmping_ver}"
+        )
+    except Exception as e:
+        bot.logger.warning(f"Failed to check versions on startup: {e}")
+
+
 dc_cli = BotCli("bouncer")
 
 dc_bot_instance = None
@@ -1081,13 +1119,16 @@ def on_msg_failed(bot, accid, event):
 @dc_cli.on_init
 def on_init(bot, args):
     global dc_bot_instance, dc_accid
-    bot.logger.info("Initializing Bouncer Bot...")
+    bot.logger.info(f"Initializing Bouncer Bot v{VERSION}...")
     dc_bot_instance = bot
     _setup_resilient_mode(bot)
     
     accounts = bot.rpc.get_all_account_ids()
     if accounts:
         dc_accid = accounts[0]
+        log_version_info(bot, dc_accid)
+    else:
+        log_version_info(bot, None)
         bot_name = os.environ.get("DISPLAY_NAME", "Bouncer Bot")
         bot.rpc.set_config(dc_accid, "displayname", bot_name)
         status_text = os.environ.get(
