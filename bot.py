@@ -24,7 +24,7 @@ logger = logging.getLogger("bouncer_bot")
 VERSION = "2.5.18"
 
 
-def log_version_info(bot, accid=None):
+def log_version_info(bot):
     """Log version information of Bouncer Bot, DeltaChat Core, RPC Client, and key dependencies on startup."""
     try:
         import importlib.metadata
@@ -40,15 +40,14 @@ def log_version_info(bot, accid=None):
         cmping_ver = get_pkg_ver("cmping") or "unknown"
 
         core_ver = "unknown"
-        if accid is not None:
-            try:
-                sys_info = bot.rpc.get_system_info(accid)
-                if isinstance(sys_info, dict):
-                    core_ver = sys_info.get("deltachat_core_version", "unknown")
-                else:
-                    core_ver = getattr(sys_info, "deltachat_core_version", "unknown")
-            except Exception as e:
-                core_ver = f"error ({e})"
+        try:
+            sys_info = bot.rpc.get_system_info()
+            if isinstance(sys_info, dict):
+                core_ver = sys_info.get("deltachat_core_version", "unknown")
+            else:
+                core_ver = getattr(sys_info, "deltachat_core_version", "unknown")
+        except Exception as e:
+            core_ver = f"error ({e})"
 
         bot.logger.info(f"=== Bouncer Bot v{VERSION} Startup Version Check ===")
         bot.logger.info(
@@ -1123,12 +1122,11 @@ def on_init(bot, args):
     dc_bot_instance = bot
     _setup_resilient_mode(bot)
     
+    log_version_info(bot)
+    
     accounts = bot.rpc.get_all_account_ids()
     if accounts:
         dc_accid = accounts[0]
-        log_version_info(bot, dc_accid)
-    else:
-        log_version_info(bot, None)
         bot_name = os.environ.get("DISPLAY_NAME", "Bouncer Bot")
         bot.rpc.set_config(dc_accid, "displayname", bot_name)
         status_text = os.environ.get(
