@@ -21,7 +21,7 @@ import database
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
 
-VERSION = "2.6.1"
+VERSION = "2.7.0"
 
 
 def log_version_info(bot):
@@ -64,7 +64,7 @@ dc_bot_instance = None
 dc_accid = None
 
 DC_CONTACT_ID_SELF = 1
-INACTIVITY_DAYS_THRESHOLD = 14
+INACTIVITY_DAYS_THRESHOLD = 21
 INACTIVITY_SECONDS_THRESHOLD = INACTIVITY_DAYS_THRESHOLD * 24 * 3600
 
 # Anti-spam: {chat_id: timestamp}
@@ -410,6 +410,91 @@ def _check_chat_inactivity(bot, accid, chat_id) -> str:
 
     return report
 
+def _perform_autokick_for_chat(bot, accid, chat_id: int, days: int) -> list[dict]:
+    """Check inactive members in chat_id and kick anyone inactive for > days.
+    Returns a list of kicked member info dicts: [{'id': ..., 'name': ..., 'address': ..., 'reason': ...}].
+    """
+    if days <= 0:
+        return []
+
+    monitored_since = database.get_chat_monitored_since(chat_id)
+    now = time.time()
+    if monitored_since is None:
+        monitored_since = now
+        database.set_chat_monitored_since(chat_id, monitored_since)
+
+    try:
+        contacts = bot.rpc.get_chat_contacts(accid, chat_id)
+    except Exception as e:
+        logger.error(f"Failed to get chat contacts for autokick in {chat_id}: {e}")
+        return []
+
+    if len(contacts) <= 2:
+        return []
+
+    threshold_seconds = days * 24 * 3600
+    kicked_members = []
+
+    for contact_id in contacts:
+        if contact_id == DC_CONTACT_ID_SELF or contact_id <= 9:
+            continue
+        if _is_dc_admin(bot, accid, contact_id):
+            continue
+
+        try:
+            contact = bot.rpc.get_contact(accid, contact_id)
+            if contact.address and contact.address.lower() == "deltachat@system.local":
+                continue
+
+            if isinstance(contact, dict):
+                last_seen = contact.get("last_seen", 0)
+            else:
+                last_seen = getattr(contact, "last_seen", 0)
+
+            name = contact.name or contact.display_name or "Unknown"
+            address = contact.address or "no_email@example.com"
+
+            should_kick = False
+            reason = ""
+
+            if last_seen == 0:
+                # If never seen, only kick if bot has monitored this group for at least `days` days
+                if now - monitored_since >= threshold_seconds:
+                    should_kick = True
+                    reason = f"never seen in >{days}d of observation"
+            else:
+                inactive_duration = now - last_seen
+                if inactive_duration > threshold_seconds:
+                    days_ago = int(inactive_duration / (24 * 3600))
+                    should_kick = True
+                    reason = f"inactive for {days_ago}d (threshold: {days}d)"
+
+            if should_kick:
+                try:
+                    logger.info(f"Auto-kicking member {name} ({address}, contact_id={contact_id}) from chat {chat_id}: {reason}")
+                    bot.rpc.remove_contact_from_chat(accid, chat_id, contact_id)
+                    kicked_members.append({
+                        "id": contact_id,
+                        "name": name,
+                        "address": address,
+                        "reason": reason
+                    })
+                except Exception as kick_err:
+                    logger.error(f"Failed to auto-kick contact {contact_id} from chat {chat_id}: {kick_err}")
+        except Exception as e:
+            logger.error(f"Error checking contact {contact_id} in autokick: {e}")
+
+    if kicked_members:
+        try:
+            lines = [f"• **{m['name']}** ({m['address']}) — {m['reason']}" for m in kicked_members]
+            notice = f"🧹 **Auto-kick:** Removed {len(kicked_members)} inactive member(s) (> {days}d inactive):\n\n" + "\n".join(lines)
+            _send(bot, accid, chat_id, notice)
+        except Exception as e:
+            logger.error(f"Failed to send autokick notification in chat {chat_id}: {e}")
+
+    return kicked_members
+
+
 def _background_monitor_loop(bot, accid):
     logger.info("Background monitor task started.")
     time.sleep(10) # Wait for bot to connect and sync
@@ -437,6 +522,11 @@ def _background_monitor_loop(bot, accid):
                         if database.get_chat_monitored_since(chat_id) is None:
                             logger.info(f"Started monitoring new group: {chat_id}")
                             database.set_chat_monitored_since(chat_id, time.time())
+
+                        # Run autokick check if enabled for this group
+                        autokick_days = database.get_chat_autokick(chat_id)
+                        if autokick_days > 0:
+                            _perform_autokick_for_chat(bot, accid, chat_id, autokick_days)
                 except Exception as e:
                     logger.error(f"Error checking chat {chat_id} in background monitor: {e}")
             
@@ -1638,6 +1728,191 @@ def bounce_command(bot, accid, event):
     else:
         _send(bot, accid, msg.chat_id, "✅ All users are active or this is not a group chat.")
 
+
+@dc_cli.on(events.NewMessage(command="/autokick"))
+def autokick_command(bot, accid, event):
+    msg = event.msg
+    if not _is_dc_admin(bot, accid, msg.from_id):
+        _send(bot, accid, msg.chat_id, "⚠️ Only the bot administrator can configure auto-kick.")
+        return
+
+    try:
+        chat = bot.rpc.get_basic_chat_info(accid, msg.chat_id)
+        chat_type = chat.get('chat_type', 'Single') if isinstance(chat, dict) else getattr(chat, 'chat_type', 'Single')
+    except Exception as e:
+        logger.error(f"Failed to get chat info for {msg.chat_id}: {e}")
+        chat_type = 'Single'
+
+    GROUP_TYPES = {"Group", "Mailinglist", "OutBroadcast", "InBroadcast"}
+    if str(chat_type) not in GROUP_TYPES:
+        _send(bot, accid, msg.chat_id, "⚠️ /autokick can only be used in group chats.")
+        return
+
+    payload = event.payload.strip() if event.payload else ""
+    payload_lower = payload.lower()
+
+    if not payload or payload_lower == "status":
+        current_days = database.get_chat_autokick(msg.chat_id)
+        if current_days > 0:
+            status_reply = (
+                f"🛡️ **Auto-kick is ON** for this group (threshold: **{current_days} days**).\n\n"
+                f"Members inactive for more than {current_days} days will be automatically removed.\n\n"
+                f"To change or disable:\n"
+                f"• `/autokick <days>` (e.g. `/autokick 30`)\n"
+                f"• `/autokick off`"
+            )
+        else:
+            status_reply = (
+                f"🛡️ **Auto-kick is OFF** for this group.\n\n"
+                f"To enable:\n"
+                f"• `/autokick on` (default: 90 days)\n"
+                f"• `/autokick <days>` (e.g. `/autokick 30`)"
+            )
+        _send(bot, accid, msg.chat_id, status_reply)
+        return
+
+    if payload_lower in ("off", "disable", "stop", "0"):
+        database.set_chat_autokick(msg.chat_id, 0)
+        _send(bot, accid, msg.chat_id, "🛑 **Auto-kick disabled** for this group.")
+        return
+
+    if payload_lower in ("on", "enable"):
+        default_days = 90
+        database.set_chat_autokick(msg.chat_id, default_days)
+        _send(bot, accid, msg.chat_id, 
+              f"✅ **Auto-kick enabled** for this group with a threshold of **{default_days} days**.\n\n"
+              f"Members inactive for more than {default_days} days will be automatically removed during periodic checks.")
+        return
+
+    if payload.isdigit():
+        days = int(payload)
+        if days < 1 or days > 3650:
+            _send(bot, accid, msg.chat_id, "⚠️ Please specify a valid number of days between 1 and 3650 (e.g. `/autokick 30`).")
+            return
+        database.set_chat_autokick(msg.chat_id, days)
+        _send(bot, accid, msg.chat_id, 
+              f"✅ **Auto-kick enabled** for this group with a threshold of **{days} days**.\n\n"
+              f"Members inactive for more than {days} days will be automatically removed during periodic checks.")
+        return
+
+    _send(bot, accid, msg.chat_id,
+          "ℹ️ **Usage:**\n"
+          "• `/autokick` — Show current auto-kick status\n"
+          "• `/autokick on` — Enable with default 90-day threshold\n"
+          "• `/autokick <days>` — Enable with custom threshold (e.g. `/autokick 30`)\n"
+          "• `/autokick off` — Disable auto-kick")
+
+
+@dc_cli.on(events.NewMessage(command="/kick"))
+def kick_command(bot, accid, event):
+    msg = event.msg
+    if not _is_dc_admin(bot, accid, msg.from_id):
+        _send(bot, accid, msg.chat_id, "⚠️ Only the bot administrator can use /kick.")
+        return
+
+    try:
+        chat = bot.rpc.get_basic_chat_info(accid, msg.chat_id)
+        chat_type = chat.get('chat_type', 'Single') if isinstance(chat, dict) else getattr(chat, 'chat_type', 'Single')
+    except Exception as e:
+        logger.error(f"Failed to get chat info for {msg.chat_id}: {e}")
+        chat_type = 'Single'
+
+    GROUP_TYPES = {"Group", "Mailinglist", "OutBroadcast", "InBroadcast"}
+    if str(chat_type) not in GROUP_TYPES:
+        _send(bot, accid, msg.chat_id, "⚠️ /kick can only be used in group chats.")
+        return
+
+    try:
+        chat_contacts = bot.rpc.get_chat_contacts(accid, msg.chat_id)
+    except Exception as e:
+        logger.error(f"Failed to get chat contacts in /kick: {e}")
+        _send(bot, accid, msg.chat_id, f"❌ Failed to retrieve group members: {e}")
+        return
+
+    chat_contact_set = set(chat_contacts)
+
+    payload = event.payload.strip() if event.payload else ""
+    target_contact_ids = []
+
+    # 1. Check if replying to a message
+    if hasattr(msg, "quote") and msg.quote and isinstance(msg.quote, dict):
+        quote_msg_id = msg.quote.get('message_id')
+        if quote_msg_id:
+            try:
+                quoted_msg = bot.rpc.get_message(accid, quote_msg_id)
+                if quoted_msg.from_id > 9 and quoted_msg.from_id not in target_contact_ids:
+                    target_contact_ids.append(quoted_msg.from_id)
+            except Exception as e:
+                logger.error(f"Failed to get quote message for /kick: {e}")
+
+    # 2. Parse tokens from payload
+    if payload:
+        tokens = payload.split()
+        for token in tokens:
+            clean_token = token.strip()
+            cid_match = re.match(r'^(?:/?contact|c)?(\d+)$', clean_token, re.IGNORECASE)
+            if cid_match:
+                cid = int(cid_match.group(1))
+                if cid not in target_contact_ids:
+                    target_contact_ids.append(cid)
+            else:
+                # Search by username / email query in group contacts
+                query = clean_token.lstrip('@').lower()
+                for contact_id in chat_contacts:
+                    if contact_id <= 9 or contact_id == DC_CONTACT_ID_SELF:
+                        continue
+                    try:
+                        contact = bot.rpc.get_contact(accid, contact_id)
+                        c_name = (contact.name or "").lower()
+                        c_disp = (contact.display_name or "").lower()
+                        c_addr = (contact.address or "").lower()
+                        if (query in c_name or query in c_disp or query in c_addr.split('@')[0] or query in c_addr):
+                            if contact_id not in target_contact_ids:
+                                target_contact_ids.append(contact_id)
+                    except Exception:
+                        continue
+
+    if not target_contact_ids:
+        _send(bot, accid, msg.chat_id,
+              "ℹ️ **Usage:**\n"
+              "• `/kick <user_id>` (e.g. `/kick 123` or `/kick /contact123`)\n"
+              "• `/kick <user1> <user2> ...`\n"
+              "• Reply to any user's message with `/kick`")
+        return
+
+    kicked_success = []
+    kicked_failed = []
+
+    for cid in target_contact_ids:
+        if cid == DC_CONTACT_ID_SELF or cid <= 9:
+            kicked_failed.append(f"• ID {cid}: The bot cannot kick itself.")
+            continue
+        if _is_dc_admin(bot, accid, cid):
+            kicked_failed.append(f"• ID {cid}: Cannot kick the bot administrator.")
+            continue
+        if cid not in chat_contact_set:
+            kicked_failed.append(f"• ID {cid}: User is not a member of this group.")
+            continue
+
+        try:
+            contact = bot.rpc.get_contact(accid, cid)
+            name = contact.name or contact.display_name or "Unknown"
+            address = contact.address or "no_email"
+            bot.rpc.remove_contact_from_chat(accid, msg.chat_id, cid)
+            kicked_success.append(f"• **{name}** ({address}) [ID: {cid}]")
+        except Exception as e:
+            logger.error(f"Failed to kick contact {cid} from chat {msg.chat_id}: {e}")
+            kicked_failed.append(f"• ID {cid}: {e}")
+
+    reply_parts = []
+    if kicked_success:
+        reply_parts.append(f"👞 **Kicked {len(kicked_success)} member(s):**\n" + "\n".join(kicked_success))
+    if kicked_failed:
+        reply_parts.append(f"⚠️ **Could not kick:**\n" + "\n".join(kicked_failed))
+
+    _send(bot, accid, msg.chat_id, "\n\n".join(reply_parts))
+
+
 @dc_cli.on(events.NewMessage(command="/slap"))
 def slap_command(bot, accid, event):
     msg = event.msg
@@ -2048,7 +2323,7 @@ def help_command(bot, accid, event):
         f"👋 Hi {sender_email}!\n\n"
         f"{status_text}\n\n"
         f"**Commands:**\n"
-        f"/bounce [username] — Show last activity of a user, or trigger inactivity check in this group.\n"
+        f"/bounce [username] — Show last activity of a user, or trigger inactivity check in this group (Threshold: {INACTIVITY_DAYS_THRESHOLD} days).\n"
         f"/search [query1] ... — Search members by email/domain (e.g. @testrun.org) or reply to a message.\n"
         f"/relays — Find group members using regular mail providers.\n"
         f"/top    — Show top 10 posters in the last 24 hours.\n"
@@ -2087,6 +2362,8 @@ def help_command(bot, accid, event):
         help_text += "/rmtransport <addr> — Remove a mail relay\n"
         help_text += "/setprimary <addr> — Switch the primary mail relay\n"
         help_text += "/resilient — Toggle resilient sending mode (all relays)\n"
+        help_text += "/autokick [on/off/days] — Auto-kick members inactive for > N days (default: 90d)\n"
+        help_text += "/kick <user_id> — Remove a member from the current group\n"
         help_text += "/chatadd [desc] — Add current chat to catalog\n"
         help_text += "/chatremove — Remove current chat from catalog\n"
         help_text += "/chatdesc<ID> <text> — Update chat description\n"

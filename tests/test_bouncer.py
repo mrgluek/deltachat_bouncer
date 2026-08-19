@@ -307,5 +307,268 @@ class TestBouncerBot(unittest.TestCase):
             self.assertIn("CMPing Downtime History for mail.server1.org", text)
             self.assertIn("504 Gateway Timeout", text)
 
+    def test_database_autokick_operations(self):
+        chat_id = 7001
+        self.assertEqual(database.get_chat_autokick(chat_id), 0)
+
+        # Set autokick to 90 days
+        database.set_chat_autokick(chat_id, 90)
+        self.assertEqual(database.get_chat_autokick(chat_id), 90)
+
+        # Set another chat to 30 days
+        chat_id_2 = 7002
+        database.set_chat_autokick(chat_id_2, 30)
+        self.assertEqual(database.get_chat_autokick(chat_id_2), 30)
+
+        all_autokick = dict(database.get_all_autokick_chats())
+        self.assertEqual(all_autokick.get(chat_id), 90)
+        self.assertEqual(all_autokick.get(chat_id_2), 30)
+
+        # Verify set_chat_monitored_since preserves autokick_days
+        database.set_chat_monitored_since(chat_id, time.time() - 1000)
+        self.assertEqual(database.get_chat_autokick(chat_id), 90)
+
+        # Disable autokick for chat 1
+        database.set_chat_autokick(chat_id, 0)
+        self.assertEqual(database.get_chat_autokick(chat_id), 0)
+        all_autokick_after = dict(database.get_all_autokick_chats())
+        self.assertNotIn(chat_id, all_autokick_after)
+        self.assertEqual(all_autokick_after.get(chat_id_2), 30)
+
+    def test_autokick_command(self):
+        mock_bot = MagicMock()
+        mock_event = MagicMock()
+        mock_event.msg.chat_id = 7010
+        mock_event.msg.from_id = 100
+
+        # 1. Non-admin is rejected
+        with patch('bot._is_dc_admin', return_value=False), patch.object(bot, '_send') as mock_send:
+            bot.autokick_command(mock_bot, 1, mock_event)
+            mock_send.assert_called_once()
+            self.assertIn("Only the bot administrator", mock_send.call_args[0][3])
+
+        # 2. Private chat (non-group) rejected
+        mock_bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Single"}
+        with patch('bot._is_dc_admin', return_value=True), patch.object(bot, '_send') as mock_send:
+            bot.autokick_command(mock_bot, 1, mock_event)
+            mock_send.assert_called_once()
+            self.assertIn("can only be used in group chats", mock_send.call_args[0][3])
+
+        # 3. Group chat status when disabled
+        mock_bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Group"}
+        with patch('bot._is_dc_admin', return_value=True), patch.object(bot, '_send') as mock_send:
+            mock_event.payload = ""
+            bot.autokick_command(mock_bot, 1, mock_event)
+            mock_send.assert_called_once()
+            self.assertIn("Auto-kick is OFF", mock_send.call_args[0][3])
+
+        # 4. Enable with default (on -> 90 days)
+        with patch('bot._is_dc_admin', return_value=True), patch.object(bot, '_send') as mock_send:
+            mock_event.payload = "on"
+            bot.autokick_command(mock_bot, 1, mock_event)
+            mock_send.assert_called_once()
+            self.assertIn("threshold of **90 days**", mock_send.call_args[0][3])
+            self.assertEqual(database.get_chat_autokick(7010), 90)
+
+        # 5. Check status when enabled
+        with patch('bot._is_dc_admin', return_value=True), patch.object(bot, '_send') as mock_send:
+            mock_event.payload = "status"
+            bot.autokick_command(mock_bot, 1, mock_event)
+            mock_send.assert_called_once()
+            self.assertIn("Auto-kick is ON", mock_send.call_args[0][3])
+            self.assertIn("90 days", mock_send.call_args[0][3])
+
+        # 6. Enable with custom days (e.g. 30)
+        with patch('bot._is_dc_admin', return_value=True), patch.object(bot, '_send') as mock_send:
+            mock_event.payload = "30"
+            bot.autokick_command(mock_bot, 1, mock_event)
+            mock_send.assert_called_once()
+            self.assertIn("threshold of **30 days**", mock_send.call_args[0][3])
+            self.assertEqual(database.get_chat_autokick(7010), 30)
+
+        # 7. Disable (off)
+        with patch('bot._is_dc_admin', return_value=True), patch.object(bot, '_send') as mock_send:
+            mock_event.payload = "off"
+            bot.autokick_command(mock_bot, 1, mock_event)
+            mock_send.assert_called_once()
+            self.assertIn("Auto-kick disabled", mock_send.call_args[0][3])
+            self.assertEqual(database.get_chat_autokick(7010), 0)
+
+    def test_perform_autokick_for_chat(self):
+        mock_bot = MagicMock()
+        chat_id = 7020
+        now = time.time()
+
+        # Group monitored for 100 days
+        database.set_chat_monitored_since(chat_id, now - (100 * 86400))
+
+        # Contacts in group:
+        # 1: self (should NOT kick)
+        # 10: admin (should NOT kick)
+        # 20: active 5d ago (should NOT kick)
+        # 30: inactive 95d ago (SHOULD kick)
+        # 40: never seen (last_seen=0), group monitored 100d > 90d (SHOULD kick)
+        mock_bot.rpc.get_chat_contacts.return_value = [1, 10, 20, 30, 40]
+
+        def get_contact_mock(accid, cid):
+            c = MagicMock()
+            c.id = cid
+            if cid == 10:
+                c.name = "Admin"
+                c.address = "admin@example.com"
+                c.last_seen = now - (95 * 86400)
+            elif cid == 20:
+                c.name = "ActiveUser"
+                c.address = "active@example.com"
+                c.last_seen = now - (5 * 86400)
+            elif cid == 30:
+                c.name = "InactiveUser"
+                c.address = "inactive@example.com"
+                c.last_seen = now - (95 * 86400)
+            elif cid == 40:
+                c.name = "NeverSeenUser"
+                c.address = "neverseen@example.com"
+                c.last_seen = 0
+            return c
+
+        mock_bot.rpc.get_contact.side_effect = get_contact_mock
+
+        def is_admin_mock(b, accid, cid):
+            return cid == 10
+
+        with patch('bot._is_dc_admin', side_effect=is_admin_mock), patch.object(bot, '_send') as mock_send:
+            kicked = bot._perform_autokick_for_chat(mock_bot, 1, chat_id, days=90)
+            self.assertEqual(len(kicked), 2)
+            kicked_ids = [m["id"] for m in kicked]
+            self.assertIn(30, kicked_ids)
+            self.assertIn(40, kicked_ids)
+            self.assertNotIn(1, kicked_ids)
+            self.assertNotIn(10, kicked_ids)
+            self.assertNotIn(20, kicked_ids)
+
+            # Verify remove_contact_from_chat calls
+            mock_bot.rpc.remove_contact_from_chat.assert_any_call(1, chat_id, 30)
+            mock_bot.rpc.remove_contact_from_chat.assert_any_call(1, chat_id, 40)
+            mock_send.assert_called_once()
+            self.assertIn("Auto-kick", mock_send.call_args[0][3])
+
+    def test_kick_command(self):
+        mock_bot = MagicMock()
+        mock_event = MagicMock()
+        mock_event.msg.chat_id = 7030
+        mock_event.msg.from_id = 100
+        mock_event.msg.quote = None
+
+        mock_bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Group"}
+        mock_bot.rpc.get_chat_contacts.return_value = [1, 100, 201, 202, 203]
+
+        def get_contact_mock(accid, cid):
+            c = MagicMock()
+            c.id = cid
+            if cid == 201:
+                c.name = "Alice"
+                c.display_name = "Alice D"
+                c.address = "alice@example.com"
+            elif cid == 202:
+                c.name = "Bob"
+                c.display_name = "Bob M"
+                c.address = "bob@example.com"
+            elif cid == 203:
+                c.name = "Charlie"
+                c.display_name = "Charlie C"
+                c.address = "charlie@example.com"
+            elif cid == 100:
+                c.name = "Admin"
+                c.display_name = "Admin"
+                c.address = "admin@example.com"
+            return c
+
+        mock_bot.rpc.get_contact.side_effect = get_contact_mock
+
+        def is_admin_mock(b, accid, cid):
+            return cid == 100
+
+        # 1. Non-admin rejected
+        with patch('bot._is_dc_admin', return_value=False), patch.object(bot, '_send') as mock_send:
+            bot.kick_command(mock_bot, 1, mock_event)
+            mock_send.assert_called_once()
+            self.assertIn("Only the bot administrator can use /kick", mock_send.call_args[0][3])
+
+        # 2. Kick by numeric ID (/kick 201)
+        with patch('bot._is_dc_admin', side_effect=is_admin_mock), patch.object(bot, '_send') as mock_send:
+            mock_event.payload = "201"
+            bot.kick_command(mock_bot, 1, mock_event)
+            mock_bot.rpc.remove_contact_from_chat.assert_called_with(1, 7030, 201)
+            mock_send.assert_called_once()
+            self.assertIn("Kicked 1 member", mock_send.call_args[0][3])
+            self.assertIn("Alice", mock_send.call_args[0][3])
+
+        # 3. Kick with /contact format (/kick /contact202)
+        mock_bot.rpc.remove_contact_from_chat.reset_mock()
+        with patch('bot._is_dc_admin', side_effect=is_admin_mock), patch.object(bot, '_send') as mock_send:
+            mock_event.payload = "/contact202"
+            bot.kick_command(mock_bot, 1, mock_event)
+            mock_bot.rpc.remove_contact_from_chat.assert_called_with(1, 7030, 202)
+            mock_send.assert_called_once()
+            self.assertIn("Bob", mock_send.call_args[0][3])
+
+        # 4. Kick by replying to a quoted message
+        mock_bot.rpc.remove_contact_from_chat.reset_mock()
+        mock_event.msg.quote = {"message_id": 9901}
+        quoted_msg = MagicMock()
+        quoted_msg.from_id = 203
+        mock_bot.rpc.get_message.return_value = quoted_msg
+
+        with patch('bot._is_dc_admin', side_effect=is_admin_mock), patch.object(bot, '_send') as mock_send:
+            mock_event.payload = ""
+            bot.kick_command(mock_bot, 1, mock_event)
+            mock_bot.rpc.remove_contact_from_chat.assert_called_with(1, 7030, 203)
+            mock_send.assert_called_once()
+            self.assertIn("Charlie", mock_send.call_args[0][3])
+
+        # 5. Protection: Cannot kick admin or self
+        mock_event.msg.quote = None
+        with patch('bot._is_dc_admin', side_effect=is_admin_mock), patch.object(bot, '_send') as mock_send:
+            mock_event.payload = "1 100"
+            bot.kick_command(mock_bot, 1, mock_event)
+            mock_send.assert_called_once()
+            self.assertIn("The bot cannot kick itself", mock_send.call_args[0][3])
+            self.assertIn("Cannot kick the bot administrator", mock_send.call_args[0][3])
+
+    def test_bounce_inactivity_threshold_21_days(self):
+        self.assertEqual(bot.INACTIVITY_DAYS_THRESHOLD, 21)
+        self.assertEqual(bot.INACTIVITY_SECONDS_THRESHOLD, 21 * 24 * 3600)
+
+        mock_bot = MagicMock()
+        chat_id = 7040
+        now = time.time()
+        database.set_chat_monitored_since(chat_id, now - (30 * 86400))
+
+        # Contacts:
+        # 1: self
+        # 301: active 10 days ago (active under 21d threshold)
+        # 302: inactive 25 days ago (inactive under 21d threshold)
+        mock_bot.rpc.get_chat_contacts.return_value = [1, 301, 302]
+
+        def get_contact_mock(accid, cid):
+            c = MagicMock()
+            c.id = cid
+            if cid == 301:
+                c.name = "UserActive10d"
+                c.address = "user10@example.com"
+                c.last_seen = now - (10 * 86400)
+            elif cid == 302:
+                c.name = "UserInactive25d"
+                c.address = "user25@example.com"
+                c.last_seen = now - (25 * 86400)
+            return c
+
+        mock_bot.rpc.get_contact.side_effect = get_contact_mock
+
+        report = bot._check_chat_inactivity(mock_bot, 1, chat_id)
+        self.assertIn("Inactive (>21d): 1", report)
+        self.assertIn("UserInactive25d", report)
+        self.assertNotIn("UserActive10d", report)
+
 if __name__ == '__main__':
     unittest.main()

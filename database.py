@@ -23,9 +23,15 @@ def init_db():
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS chats (
                 chat_id INTEGER PRIMARY KEY,
-                monitored_since REAL
+                monitored_since REAL,
+                autokick_days INTEGER DEFAULT 0
             )
         ''')
+
+        cursor.execute("PRAGMA table_info(chats)")
+        columns = [info[1] for info in cursor.fetchall()]
+        if "autokick_days" not in columns:
+            cursor.execute("ALTER TABLE chats ADD COLUMN autokick_days INTEGER DEFAULT 0")
 
         # Transport statistics
         cursor.execute('''
@@ -225,9 +231,44 @@ def set_chat_monitored_since(chat_id: int, timestamp: float):
     with _lock:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO chats (chat_id, monitored_since) VALUES (?, ?)", (chat_id, timestamp))
+        cursor.execute("SELECT 1 FROM chats WHERE chat_id = ?", (chat_id,))
+        if cursor.fetchone():
+            cursor.execute("UPDATE chats SET monitored_since = ? WHERE chat_id = ?", (timestamp, chat_id))
+        else:
+            cursor.execute("INSERT INTO chats (chat_id, monitored_since, autokick_days) VALUES (?, ?, 0)", (chat_id, timestamp))
         conn.commit()
         conn.close()
+
+def set_chat_autokick(chat_id: int, days: int):
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM chats WHERE chat_id = ?", (chat_id,))
+        if cursor.fetchone():
+            cursor.execute("UPDATE chats SET autokick_days = ? WHERE chat_id = ?", (days, chat_id))
+        else:
+            cursor.execute("INSERT INTO chats (chat_id, monitored_since, autokick_days) VALUES (?, ?, ?)", (chat_id, time.time(), days))
+        conn.commit()
+        conn.close()
+
+def get_chat_autokick(chat_id: int) -> int:
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT autokick_days FROM chats WHERE chat_id = ?", (chat_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if (row and row[0] is not None) else 0
+
+def get_all_autokick_chats() -> list[tuple[int, int]]:
+    """Return list of (chat_id, autokick_days) where autokick_days > 0."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT chat_id, autokick_days FROM chats WHERE autokick_days > 0")
+        rows = cursor.fetchall()
+        conn.close()
+        return [(r[0], r[1]) for r in rows]
 
 def get_admin_fingerprint():
     """Get the saved admin DC fingerprint."""

@@ -2,7 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
-## [2.6.1] - 2026-08-19
+## [2.7.0] - 2026-08-19
+
+### Added
+- **Automatic Inactive Member Auto-Kick (`/autokick`):** Added background member cleanup for inactive group participants. Disabled by default, configurable by bot administrators per group:
+  - `/autokick` / `/autokick status`: Check current auto-kick status and threshold.
+  - `/autokick on`: Enable auto-kick with default 90-day inactivity threshold.
+  - `/autokick <days>`: Enable auto-kick with a custom threshold in days (e.g. `/autokick 30`).
+  - `/autokick off`: Disable auto-kick.
+  - Automatically purges inactive members (> configured threshold) during background monitor cycles with grace period observation for never-seen members.
+- **Manual Member Kick (`/kick`):** Added `/kick <user_id>` command for bot administrators in group chats:
+  - Supports contact ID numbers (e.g. `/kick 123`), `/contact123` formatted links, email/name queries, multiple IDs, and quoting/replying to messages.
+  - Prevents kicking the bot itself or bot administrators.
+- **Persistent Autokick Configuration:** Added `autokick_days` column to the `chats` table to persist autokick settings across restarts.
+
+### Changed
+- **Updated `/bounce` Inactivity Threshold to 21 Days:** Increased the inactivity detection threshold from 14 days to 21 days (the typical mail server retention window for unretrieved messages) and aligned grace periods and report calculations.
 
 ### Added
 - **Affected Server Breakdown in `/cmpingevents`:** Enhanced `/cmpingevents` (and `/cmevents` / `/cmpingincidents`) to display all currently failing servers and their error reasons directly in the incident log for ongoing incidents.

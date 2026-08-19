@@ -1,10 +1,12 @@
 # Delta Chat Bouncer Bot
 
-Delta Chat bot designed to maintain group quality by monitoring inactivity and save server resouces by not sending mails to stale users. It scans group members and reports users who haven't been seen online for over 14 days.
+Delta Chat bot designed to maintain group quality by monitoring inactivity and save server resouces by not sending mails to stale users. It scans group members and reports users who haven't been seen online for over 21 days.
 
 ## Features
 
-- ⚠️ **Inactivity Reports (`/bounce`):** Trigger a manual scan for inactive group members. Reports total members, active count, and a list of inactive users.
+- ⚠️ **Inactivity Reports (`/bounce`):** Trigger a manual scan for inactive group members. Reports total members, active count, and a list of inactive users (default threshold: 21 days).
+- 🧹 **Automatic Inactivity Kick (`/autokick`):** Automatically purge stale, inactive members from group chats in the background. Disabled by default, configurable with custom threshold (default: 90 days, e.g. `/autokick 30`).
+- 👞 **Manual Member Kick (`/kick <userid>`):** Remove a specific member or multiple members from a group chat by contact ID (e.g. `/kick 123` or `/kick /contact123`), search query, or by replying to their message.
 - 📖 **Group Chat Catalog (`/chats`):** Users can browse all group chats cataloged by the bot, complete with name, description, and real-time membership count.
 - 📢 **Delta Chat Channels Catalog (`/dchannels`):** Users can browse all channels cataloged by the bot, complete with name and description.
 - 🔐 **Join Approval Workflows:** Supports public and private groups. Requests to join public groups immediately receive an invite link, while private groups (`🔐`) require approvals from existing members in the group via dynamic `/approve<ID>` commands.
@@ -17,7 +19,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - 📡 **Server Connectivity Monitoring:** Automatic periodic monitoring of server connectivity using a round-robin algorithm. Employs an **incident-based alerting system** with in-place dynamic message editing (`🚨 Ongoing` → `⚠️ Ongoing (Partial Recovery)` → `✅ Resolved`) to prevent notification noise, along with accurate root-cause fault isolation. Configurable interval via `CMPING_MONITOR_INTERVAL` env var (default: 30 min).
 - 👤 **Contact Sharing:** Reports include `/contact<ID>` links to quickly get a contact object for any user.
 - 🔄 **Automatic Transport Failover:** Supports multiple mail servers. The bot automatically detects message delivery failures via raw core events, switches `configured_addr` to a backup transport in round-robin fashion, and schedules a resend of the message using exponential backoff (5s, 10s, 20s, 40s...) via an asynchronous timer thread (up to a maximum of 10 attempts per message) to prevent loop propagation and CPU spikes.
-- ⏳ **14-Day Grace Period:** The bot tracks group activity in the background and requires 14 days of observation before reporting "never seen" users.
+- ⏳ **21-Day Grace Period:** The bot tracks group activity in the background and requires 21 days of observation before reporting "never seen" users.
 - 🛡️ **Secure Administration:** Claim ownership with `/initadmin`. Admins bypass rate limits and have exclusive control over bot settings.
 - 📱 **QR Code Link:** Generates a SecureJoin QR code in the logs for easy device linking.
 - 📋 **Startup Version Check:** Automatically checks and logs versions of Bouncer Bot, DeltaChat Core, RPC Client, `deltabot-cli`, and `cmping` at startup.
@@ -53,7 +55,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 
 ## Commands
 
-- `/bounce` — Trigger an immediate inactivity check in the current group.
+- `/bounce` — Trigger an immediate inactivity check in the current group (Threshold: 21 days).
 - `/search [email1] ...` — Search for group members by one or more emails (case-insensitive substring match) or by replying to a message containing email addresses. Searches across all active transports/secondary addresses.
 - `/relays` — Find group members using regular mail providers.
 - `/top` — Show the 10 most active members in the last 24 hours.
@@ -66,9 +68,11 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/approve<ID>` — Approve a pending join request for a private group (Group chat only).
 - `/decline<ID> [reason]` — Decline a pending join request for a private group with an optional reason (Group chat only).
 - `/contact<ID>` — Get a contact object for the given ID (e.g., `/contact123`).
-- `/help` — Show available commands and bot information (Threshold: 14 days).
+- `/help` — Show available commands and bot information (Threshold: 21 days).
 - `/donate` — Support project development ❤️
 - `/initadmin` — Claim administrative ownership (private chat only).
+- `/autokick [on/off/days]` — Configure auto-kick of inactive members for current group (default: 90 days, e.g. `/autokick 30`) (Admin only).
+- `/kick <user_id>` — Remove a member from the current group by contact ID, search query, or message reply (Admin only).
 - `/chatadd [description]` — Add the current group chat to the catalog (Admin only). Falls back to group description if not provided.
 - `/chatremove` — Remove the current group chat from the catalog (Admin only).
 - `/chatdesc<ID> <text>` — Update description of cataloged group chat (Admin only).
