@@ -21,7 +21,7 @@ import database
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
 
-VERSION = "2.6.0"
+VERSION = "2.6.1"
 
 
 def log_version_info(bot):
@@ -887,7 +887,16 @@ def _sync_cmping_incident_alerts(bot, accid, all_servers):
 
     else:
         if active_inc:
-            summary = f"All {len(all_servers)} servers operational"
+            # Collect servers that experienced downtime during this incident
+            inc_events = [
+                ev for ev in database.get_all_cmping_downtime_events(limit=50)
+                if ev["went_down_at"] >= active_inc["started_at"] - 60
+            ]
+            affected_srvs = list(dict.fromkeys([ev["server"] for ev in inc_events]))
+            if affected_srvs:
+                summary = f"Affected: {', '.join(affected_srvs)}"
+            else:
+                summary = f"All {len(all_servers)} servers operational"
             database.resolve_cmping_incident(active_inc["id"], now, summary)
 
             msg_text = _format_cmping_incident_message(
@@ -2055,7 +2064,7 @@ def help_command(bot, accid, event):
         f"/cmpinglist — Show monitored servers.\n"
         f"/cmpingstatus [server] — Show monitoring results (optional filter).\n"
         f"/cmpingfail [server] — Show currently failed links (optional filter).\n"
-        f"/cmpingevents — Show CMPing incident log and active outages.\n"
+        f"/cmpingevents [id] — Show CMPing incident log or incident details.\n"
         f"/cmpinghistory [server] — Show downtime history for monitored servers.\n"
         f"/cmping <server1> ... — Ping relays to/from specified servers.\n\n"
         f"/donate — Support development ❤️\n\n"
@@ -3558,7 +3567,74 @@ def cmfaillist_command(bot, accid, event):
 def cmpingevents_command(bot, accid, event):
     from datetime import datetime, timezone
     msg = event.msg
+    text = (msg.text or "").strip()
+    parts = text.split(None, 1)
+    arg = parts[1].strip() if len(parts) > 1 else ""
 
+    bot_domains = _get_bot_domains(bot, accid)
+    monitor_domains = database.get_all_cmping_monitors()
+    all_servers = list(dict.fromkeys(list(bot_domains) + monitor_domains))
+
+    if arg:
+        try:
+            inc_id = int(arg.lstrip("#"))
+        except ValueError:
+            _send(bot, accid, msg.chat_id, "❌ Invalid incident ID. Usage: `/cmpingevents <id>`")
+            return
+
+        inc = database.get_cmping_incident_by_id(inc_id)
+        if not inc:
+            _send(bot, accid, msg.chat_id, f"❌ Incident #{inc_id} not found.")
+            return
+
+        if inc["status"] == "ongoing":
+            unhealthy_servers = {
+                srv: _cmping_server_errors.get(srv, "Connectivity check failed")
+                for srv, is_healthy in _cmping_server_status.items()
+                if not is_healthy and srv in all_servers
+            }
+            msg_text = _format_cmping_incident_message(
+                inc["id"],
+                inc["started_at"],
+                all_servers,
+                unhealthy_servers,
+                is_resolved=False
+            )
+            _send(bot, accid, msg.chat_id, msg_text)
+        else:
+            started_at = inc["started_at"]
+            resolved_at = inc["resolved_at"] or int(time.time())
+            start_dt = datetime.fromtimestamp(started_at, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            resolved_dt = datetime.fromtimestamp(resolved_at, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            duration_str = _format_duration(max(1, resolved_at - started_at))
+
+            inc_events = [
+                ev for ev in database.get_all_cmping_downtime_events(limit=50)
+                if ev["went_down_at"] >= started_at - 60 and ev["went_down_at"] <= resolved_at + 60
+            ]
+
+            lines = [
+                f"✅ **CMPing Incident #{inc['id']} Details** — `Resolved`",
+                f"⏱ **Duration:** `{duration_str}` (`{start_dt}` → `{resolved_dt} UTC`)",
+                f"📋 **Summary:** {inc.get('summary') or 'All monitored servers operational'}\n"
+            ]
+
+            if inc_events:
+                lines.append("**Outages Recorded During Incident:**")
+                for ev in inc_events:
+                    srv = ev["server"]
+                    down_dt = datetime.fromtimestamp(ev["went_down_at"], tz=timezone.utc).strftime("%H:%M:%S")
+                    up_dt = datetime.fromtimestamp(ev["went_up_at"], tz=timezone.utc).strftime("%H:%M:%S") if ev.get("went_up_at") else "ongoing"
+                    down_dur = _format_duration(max(1, (ev.get("went_up_at") or resolved_at) - ev["went_down_at"]))
+                    err_reason = ev.get("error_msg") or "Connectivity check failed"
+                    lines.append(f"• ❌ **{srv}** (`{down_dt}` → `{up_dt} UTC`, `{down_dur}`)\n  └─ Reason: {err_reason}")
+            else:
+                lines.append("✨ All monitored servers returned to healthy state.")
+
+            _send(bot, accid, msg.chat_id, "\n".join(lines))
+        return
+
+    # List view
     recent_incs = database.get_recent_cmping_incidents(limit=10)
     if not recent_incs:
         _send(bot, accid, msg.chat_id, "✨ **No CMPing incidents recorded!**\nAll monitored chatmail relays and servers are healthy.")
@@ -3575,20 +3651,35 @@ def cmpingevents_command(bot, accid, event):
 
         if status == "ongoing":
             duration_str = _format_duration(int(time.time()) - started_at)
+            unhealthy_servers = {
+                srv: _cmping_server_errors.get(srv, "Connectivity check failed")
+                for srv, is_healthy in _cmping_server_status.items()
+                if not is_healthy and srv in all_servers
+            }
+            unhealthy_count = len(unhealthy_servers)
             lines.append(
                 f"• 🚨 **Incident #{inc_id}** — `Ongoing`\n"
                 f"  Started: `{start_str} UTC` (active for `{duration_str}`)"
             )
+            if unhealthy_servers:
+                lines.append(f"  **Affected ({unhealthy_count}):**")
+                for srv, err in unhealthy_servers.items():
+                    err_short = (err[:70] + "...") if len(err) > 70 else err
+                    lines.append(f"  • ❌ **{srv}** — `{err_short}`")
+            lines.append("")
         else:
             resolved_str = datetime.fromtimestamp(resolved_at, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if resolved_at else "Resolved"
             duration = max(1, (resolved_at or int(time.time())) - started_at)
             duration_str = _format_duration(duration)
+            summary_txt = inc.get("summary")
+            summary_line = f"\n  Status: `{summary_txt}`" if summary_txt else ""
             lines.append(
                 f"• ✅ **Incident #{inc_id}** — `Resolved`\n"
-                f"  Duration: `{duration_str}` (`{start_str}` → `{resolved_str} UTC`)"
+                f"  Duration: `{duration_str}` (`{start_str}` → `{resolved_str} UTC`){summary_line}\n"
             )
 
-    _send(bot, accid, msg.chat_id, "\n".join(lines))
+    lines.append("💡 Tip: Use `/cmpingevents <id>` for full incident details or `/cmpinghistory <server>` for server downtime history.")
+    _send(bot, accid, msg.chat_id, "\n".join(lines).strip())
 
 
 @dc_cli.on(events.NewMessage(command="/cmpinghistory"))

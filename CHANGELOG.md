@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.6.1] - 2026-08-19
+
+### Added
+- **Affected Server Breakdown in `/cmpingevents`:** Enhanced `/cmpingevents` (and `/cmevents` / `/cmpingincidents`) to display all currently failing servers and their error reasons directly in the incident log for ongoing incidents.
+- **Incident Detail Lookup by ID (`/cmpingevents <id>`):** Added support for inspecting a specific incident by ID, displaying real-time outage details (if ongoing) or historical outage timeline and error reasons for all affected servers (if resolved).
+- **Incident Resolution Summary:** Saved the list of affected servers into the incident record upon resolution for quick log inspection.
+
 ## [2.6.0] - 2026-08-19
 
 ### Added

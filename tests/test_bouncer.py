@@ -239,16 +239,45 @@ class TestBouncerBot(unittest.TestCase):
 
             # 2. Incidents exist
             inc_id = database.create_cmping_incident(int(time.time()) - 500)
-            database.resolve_cmping_incident(inc_id, int(time.time()), "Resolved")
+            database.record_cmping_server_down("cm1.test.cc", int(time.time()) - 500, "502 Bad Gateway")
+            database.record_cmping_server_up("cm1.test.cc", int(time.time()) - 100)
+            database.resolve_cmping_incident(inc_id, int(time.time()), "Affected: cm1.test.cc")
+
             inc2_id = database.create_cmping_incident(int(time.time()))
+            database.add_cmping_monitor("cm2.test.cc")
+            bot._cmping_server_status["cm2.test.cc"] = False
+            bot._cmping_server_errors["cm2.test.cc"] = "All peer checks failed"
 
             mock_send.reset_mock()
+            mock_event.msg.text = "/cmpingevents"
             bot.cmpingevents_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             text = mock_send.call_args[0][3]
             self.assertIn("CMPing Incident Log", text)
             self.assertIn(f"Incident #{inc_id}", text)
             self.assertIn(f"Incident #{inc2_id}", text)
+            self.assertIn("cm2.test.cc", text)
+            self.assertIn("All peer checks failed", text)
+
+            # 3. View incident by ID: /cmpingevents <id>
+            mock_send.reset_mock()
+            mock_event.msg.text = f"/cmpingevents {inc_id}"
+            bot.cmpingevents_command(mock_bot, 1, mock_event)
+            mock_send.assert_called_once()
+            text_detail = mock_send.call_args[0][3]
+            self.assertIn(f"CMPing Incident #{inc_id} Details", text_detail)
+            self.assertIn("cm1.test.cc", text_detail)
+            self.assertIn("502 Bad Gateway", text_detail)
+
+            # 4. View ongoing incident by ID: /cmpingevents <inc2_id>
+            mock_send.reset_mock()
+            mock_event.msg.text = f"/cmpingevents #{inc2_id}"
+            bot.cmpingevents_command(mock_bot, 1, mock_event)
+            mock_send.assert_called_once()
+            text_ongoing = mock_send.call_args[0][3]
+            self.assertIn(f"CMPing Incident #{inc2_id}", text_ongoing)
+            self.assertIn("cm2.test.cc", text_ongoing)
+            self.assertIn("All peer checks failed", text_ongoing)
 
     def test_cmpinghistory_command(self):
         mock_bot = MagicMock()

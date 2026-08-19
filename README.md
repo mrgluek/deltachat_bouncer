@@ -87,7 +87,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/cmpinglist` — Show all monitored servers, pair count, and rotation info.
 - `/cmpingstatus [server]` — Show full monitoring results sorted from newest to oldest, with an optional server filter.
 - `/cmpingfail [server]` — Show currently failed links with an optional server filter.
-- `/cmpingevents` — Show CMPing incident history log and active outage status (aliases: `/cmpingincidents`, `/cmevents`).
+- `/cmpingevents [id]` — Show CMPing incident log or detailed incident breakdown (aliases: `/cmpingincidents`, `/cmevents`).
 - `/cmpinghistory [server]` — Show downtime records and outage durations for monitored servers (alias: `/cmhistory`).
 - `/cmreport <on/off>` — Toggle monitoring alerts for current chat (Admin only).
 
