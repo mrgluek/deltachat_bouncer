@@ -138,6 +138,40 @@ def init_db():
             )
         ''')
 
+        # CMPing monitoring: incidents
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cmping_incidents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                status TEXT NOT NULL DEFAULT 'ongoing',
+                started_at INTEGER NOT NULL,
+                resolved_at INTEGER,
+                summary TEXT
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_cmping_incidents_status ON cmping_incidents(status)')
+
+        # CMPing monitoring: incident message IDs per chat
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cmping_incident_messages (
+                incident_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                msg_id INTEGER,
+                PRIMARY KEY (incident_id, chat_id)
+            )
+        ''')
+
+        # CMPing monitoring: downtime events history
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cmping_downtime_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                server TEXT NOT NULL,
+                went_down_at INTEGER NOT NULL,
+                went_up_at INTEGER,
+                error_msg TEXT
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_cmping_downtime_server ON cmping_downtime_events(server)')
+
         # Away status tracking table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS away_status (
@@ -678,6 +712,163 @@ def delete_cmping_history_for_domain(domain: str):
         )
         conn.commit()
         conn.close()
+
+# --- CMPing Incidents & Downtime History ---
+
+def create_cmping_incident(started_at: int = None) -> int:
+    if started_at is None:
+        started_at = int(time.time())
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO cmping_incidents (status, started_at) VALUES ('ongoing', ?)",
+            (started_at,)
+        )
+        incident_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return incident_id
+
+def get_active_cmping_incident() -> dict | None:
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM cmping_incidents WHERE status = 'ongoing' ORDER BY id DESC LIMIT 1"
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+def get_cmping_incident_by_id(incident_id: int) -> dict | None:
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM cmping_incidents WHERE id = ?",
+            (incident_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+def get_recent_cmping_incidents(limit: int = 10) -> list[dict]:
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM cmping_incidents ORDER BY id DESC LIMIT ?",
+            (limit,)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+def resolve_cmping_incident(incident_id: int, resolved_at: int = None, summary: str = ""):
+    if resolved_at is None:
+        resolved_at = int(time.time())
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE cmping_incidents SET status = 'resolved', resolved_at = ?, summary = ? WHERE id = ?",
+            (resolved_at, summary, incident_id)
+        )
+        conn.commit()
+        conn.close()
+
+def set_cmping_incident_msg_id(incident_id: int, chat_id: int, msg_id: int):
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO cmping_incident_messages (incident_id, chat_id, msg_id) VALUES (?, ?, ?)",
+            (incident_id, chat_id, msg_id)
+        )
+        conn.commit()
+        conn.close()
+
+def get_cmping_incident_msg_ids(incident_id: int) -> dict[int, int]:
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT chat_id, msg_id FROM cmping_incident_messages WHERE incident_id = ?",
+            (incident_id,)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return {r[0]: r[1] for r in rows}
+
+def record_cmping_server_down(server: str, went_down_at: int = None, error_msg: str = ""):
+    if went_down_at is None:
+        went_down_at = int(time.time())
+    server_norm = server.strip().lower()
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM cmping_downtime_events WHERE server = ? AND went_up_at IS NULL",
+            (server_norm,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            cursor.execute(
+                "INSERT INTO cmping_downtime_events (server, went_down_at, went_up_at, error_msg) VALUES (?, ?, NULL, ?)",
+                (server_norm, went_down_at, error_msg)
+            )
+        else:
+            cursor.execute(
+                "UPDATE cmping_downtime_events SET error_msg = ? WHERE id = ?",
+                (error_msg, row[0])
+            )
+        conn.commit()
+        conn.close()
+
+def record_cmping_server_up(server: str, went_up_at: int = None):
+    if went_up_at is None:
+        went_up_at = int(time.time())
+    server_norm = server.strip().lower()
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE cmping_downtime_events SET went_up_at = ? WHERE server = ? AND went_up_at IS NULL",
+            (went_up_at, server_norm)
+        )
+        conn.commit()
+        conn.close()
+
+def get_server_cmping_downtime_events(server: str, limit: int = 10) -> list[dict]:
+    server_norm = server.strip().lower()
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM cmping_downtime_events WHERE server = ? ORDER BY went_down_at DESC LIMIT ?",
+            (server_norm, limit)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+def get_all_cmping_downtime_events(limit: int = 10) -> list[dict]:
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM cmping_downtime_events ORDER BY went_down_at DESC LIMIT ?",
+            (limit,)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
 
 def set_away_status(contact_id: int, away_text: str):
     """Set the away status text for a contact."""

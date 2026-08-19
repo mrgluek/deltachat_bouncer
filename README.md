@@ -14,7 +14,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - 📬 **Relay Check (`/relays`):** Scan for group members using regular mail providers (Yandex, Mail.ru, etc.).
 - 🏆 **Activity Ranking (`/top`):** Show the 10 most active members in the last 24 hours.
 - 🏓 **ChatMail Ping (`/cmping`):** Ping mail relays (transports) to/from specified target servers using the `cmping` utility. Features real-time reaction-based progress tracking (`⏳`, `☑️`, `❌`) and runs asynchronously.
-- 📡 **Server Connectivity Monitoring:** Automatic periodic monitoring of server connectivity using a round-robin algorithm. Checks each server pair with retry logic, reports only on state changes (OK→FAIL / FAIL→OK) to subscribed chats. Configurable interval via `CMPING_MONITOR_INTERVAL` env var (default: 30 min).
+- 📡 **Server Connectivity Monitoring:** Automatic periodic monitoring of server connectivity using a round-robin algorithm. Employs an **incident-based alerting system** with in-place dynamic message editing (`🚨 Ongoing` → `⚠️ Ongoing (Partial Recovery)` → `✅ Resolved`) to prevent notification noise, along with accurate root-cause fault isolation. Configurable interval via `CMPING_MONITOR_INTERVAL` env var (default: 30 min).
 - 👤 **Contact Sharing:** Reports include `/contact<ID>` links to quickly get a contact object for any user.
 - 🔄 **Automatic Transport Failover:** Supports multiple mail servers. The bot automatically detects message delivery failures via raw core events, switches `configured_addr` to a backup transport in round-robin fashion, and schedules a resend of the message using exponential backoff (5s, 10s, 20s, 40s...) via an asynchronous timer thread (up to a maximum of 10 attempts per message) to prevent loop propagation and CPU spikes.
 - ⏳ **14-Day Grace Period:** The bot tracks group activity in the background and requires 14 days of observation before reporting "never seen" users.
@@ -87,6 +87,8 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/cmpinglist` — Show all monitored servers, pair count, and rotation info.
 - `/cmpingstatus [server]` — Show full monitoring results sorted from newest to oldest, with an optional server filter.
 - `/cmpingfail [server]` — Show currently failed links with an optional server filter.
+- `/cmpingevents` — Show CMPing incident history log and active outage status (aliases: `/cmpingincidents`, `/cmevents`).
+- `/cmpinghistory [server]` — Show downtime records and outage durations for monitored servers (alias: `/cmhistory`).
 - `/cmreport <on/off>` — Toggle monitoring alerts for current chat (Admin only).
 
 ### Target-Specific Commands in Group Chats

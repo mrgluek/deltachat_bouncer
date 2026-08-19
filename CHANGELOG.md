@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.6.0] - 2026-08-19
+
+### Added
+- **CMPing Incident-Based Alerting:** Replaced noisy individual `🔴 UNHEALTHY` / `🟢 HEALTHY` alert messages with an incident-based lifecycle. When monitored servers experience connectivity failures, the bot opens a single ongoing incident (`🚨 CMPing Incident #X — Ongoing`) per subscribed report chat.
+- **In-Place Dynamic Message Editing:** Incident messages are dynamically updated in-place via `send_edit_request` to reflect ongoing failures, partial recoveries (`⚠️ Ongoing (Partial Recovery)`), and complete resolution (`✅ Resolved`) with total outage duration.
+- **Root-Cause Failure Isolation:** When a source server fails connecting with all peer targets in a check cycle (e.g. source host network partition or DNS failure), the bot attributes the outage to the source node rather than mislabeling all healthy target peers as down.
+- **Incident & History Commands:**
+  - Added `/cmpingevents` (aliases: `/cmpingincidents`, `/cmevents`) to view recent CMPing incidents and active outage status.
+  - Added `/cmpinghistory [server]` (alias: `/cmhistory`) to inspect downtime logs, error reasons, and outage durations for monitored servers.
+- **Downtime Events Persistence:** Added `cmping_downtime_events`, `cmping_incidents`, and `cmping_incident_messages` database tables for persistent outage tracking.
+- **Unit Test Suite:** Added unit test suite in `tests/test_bouncer.py` covering incident operations, dynamic message editing, root-cause isolation, and commands.
+
 ## [2.5.18] - 2026-07-23
 
 ### Added
