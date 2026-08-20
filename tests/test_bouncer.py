@@ -570,5 +570,53 @@ class TestBouncerBot(unittest.TestCase):
         self.assertIn("UserInactive25d", report)
         self.assertNotIn("UserActive10d", report)
 
+    def test_get_cmping_incident_update_interval(self):
+        self.assertEqual(bot._get_cmping_incident_update_interval(0), 15)
+        self.assertEqual(bot._get_cmping_incident_update_interval(59), 15)
+        self.assertEqual(bot._get_cmping_incident_update_interval(60), 30)
+        self.assertEqual(bot._get_cmping_incident_update_interval(299), 30)
+        self.assertEqual(bot._get_cmping_incident_update_interval(300), 60)
+        self.assertEqual(bot._get_cmping_incident_update_interval(3599), 60)
+        self.assertEqual(bot._get_cmping_incident_update_interval(3600), 300)
+        self.assertEqual(bot._get_cmping_incident_update_interval(86400), 300)
+
+    def test_cmping_incident_rate_limiting(self):
+        mock_bot = MagicMock()
+        chat_id = 7722
+        database.add_cmping_report_chat(chat_id)
+        servers = ["cm1.test.org", "cm2.test.org"]
+
+        bot._cmping_server_status["cm1.test.org"] = False
+        bot._cmping_server_errors["cm1.test.org"] = "Timeout"
+        bot._cmping_server_status["cm2.test.org"] = True
+        bot._cmping_incident_last_edit_state.clear()
+
+        # 1. Initial alert
+        with patch.object(bot, '_send', return_value=60001):
+            bot._sync_cmping_incident_alerts(mock_bot, 1, servers, force_update=False)
+
+        inc = database.get_active_cmping_incident()
+        self.assertIsNotNone(inc)
+        database.set_cmping_incident_msg_id(inc["id"], chat_id, 60001)
+        self.assertIn(inc["id"], bot._cmping_incident_last_edit_state)
+
+        # 2. Immediate second call with same state -> throttled
+        mock_bot.rpc.send_edit_request.reset_mock()
+        bot._sync_cmping_incident_alerts(mock_bot, 1, servers, force_update=False)
+        mock_bot.rpc.send_edit_request.assert_not_called()
+
+        # 3. Time elapsed >= 15s -> sends edit
+        last_t, sig = bot._cmping_incident_last_edit_state[inc["id"]]
+        bot._cmping_incident_last_edit_state[inc["id"]] = (last_t - 20, sig)
+        bot._sync_cmping_incident_alerts(mock_bot, 1, servers, force_update=False)
+        mock_bot.rpc.send_edit_request.assert_called_once()
+
+        # 4. Status change (cm2 also goes down) -> immediate edit
+        mock_bot.rpc.send_edit_request.reset_mock()
+        bot._cmping_server_status["cm2.test.org"] = False
+        bot._cmping_server_errors["cm2.test.org"] = "Connection refused"
+        bot._sync_cmping_incident_alerts(mock_bot, 1, servers, force_update=False)
+        mock_bot.rpc.send_edit_request.assert_called_once()
+
 if __name__ == '__main__':
     unittest.main()

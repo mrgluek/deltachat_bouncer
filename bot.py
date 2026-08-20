@@ -21,7 +21,7 @@ import database
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
 
-VERSION = "2.7.0"
+VERSION = "2.7.1"
 
 
 def log_version_info(bot):
@@ -930,7 +930,22 @@ def _format_cmping_incident_message(
         return "\n".join(lines)
 
 
-def _sync_cmping_incident_alerts(bot, accid, all_servers):
+_cmping_incident_last_edit_state = {}
+
+
+def _get_cmping_incident_update_interval(duration_seconds: int) -> int:
+    """Return the minimum seconds required between live ticker edits based on CMPing incident age."""
+    if duration_seconds < 60:
+        return 15       # First minute: update every 15 seconds
+    elif duration_seconds < 300:
+        return 30       # 1 to 5 minutes: update every 30 seconds
+    elif duration_seconds < 3600:
+        return 60       # 5 minutes to 1 hour: update every 1 minute
+    else:
+        return 300      # After 1 hour: update every 5 minutes
+
+
+def _sync_cmping_incident_alerts(bot, accid, all_servers, force_update: bool = False):
     report_chats = database.get_all_cmping_report_chats()
     if not report_chats:
         return
@@ -948,6 +963,19 @@ def _sync_cmping_incident_alerts(bot, accid, all_servers):
         if not active_inc:
             inc_id = database.create_cmping_incident(now)
             active_inc = database.get_cmping_incident_by_id(inc_id)
+            force_update = True
+
+        inc_id = active_inc["id"]
+        started_at = active_inc["started_at"]
+        duration = max(0, now - started_at)
+
+        status_sig = tuple(sorted(unhealthy_servers.items()))
+        last_edit_time, last_sig = _cmping_incident_last_edit_state.get(inc_id, (0.0, None))
+        throttle_interval = _get_cmping_incident_update_interval(duration)
+
+        should_edit = force_update or (status_sig != last_sig) or ((now - last_edit_time) >= throttle_interval)
+        if not should_edit:
+            return
 
         msg_text = _format_cmping_incident_message(
             active_inc["id"],
@@ -964,19 +992,25 @@ def _sync_cmping_incident_alerts(bot, accid, all_servers):
             if msg_id:
                 try:
                     bot.rpc.send_edit_request(accid, msg_id, msg_text)
+                    _cmping_incident_last_edit_state[inc_id] = (now, status_sig)
                     logger.info(f"CMPing monitor: edited incident #{active_inc['id']} message {msg_id} in chat {chat_id}")
                 except Exception as e:
                     logger.warning(f"CMPing monitor: failed to edit incident message {msg_id} in chat {chat_id} (sending new message): {e}")
                     new_msg_id = _send(bot, accid, chat_id, msg_text)
                     if new_msg_id:
                         database.set_cmping_incident_msg_id(active_inc["id"], chat_id, new_msg_id)
+                        _cmping_incident_last_edit_state[inc_id] = (now, status_sig)
             else:
                 new_msg_id = _send(bot, accid, chat_id, msg_text)
                 if new_msg_id:
                     database.set_cmping_incident_msg_id(active_inc["id"], chat_id, new_msg_id)
+                    _cmping_incident_last_edit_state[inc_id] = (now, status_sig)
 
     else:
         if active_inc:
+            inc_id = active_inc["id"]
+            _cmping_incident_last_edit_state.pop(inc_id, None)
+
             # Collect servers that experienced downtime during this incident
             inc_events = [
                 ev for ev in database.get_all_cmping_downtime_events(limit=50)
