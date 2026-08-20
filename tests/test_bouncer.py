@@ -577,8 +577,12 @@ class TestBouncerBot(unittest.TestCase):
         self.assertEqual(bot._get_cmping_incident_update_interval(299), 30)
         self.assertEqual(bot._get_cmping_incident_update_interval(300), 60)
         self.assertEqual(bot._get_cmping_incident_update_interval(3599), 60)
+        # 1 hour - 24 hours: 300s (5 minutes)
         self.assertEqual(bot._get_cmping_incident_update_interval(3600), 300)
-        self.assertEqual(bot._get_cmping_incident_update_interval(86400), 300)
+        self.assertEqual(bot._get_cmping_incident_update_interval(86399), 300)
+        # > 24 hours: 3600s (1 hour)
+        self.assertEqual(bot._get_cmping_incident_update_interval(86400), 3600)
+        self.assertEqual(bot._get_cmping_incident_update_interval(86400 * 7), 3600)
 
     def test_cmping_incident_rate_limiting(self):
         mock_bot = MagicMock()
