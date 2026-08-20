@@ -5,12 +5,15 @@ All notable changes to this project will be documented in this file.
 ## [2.7.1] - 2026-08-20
 
 ### Added
+- **Concise Resolved Incident Messages:**
+  - Upon incident resolution, the updated message now displays only the specific servers that experienced downtime during the incident (`Recovered Servers:`).
 - **Tiered Rate-Limiting for Live CMPing Incident Message Edits:**
   - Standardized progressive duration-based throttling for live incident updates:
     - **First minute (< 60s):** updates at most once every **15 seconds**.
     - **1 to 5 minutes (60s – 300s):** updates at most once every **30 seconds**.
     - **5 minutes to 1 hour (300s – 3600s):** updates at most once every **1 minute**.
-    - **Over 1 hour (> 3600s):** updates at most once every **5 minutes**.
+    - **1 to 24 hours (3600s – 86400s):** updates at most once every **5 minutes**.
+    - **Over 24 hours (> 86400s):** updates at most once every **1 hour**.
   - Server status transitions (failures, recoveries, domain deletions, resolutions) continue to trigger immediate in-place edits with zero delay.
 
 ## [2.7.0] - 2026-08-19
