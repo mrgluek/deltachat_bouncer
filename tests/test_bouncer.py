@@ -698,5 +698,42 @@ class TestBouncerBot(unittest.TestCase):
         active_incs = database.get_all_active_cmping_incidents()
         self.assertEqual(len(active_incs), 0)
 
+    def test_database_migration_from_legacy_schema(self):
+        import tempfile
+        import sqlite3
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
+            legacy_db_path = tf.name
+
+        try:
+            # Create old schema table without incident_id column
+            conn = sqlite3.connect(legacy_db_path)
+            cur = conn.cursor()
+            cur.execute('''
+                CREATE TABLE cmping_downtime_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    server TEXT NOT NULL,
+                    went_down_at INTEGER NOT NULL,
+                    went_up_at INTEGER,
+                    error_msg TEXT
+                )
+            ''')
+            conn.commit()
+            conn.close()
+
+            # Now run init_db pointing to this legacy db
+            with patch('database.DB_PATH', legacy_db_path):
+                database.init_db()
+
+            # Verify incident_id column and indices were created successfully
+            conn = sqlite3.connect(legacy_db_path)
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(cmping_downtime_events)")
+            columns = [r[1] for r in cur.fetchall()]
+            self.assertIn("incident_id", columns)
+            conn.close()
+        finally:
+            if os.path.exists(legacy_db_path):
+                os.remove(legacy_db_path)
+
 if __name__ == '__main__':
     unittest.main()

@@ -177,14 +177,16 @@ def init_db():
                 incident_id INTEGER
             )
         ''')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_cmping_downtime_server ON cmping_downtime_events(server)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_cmping_downtime_incident ON cmping_downtime_events(incident_id)')
-
-        # Ensure incident_id column exists
+        # Ensure columns exist in cmping_downtime_events
         cursor.execute("PRAGMA table_info(cmping_downtime_events)")
         cols_cmp = [row[1] for row in cursor.fetchall()]
         if "incident_id" not in cols_cmp:
             cursor.execute("ALTER TABLE cmping_downtime_events ADD COLUMN incident_id INTEGER")
+        if "error_msg" not in cols_cmp:
+            cursor.execute("ALTER TABLE cmping_downtime_events ADD COLUMN error_msg TEXT")
+
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_cmping_downtime_server ON cmping_downtime_events(server)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_cmping_downtime_incident ON cmping_downtime_events(incident_id)')
 
         # Away status tracking table
         cursor.execute('''
