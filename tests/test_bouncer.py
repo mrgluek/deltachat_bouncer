@@ -735,5 +735,85 @@ class TestBouncerBot(unittest.TestCase):
             if os.path.exists(legacy_db_path):
                 os.remove(legacy_db_path)
 
+    def test_cmping_incident_reopened_on_service_flapping_within_one_hour(self):
+        chat_id = 7733
+        database.add_cmping_report_chat(chat_id)
+        servers = ["flap.example.com"]
+
+        mock_bot = MagicMock()
+        bot.dc_accid = 1
+        t0 = 1000000
+
+        # 1. Goes DOWN at t0 -> Incident #1 created with _send
+        with patch('time.time', return_value=t0), patch.object(bot, '_send', return_value=80001) as mock_send:
+            database.record_cmping_server_down("flap.example.com", t0, "Timeout")
+            bot._cmping_server_status = {"flap.example.com": False}
+            bot._cmping_server_errors = {"flap.example.com": "Timeout"}
+            bot._cmping_incident_last_edit_state.clear()
+            bot._sync_cmping_incident_alerts(mock_bot, 1, servers)
+
+        mock_send.assert_called_once()
+        active_incs = database.get_all_active_cmping_incidents()
+        self.assertEqual(len(active_incs), 1)
+        inc1_id = active_incs[0]["id"]
+        database.set_cmping_incident_msg_id(inc1_id, chat_id, 80001)
+
+        # 2. Recovers at t0 + 300s -> Incident #1 resolves with send_edit_request
+        t1 = t0 + 300
+        mock_bot.rpc.send_edit_request.reset_mock()
+        with patch('time.time', return_value=t1), patch.object(bot, '_send') as mock_send:
+            database.record_cmping_server_up("flap.example.com", t1)
+            bot._cmping_server_status["flap.example.com"] = True
+            bot._cmping_server_errors.pop("flap.example.com", None)
+            bot._sync_cmping_incident_alerts(mock_bot, 1, servers)
+
+        mock_send.assert_not_called()
+        mock_bot.rpc.send_edit_request.assert_called_once()
+        edit_args = mock_bot.rpc.send_edit_request.call_args[0]
+        self.assertEqual(edit_args[1], 80001)
+        self.assertIn("Resolved", edit_args[2])
+        self.assertEqual(len(database.get_all_active_cmping_incidents()), 0)
+
+        # 3. Flaps DOWN again at t1 + 300s (T = t0 + 600s, < 1 hour) -> Reopens Incident #1!
+        t2 = t1 + 300
+        mock_bot.rpc.send_edit_request.reset_mock()
+        with patch('time.time', return_value=t2), patch.object(bot, '_send') as mock_send:
+            database.record_cmping_server_down("flap.example.com", t2, "Connection refused")
+            bot._cmping_server_status["flap.example.com"] = False
+            bot._cmping_server_errors["flap.example.com"] = "Connection refused"
+            bot._sync_cmping_incident_alerts(mock_bot, 1, servers)
+
+        # MUST NOT send a new message
+        mock_send.assert_not_called()
+        # MUST edit existing message back to Ongoing
+        mock_bot.rpc.send_edit_request.assert_called_once()
+        edit_args = mock_bot.rpc.send_edit_request.call_args[0]
+        self.assertEqual(edit_args[1], 80001)
+        self.assertIn(f"Incident #{inc1_id}", edit_args[2])
+        self.assertIn("Ongoing", edit_args[2])
+        self.assertIn("flap.example.com", edit_args[2])
+
+        active_incs = database.get_all_active_cmping_incidents()
+        self.assertEqual(len(active_incs), 1)
+        self.assertEqual(active_incs[0]["id"], inc1_id)
+        self.assertEqual(active_incs[0]["status"], "ongoing")
+
+        # 4. Finally recovers at t2 + 300s (T = t0 + 900s) -> Resolves again
+        t3 = t2 + 300
+        mock_bot.rpc.send_edit_request.reset_mock()
+        with patch('time.time', return_value=t3), patch.object(bot, '_send') as mock_send:
+            database.record_cmping_server_up("flap.example.com", t3)
+            bot._cmping_server_status["flap.example.com"] = True
+            bot._cmping_server_errors.pop("flap.example.com", None)
+            bot._sync_cmping_incident_alerts(mock_bot, 1, servers)
+
+        mock_send.assert_not_called()
+        mock_bot.rpc.send_edit_request.assert_called_once()
+        edit_args = mock_bot.rpc.send_edit_request.call_args[0]
+        self.assertEqual(edit_args[1], 80001)
+        self.assertIn(f"Incident #{inc1_id}", edit_args[2])
+        self.assertIn("Resolved", edit_args[2])
+        self.assertEqual(len(database.get_all_active_cmping_incidents()), 0)
+
 if __name__ == '__main__':
     unittest.main()

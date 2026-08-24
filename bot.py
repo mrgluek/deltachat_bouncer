@@ -21,7 +21,7 @@ import database
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
 
-VERSION = "2.8.0"
+VERSION = "2.8.1"
 
 
 def log_version_info(bot):

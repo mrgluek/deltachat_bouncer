@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.8.1] - 2026-08-24
+
+### Added
+- **Reopen Resolved CMPing Incidents on Flapping (1-Hour Window):**
+  - If a server recovers but goes down again within **1 hour (3600s)** of its resolution, the bot reopens the existing incident instead of creating new ones.
+  - The alert message is edited in-place from `Resolved` back to `Ongoing`.
+- **Database Schema Migration Safety:**
+  - Placed index creations after column migrations to guarantee error-free upgrades on legacy databases.
+
 ## [2.8.0] - 2026-08-24
 
 ### Added

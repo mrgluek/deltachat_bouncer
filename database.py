@@ -803,24 +803,47 @@ def get_all_active_cmping_incidents() -> list[dict]:
         conn.close()
         return [dict(r) for r in rows]
 
-def get_active_cmping_incident_for_outage(outage_time: int, max_gap_seconds: int = 3600) -> dict | None:
+def get_active_cmping_incident_for_outage(outage_time: int, max_gap_seconds: int = 3600, allow_reopen: bool = True) -> dict | None:
     with _lock:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute('''
-            SELECT i.*, 
-                   MAX(COALESCE(de.went_down_at, i.started_at)) as last_down_at
-            FROM cmping_incidents i
-            LEFT JOIN cmping_downtime_events de ON de.incident_id = i.id
-            WHERE i.status = 'ongoing'
-            GROUP BY i.id
-            HAVING (? - last_down_at) <= ? AND (? >= last_down_at)
-            ORDER BY i.id DESC LIMIT 1
-        ''', (outage_time, max_gap_seconds, outage_time))
+        if allow_reopen:
+            cursor.execute('''
+                SELECT i.*, 
+                       MAX(COALESCE(de.went_down_at, i.started_at)) as last_down_at,
+                       COALESCE(i.resolved_at, MAX(COALESCE(de.went_up_at, de.went_down_at, i.started_at))) as last_event_at
+                FROM cmping_incidents i
+                LEFT JOIN cmping_downtime_events de ON de.incident_id = i.id
+                GROUP BY i.id
+                HAVING (? - last_event_at) <= ? AND (? >= last_event_at)
+                ORDER BY (CASE WHEN i.status = 'ongoing' THEN 0 ELSE 1 END), i.id DESC LIMIT 1
+            ''', (outage_time, max_gap_seconds, outage_time))
+        else:
+            cursor.execute('''
+                SELECT i.*, 
+                       MAX(COALESCE(de.went_down_at, i.started_at)) as last_down_at
+                FROM cmping_incidents i
+                LEFT JOIN cmping_downtime_events de ON de.incident_id = i.id
+                WHERE i.status = 'ongoing'
+                GROUP BY i.id
+                HAVING (? - last_down_at) <= ? AND (? >= last_down_at)
+                ORDER BY i.id DESC LIMIT 1
+            ''', (outage_time, max_gap_seconds, outage_time))
         row = cursor.fetchone()
         conn.close()
         return dict(row) if row else None
+
+def reopen_cmping_incident(incident_id: int):
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE cmping_incidents SET status = 'ongoing', resolved_at = NULL, summary = NULL WHERE id = ?",
+            (incident_id,)
+        )
+        conn.commit()
+        conn.close()
 
 def get_cmping_incident_downtime_events(incident_id: int) -> list[dict]:
     with _lock:
@@ -927,19 +950,23 @@ def record_cmping_server_down(server: str, went_down_at: int = None, error_msg: 
         )
         row = cursor.fetchone()
         if not row:
-            # Check active incident within 1 hour or create new
+            # Check active or recently resolved incident within 1 hour or create new
             cursor.execute('''
-                SELECT i.id, MAX(COALESCE(de.went_down_at, i.started_at)) as last_down_at
+                SELECT i.id, i.status,
+                       MAX(COALESCE(de.went_down_at, i.started_at)) as last_down_at,
+                       COALESCE(i.resolved_at, MAX(COALESCE(de.went_up_at, de.went_down_at, i.started_at))) as last_event_at
                 FROM cmping_incidents i
                 LEFT JOIN cmping_downtime_events de ON de.incident_id = i.id
-                WHERE i.status = 'ongoing'
                 GROUP BY i.id
-                HAVING (? - last_down_at) <= 3600 AND (? >= last_down_at)
-                ORDER BY i.id DESC LIMIT 1
+                HAVING (? - last_event_at) <= 3600 AND (? >= last_event_at)
+                ORDER BY (CASE WHEN i.status = 'ongoing' THEN 0 ELSE 1 END), i.id DESC LIMIT 1
             ''', (went_down_at, went_down_at))
             inc_row = cursor.fetchone()
             if inc_row:
                 inc_id = inc_row[0]
+                inc_status = inc_row[1]
+                if inc_status == 'resolved':
+                    cursor.execute("UPDATE cmping_incidents SET status = 'ongoing', resolved_at = NULL, summary = NULL WHERE id = ?", (inc_id,))
             else:
                 cursor.execute("INSERT INTO cmping_incidents (status, started_at) VALUES ('ongoing', ?)", (went_down_at,))
                 inc_id = cursor.lastrowid
