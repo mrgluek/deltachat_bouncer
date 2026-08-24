@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.8.0] - 2026-08-24
+
+### Added
+- **1-Hour CMPing Incident Clustering Window:**
+  - Outage events occurring within **1 hour (3600s)** of prior failures are grouped into the ongoing incident.
+  - Server outages occurring **more than 1 hour** after previous failures spawn a **brand new CMPing incident** with a fresh alert message.
+  - Each incident tracks and resolves its specific affected servers independently.
+
 ## [2.7.1] - 2026-08-20
 
 ### Added

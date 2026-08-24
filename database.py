@@ -173,10 +173,18 @@ def init_db():
                 server TEXT NOT NULL,
                 went_down_at INTEGER NOT NULL,
                 went_up_at INTEGER,
-                error_msg TEXT
+                error_msg TEXT,
+                incident_id INTEGER
             )
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_cmping_downtime_server ON cmping_downtime_events(server)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_cmping_downtime_incident ON cmping_downtime_events(incident_id)')
+
+        # Ensure incident_id column exists
+        cursor.execute("PRAGMA table_info(cmping_downtime_events)")
+        cols_cmp = [row[1] for row in cursor.fetchall()]
+        if "incident_id" not in cols_cmp:
+            cursor.execute("ALTER TABLE cmping_downtime_events ADD COLUMN incident_id INTEGER")
 
         # Away status tracking table
         cursor.execute('''
@@ -783,6 +791,65 @@ def get_active_cmping_incident() -> dict | None:
         conn.close()
         return dict(row) if row else None
 
+def get_all_active_cmping_incidents() -> list[dict]:
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM cmping_incidents WHERE status = 'ongoing' ORDER BY id ASC")
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+def get_active_cmping_incident_for_outage(outage_time: int, max_gap_seconds: int = 3600) -> dict | None:
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT i.*, 
+                   MAX(COALESCE(de.went_down_at, i.started_at)) as last_down_at
+            FROM cmping_incidents i
+            LEFT JOIN cmping_downtime_events de ON de.incident_id = i.id
+            WHERE i.status = 'ongoing'
+            GROUP BY i.id
+            HAVING (? - last_down_at) <= ? AND (? >= last_down_at)
+            ORDER BY i.id DESC LIMIT 1
+        ''', (outage_time, max_gap_seconds, outage_time))
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+def get_cmping_incident_downtime_events(incident_id: int) -> list[dict]:
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM cmping_downtime_events WHERE incident_id = ? ORDER BY went_down_at ASC",
+            (incident_id,)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+def get_cmping_incident_affected_servers(incident_id: int, fallback_started_at: int = None) -> list[str]:
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT server FROM cmping_downtime_events WHERE incident_id = ?", (incident_id,))
+        rows = cursor.fetchall()
+        servers = [r[0] for r in rows if r[0]]
+        if not servers and fallback_started_at is not None:
+            cursor.execute('''
+                SELECT DISTINCT server FROM cmping_downtime_events
+                WHERE went_down_at >= ? OR went_up_at IS NULL OR went_up_at >= ?
+            ''', (fallback_started_at - 60, fallback_started_at))
+            rows = cursor.fetchall()
+            servers = [r[0] for r in rows if r[0]]
+        conn.close()
+        return servers
+
 def get_cmping_incident_by_id(incident_id: int) -> dict | None:
     with _lock:
         conn = sqlite3.connect(DB_PATH)
@@ -858,9 +925,26 @@ def record_cmping_server_down(server: str, went_down_at: int = None, error_msg: 
         )
         row = cursor.fetchone()
         if not row:
+            # Check active incident within 1 hour or create new
+            cursor.execute('''
+                SELECT i.id, MAX(COALESCE(de.went_down_at, i.started_at)) as last_down_at
+                FROM cmping_incidents i
+                LEFT JOIN cmping_downtime_events de ON de.incident_id = i.id
+                WHERE i.status = 'ongoing'
+                GROUP BY i.id
+                HAVING (? - last_down_at) <= 3600 AND (? >= last_down_at)
+                ORDER BY i.id DESC LIMIT 1
+            ''', (went_down_at, went_down_at))
+            inc_row = cursor.fetchone()
+            if inc_row:
+                inc_id = inc_row[0]
+            else:
+                cursor.execute("INSERT INTO cmping_incidents (status, started_at) VALUES ('ongoing', ?)", (went_down_at,))
+                inc_id = cursor.lastrowid
+
             cursor.execute(
-                "INSERT INTO cmping_downtime_events (server, went_down_at, went_up_at, error_msg) VALUES (?, ?, NULL, ?)",
-                (server_norm, went_down_at, error_msg)
+                "INSERT INTO cmping_downtime_events (server, went_down_at, went_up_at, error_msg, incident_id) VALUES (?, ?, NULL, ?, ?)",
+                (server_norm, went_down_at, error_msg, inc_id)
             )
         else:
             cursor.execute(

@@ -21,7 +21,7 @@ import database
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
 
-VERSION = "2.7.1"
+VERSION = "2.8.0"
 
 
 def log_version_info(bot):
@@ -881,11 +881,8 @@ def _format_cmping_incident_message(
         ]
 
         # Collect servers that experienced downtime during this incident
-        inc_events = [
-            ev for ev in database.get_all_cmping_downtime_events(limit=50)
-            if ev["went_down_at"] >= started_at - 60 or (ev.get("went_up_at") and ev["went_up_at"] >= started_at)
-        ]
-        affected_srvs = list(dict.fromkeys([ev["server"] for ev in inc_events if ev["server"] in all_servers]))
+        affected_srvs = database.get_cmping_incident_affected_servers(incident_id, fallback_started_at=started_at)
+        affected_srvs = [s for s in affected_srvs if s in all_servers]
         if affected_srvs:
             lines.append("\n**Recovered Servers:**")
             for srv in affected_srvs:
@@ -899,14 +896,13 @@ def _format_cmping_incident_message(
         unhealthy_count = len(unhealthy_servers)
 
         partially_recovered = False
-        recent_ups = []
-        if 0 < unhealthy_count < total_servers:
-            recent_ups = [
-                ev for ev in database.get_all_cmping_downtime_events(limit=20)
-                if ev.get("went_up_at") and ev["went_up_at"] >= started_at and ev["server"] not in unhealthy_servers
-            ]
-            if recent_ups:
-                partially_recovered = True
+        events = database.get_cmping_incident_downtime_events(incident_id)
+        recent_ups = [
+            ev for ev in events
+            if ev.get("went_up_at") and ev["server"] not in unhealthy_servers
+        ]
+        if recent_ups and unhealthy_count > 0:
+            partially_recovered = True
 
         if partially_recovered:
             status_tag = "Ongoing (Partial Recovery)"
@@ -964,94 +960,95 @@ def _sync_cmping_incident_alerts(bot, accid, all_servers, force_update: bool = F
         return
 
     now = int(time.time())
-    unhealthy_servers = {
-        srv: _cmping_server_errors.get(srv, "Connectivity check failed")
-        for srv, is_healthy in _cmping_server_status.items()
-        if not is_healthy and srv in all_servers
-    }
+    for srv, is_healthy in _cmping_server_status.items():
+        if not is_healthy and srv in all_servers:
+            err = _cmping_server_errors.get(srv, "Connectivity check failed")
+            database.record_cmping_server_down(srv, now, err)
 
-    active_inc = database.get_active_cmping_incident()
+    active_incidents = database.get_all_active_cmping_incidents()
+    if not active_incidents:
+        return
 
-    if unhealthy_servers:
-        if not active_inc:
-            inc_id = database.create_cmping_incident(now)
-            active_inc = database.get_cmping_incident_by_id(inc_id)
-            force_update = True
+    for inc in active_incidents:
+        inc_id = inc["id"]
+        events = database.get_cmping_incident_downtime_events(inc_id)
+        open_events = [ev for ev in events if ev.get("went_up_at") is None]
 
-        inc_id = active_inc["id"]
-        started_at = active_inc["started_at"]
-        duration = max(0, now - started_at)
+        if open_events:
+            # Ongoing incident
+            started_at = inc["started_at"]
+            duration = max(0, now - started_at)
+            
+            inc_unhealthy = {
+                ev["server"]: ev.get("error_msg") or _cmping_server_errors.get(ev["server"], "Connectivity check failed")
+                for ev in open_events
+            }
 
-        status_sig = tuple(sorted(unhealthy_servers.items()))
-        last_edit_time, last_sig = _cmping_incident_last_edit_state.get(inc_id, (0.0, None))
-        throttle_interval = _get_cmping_incident_update_interval(duration)
+            status_sig = tuple(sorted(inc_unhealthy.items()))
+            last_edit_time, last_sig = _cmping_incident_last_edit_state.get(inc_id, (0.0, None))
+            throttle_interval = _get_cmping_incident_update_interval(duration)
 
-        should_edit = force_update or (status_sig != last_sig) or ((now - last_edit_time) >= throttle_interval)
-        if not should_edit:
-            return
+            chat_msg_ids = database.get_cmping_incident_msg_ids(inc_id)
+            has_missing_msg = any(cid not in chat_msg_ids for cid in report_chats)
 
-        msg_text = _format_cmping_incident_message(
-            active_inc["id"],
-            active_inc["started_at"],
-            all_servers,
-            unhealthy_servers,
-            is_resolved=False
-        )
-
-        chat_msg_ids = database.get_cmping_incident_msg_ids(active_inc["id"])
-
-        for chat_id in report_chats:
-            msg_id = chat_msg_ids.get(chat_id)
-            if msg_id:
-                try:
-                    bot.rpc.send_edit_request(accid, msg_id, msg_text)
-                    _cmping_incident_last_edit_state[inc_id] = (now, status_sig)
-                    logger.info(f"CMPing monitor: edited incident #{active_inc['id']} message {msg_id} in chat {chat_id}")
-                except Exception as e:
-                    logger.warning(f"CMPing monitor: failed to edit incident message {msg_id} in chat {chat_id} (sending new message): {e}")
-                    new_msg_id = _send(bot, accid, chat_id, msg_text)
-                    if new_msg_id:
-                        database.set_cmping_incident_msg_id(active_inc["id"], chat_id, new_msg_id)
-                        _cmping_incident_last_edit_state[inc_id] = (now, status_sig)
-            else:
-                new_msg_id = _send(bot, accid, chat_id, msg_text)
-                if new_msg_id:
-                    database.set_cmping_incident_msg_id(active_inc["id"], chat_id, new_msg_id)
-                    _cmping_incident_last_edit_state[inc_id] = (now, status_sig)
-
-    else:
-        if active_inc:
-            inc_id = active_inc["id"]
-            _cmping_incident_last_edit_state.pop(inc_id, None)
-
-            # Collect servers that experienced downtime during this incident
-            inc_events = [
-                ev for ev in database.get_all_cmping_downtime_events(limit=50)
-                if ev["went_down_at"] >= active_inc["started_at"] - 60
-            ]
-            affected_srvs = list(dict.fromkeys([ev["server"] for ev in inc_events]))
-            if affected_srvs:
-                summary = f"Affected: {', '.join(affected_srvs)}"
-            else:
-                summary = f"All {len(all_servers)} servers operational"
-            database.resolve_cmping_incident(active_inc["id"], now, summary)
+            should_edit = (status_sig != last_sig) or ((now - last_edit_time) >= throttle_interval) or has_missing_msg
+            if not should_edit:
+                continue
 
             msg_text = _format_cmping_incident_message(
-                active_inc["id"],
-                active_inc["started_at"],
+                inc_id,
+                started_at,
+                all_servers,
+                inc_unhealthy,
+                is_resolved=False
+            )
+
+            for chat_id in report_chats:
+                msg_id = chat_msg_ids.get(chat_id)
+                if msg_id:
+                    try:
+                        bot.rpc.send_edit_request(accid, msg_id, msg_text)
+                        _cmping_incident_last_edit_state[inc_id] = (now, status_sig)
+                        logger.info(f"CMPing monitor: edited incident #{inc_id} message {msg_id} in chat {chat_id}")
+                    except Exception as e:
+                        logger.warning(f"CMPing monitor: failed to edit incident message {msg_id} in chat {chat_id} (sending new message): {e}")
+                        new_msg_id = _send(bot, accid, chat_id, msg_text)
+                        if new_msg_id:
+                            database.set_cmping_incident_msg_id(inc_id, chat_id, new_msg_id)
+                            _cmping_incident_last_edit_state[inc_id] = (now, status_sig)
+                else:
+                    new_msg_id = _send(bot, accid, chat_id, msg_text)
+                    if new_msg_id:
+                        database.set_cmping_incident_msg_id(inc_id, chat_id, new_msg_id)
+                        _cmping_incident_last_edit_state[inc_id] = (now, status_sig)
+
+        else:
+            # Resolved incident
+            _cmping_incident_last_edit_state.pop(inc_id, None)
+
+            affected_srvs = database.get_cmping_incident_affected_servers(inc_id, fallback_started_at=inc["started_at"])
+            if affected_srvs:
+                summary = f"Recovered: {', '.join(affected_srvs)}"
+            else:
+                summary = f"All {len(all_servers)} servers operational"
+            database.resolve_cmping_incident(inc_id, now, summary)
+
+            msg_text = _format_cmping_incident_message(
+                inc_id,
+                inc["started_at"],
                 all_servers,
                 {},
                 is_resolved=True,
                 resolved_at=now
             )
 
-            chat_msg_ids = database.get_cmping_incident_msg_ids(active_inc["id"])
+            chat_msg_ids = database.get_cmping_incident_msg_ids(inc_id)
             for chat_id in report_chats:
                 msg_id = chat_msg_ids.get(chat_id)
                 if msg_id:
                     try:
                         bot.rpc.send_edit_request(accid, msg_id, msg_text)
-                        logger.info(f"CMPing monitor: resolved incident #{active_inc['id']} message {msg_id} in chat {chat_id}")
+                        logger.info(f"CMPing monitor: resolved incident #{inc_id} by editing message {msg_id} in chat {chat_id}")
                     except Exception as e:
                         logger.warning(f"CMPing monitor: failed to edit resolved incident message {msg_id} in chat {chat_id}: {e}")
                         _send(bot, accid, chat_id, msg_text)
@@ -1059,8 +1056,6 @@ def _sync_cmping_incident_alerts(bot, accid, all_servers, force_update: bool = F
                     _send(bot, accid, chat_id, msg_text)
 
 
-
-resilient_lock = threading.Lock()
 
 def _setup_resilient_mode(bot):
     original_send_msg = bot.rpc.send_msg

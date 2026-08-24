@@ -190,6 +190,7 @@ class TestBouncerBot(unittest.TestCase):
             mock_send.reset_mock()
             mock_bot.rpc.send_edit_request.reset_mock()
 
+            database.record_cmping_server_up("node2.cc", int(time.time()))
             bot._cmping_server_status["node2.cc"] = True
             bot._cmping_server_errors.pop("node2.cc", None)
             bot._sync_cmping_incident_alerts(mock_bot, 1, all_servers)
@@ -617,10 +618,85 @@ class TestBouncerBot(unittest.TestCase):
 
         # 4. Status change (cm2 also goes down) -> immediate edit
         mock_bot.rpc.send_edit_request.reset_mock()
+        database.record_cmping_server_down("cm2.test.org", int(time.time()), "Connection refused")
         bot._cmping_server_status["cm2.test.org"] = False
         bot._cmping_server_errors["cm2.test.org"] = "Connection refused"
         bot._sync_cmping_incident_alerts(mock_bot, 1, servers, force_update=False)
         mock_bot.rpc.send_edit_request.assert_called_once()
+
+    def test_cmping_incident_split_after_one_hour_gap(self):
+        chat_id = 7722
+        database.add_cmping_report_chat(chat_id)
+        servers = ["srv1.test.org", "srv2.test.org"]
+
+        mock_bot = MagicMock()
+        bot.dc_accid = 1
+        t0 = 1000000
+
+        # 1. Srv 1 goes down at t0 -> Incident #1 created
+        with patch('time.time', return_value=t0), patch.object(bot, '_send', return_value=70001):
+            database.record_cmping_server_down("srv1.test.org", t0, "Timeout")
+            bot._cmping_server_status = {"srv1.test.org": False, "srv2.test.org": True}
+            bot._cmping_server_errors = {"srv1.test.org": "Timeout"}
+            bot._cmping_incident_last_edit_state.clear()
+            bot._sync_cmping_incident_alerts(mock_bot, 1, servers)
+
+        active_incs = database.get_all_active_cmping_incidents()
+        self.assertEqual(len(active_incs), 1)
+        inc1_id = active_incs[0]["id"]
+        database.set_cmping_incident_msg_id(inc1_id, chat_id, 70001)
+
+        # 2. Srv 2 goes down at t0 + 4000s (> 1 hour gap) -> Incident #2 created!
+        t1 = t0 + 4000
+        with patch('time.time', return_value=t1), patch.object(bot, '_send', return_value=70002):
+            database.record_cmping_server_down("srv2.test.org", t1, "Refused")
+            bot._cmping_server_status["srv2.test.org"] = False
+            bot._cmping_server_errors["srv2.test.org"] = "Refused"
+            bot._sync_cmping_incident_alerts(mock_bot, 1, servers)
+
+        active_incs = database.get_all_active_cmping_incidents()
+        self.assertEqual(len(active_incs), 2)
+        inc2_id = active_incs[1]["id"]
+        database.set_cmping_incident_msg_id(inc2_id, chat_id, 70002)
+
+        # 3. Srv 2 recovers at t1 + 300s -> Incident #2 resolves, Incident #1 remains active
+        t2 = t1 + 300
+        mock_bot.rpc.send_edit_request.reset_mock()
+
+        with patch('time.time', return_value=t2):
+            database.record_cmping_server_up("srv2.test.org", t2)
+            bot._cmping_server_status["srv2.test.org"] = True
+            bot._cmping_server_errors.pop("srv2.test.org", None)
+            bot._sync_cmping_incident_alerts(mock_bot, 1, servers)
+
+        resolved_calls = [c for c in mock_bot.rpc.send_edit_request.call_args_list if c[0][1] == 70002]
+        self.assertEqual(len(resolved_calls), 1)
+        self.assertIn(f"Incident #{inc2_id}", resolved_calls[0][0][2])
+        self.assertIn("Resolved", resolved_calls[0][0][2])
+        self.assertIn("srv2.test.org", resolved_calls[0][0][2])
+
+        active_incs = database.get_all_active_cmping_incidents()
+        self.assertEqual(len(active_incs), 1)
+        self.assertEqual(active_incs[0]["id"], inc1_id)
+
+        # 4. Srv 1 recovers at t2 + 500s -> Incident #1 resolves
+        t3 = t2 + 500
+        mock_bot.rpc.send_edit_request.reset_mock()
+
+        with patch('time.time', return_value=t3):
+            database.record_cmping_server_up("srv1.test.org", t3)
+            bot._cmping_server_status["srv1.test.org"] = True
+            bot._cmping_server_errors.pop("srv1.test.org", None)
+            bot._sync_cmping_incident_alerts(mock_bot, 1, servers)
+
+        resolved_calls = [c for c in mock_bot.rpc.send_edit_request.call_args_list if c[0][1] == 70001]
+        self.assertEqual(len(resolved_calls), 1)
+        self.assertIn(f"Incident #{inc1_id}", resolved_calls[0][0][2])
+        self.assertIn("Resolved", resolved_calls[0][0][2])
+        self.assertIn("srv1.test.org", resolved_calls[0][0][2])
+
+        active_incs = database.get_all_active_cmping_incidents()
+        self.assertEqual(len(active_incs), 0)
 
 if __name__ == '__main__':
     unittest.main()
