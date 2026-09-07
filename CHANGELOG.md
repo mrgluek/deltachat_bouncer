@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.8.2] - 2026-09-07
+
+### Added
+- **Options.json Fallback for Display Name & Status Text**:
+  - `on_init` now checks `/data/options.json` fallback when `DISPLAY_NAME` or `STATUS_TEXT` are not set in environment variables.
+
 ## [2.8.1] - 2026-08-24
 
 ### Added
