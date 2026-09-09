@@ -8,8 +8,14 @@ _lock = threading.Lock()
 
 def init_db():
     with _lock:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10.0)
         cursor = conn.cursor()
+        
+        # Performance & Concurrency PRAGMAs
+        cursor.execute("PRAGMA journal_mode = WAL")
+        cursor.execute("PRAGMA synchronous = NORMAL")
+        cursor.execute("PRAGMA busy_timeout = 5000")
+        cursor.execute("PRAGMA cache_size = -4000")
         
         # Config table for admin_dc_email, admin_dc_fingerprint, last_run, etc.
         cursor.execute('''
@@ -228,6 +234,12 @@ def init_db():
             )
         ''')
 
+        # Additional query performance indexes
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_autokick_warnings_chat ON autokick_warnings(chat_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_pending_requests_chat ON pending_requests(chat_id, approved)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_away_notif_updated ON away_notifications(away_updated_at)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_cmping_history_checked ON cmping_history(checked_at)')
+
         conn.commit()
         conn.close()
 
@@ -445,46 +457,117 @@ def ensure_contact_first_seen(contact_id: int, timestamp: float):
         conn.commit()
         conn.close()
 
+_transport_stats_buffer: dict[str, dict[str, int]] = {}
+_transport_stats_lock = threading.Lock()
+_last_transport_flush = time.time()
+TRANSPORT_FLUSH_INTERVAL = 30.0  # seconds
+
 def increment_transport_sent(addr: str):
-    """Increment the sent counter for a transport address."""
-    with _lock:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO transport_stats (addr, msgs_sent, msgs_received, last_sent_at)
-            VALUES (?, 1, 0, CAST(strftime('%s','now') AS INTEGER))
-            ON CONFLICT(addr) DO UPDATE SET
-                msgs_sent = msgs_sent + 1,
-                last_sent_at = CAST(strftime('%s','now') AS INTEGER)
-        ''', (addr,))
-        conn.commit()
-        conn.close()
+    """Increment the sent counter for a transport address (buffered in memory)."""
+    if not addr:
+        return
+    now = int(time.time())
+    should_flush = False
+    with _transport_stats_lock:
+        if addr not in _transport_stats_buffer:
+            _transport_stats_buffer[addr] = {"sent": 0, "recv": 0, "last_sent": 0, "last_recv": 0}
+        _transport_stats_buffer[addr]["sent"] += 1
+        _transport_stats_buffer[addr]["last_sent"] = now
+        global _last_transport_flush
+        if now - _last_transport_flush >= TRANSPORT_FLUSH_INTERVAL:
+            should_flush = True
+    if should_flush:
+        flush_transport_stats()
 
 def increment_transport_received(addr: str):
-    """Increment the received counter for a transport address."""
+    """Increment the received counter for a transport address (buffered in memory)."""
+    if not addr:
+        return
+    now = int(time.time())
+    should_flush = False
+    with _transport_stats_lock:
+        if addr not in _transport_stats_buffer:
+            _transport_stats_buffer[addr] = {"sent": 0, "recv": 0, "last_sent": 0, "last_recv": 0}
+        _transport_stats_buffer[addr]["recv"] += 1
+        _transport_stats_buffer[addr]["last_recv"] = now
+        global _last_transport_flush
+        if now - _last_transport_flush >= TRANSPORT_FLUSH_INTERVAL:
+            should_flush = True
+    if should_flush:
+        flush_transport_stats()
+
+def flush_transport_stats():
+    """Flush buffered transport stats to the database in a single transaction."""
+    global _last_transport_flush
+    with _transport_stats_lock:
+        if not _transport_stats_buffer:
+            _last_transport_flush = time.time()
+            return
+        pending = dict(_transport_stats_buffer)
+        _transport_stats_buffer.clear()
+        _last_transport_flush = time.time()
+
     with _lock:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10.0)
         cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO transport_stats (addr, msgs_sent, msgs_received, last_received_at)
-            VALUES (?, 0, 1, CAST(strftime('%s','now') AS INTEGER))
-            ON CONFLICT(addr) DO UPDATE SET
-                msgs_received = msgs_received + 1,
-                last_received_at = CAST(strftime('%s','now') AS INTEGER)
-        ''', (addr,))
+        for addr, counts in pending.items():
+            sent = counts["sent"]
+            recv = counts["recv"]
+            last_s = counts["last_sent"] or None
+            last_r = counts["last_recv"] or None
+            cursor.execute('''
+                INSERT INTO transport_stats (addr, msgs_sent, msgs_received, last_sent_at, last_received_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(addr) DO UPDATE SET
+                    msgs_sent = msgs_sent + excluded.msgs_sent,
+                    msgs_received = msgs_received + excluded.msgs_received,
+                    last_sent_at = COALESCE(excluded.last_sent_at, transport_stats.last_sent_at),
+                    last_received_at = COALESCE(excluded.last_received_at, transport_stats.last_received_at)
+            ''', (addr, sent, recv, last_s, last_r))
         conn.commit()
         conn.close()
 
 def get_all_transport_stats() -> list[dict]:
-    """Get statistics for all tracked transports."""
+    """Get statistics for all tracked transports (flushes buffer first)."""
+    flush_transport_stats()
     with _lock:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10.0)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM transport_stats ORDER BY msgs_sent + msgs_received DESC")
         rows = cursor.fetchall()
         conn.close()
         return [dict(r) for r in rows]
+
+def cleanup_old_records(retention_days: int = 30) -> dict[str, int]:
+    """Prune historical tables to keep database compact and performant.
+    Returns count of removed rows per table.
+    """
+    now = time.time()
+    cutoff_ts = now - (retention_days * 86400)
+    cleaned = {}
+    with _lock:
+        conn = sqlite3.connect(DB_PATH, timeout=10.0)
+        cursor = conn.cursor()
+        
+        # 1. Old away notifications (debounce tracking)
+        cursor.execute("DELETE FROM away_notifications WHERE away_updated_at < ?", (cutoff_ts,))
+        cleaned["away_notifications"] = cursor.rowcount
+        
+        # 2. Old cmping history
+        cursor.execute("DELETE FROM cmping_history WHERE checked_at < ?", (cutoff_ts,))
+        cleaned["cmping_history"] = cursor.rowcount
+
+        # 3. Clean autokick warnings for chats where autokick is disabled
+        cursor.execute("""
+            DELETE FROM autokick_warnings 
+            WHERE chat_id NOT IN (SELECT chat_id FROM chats WHERE autokick_days > 0)
+        """)
+        cleaned["autokick_warnings"] = cursor.rowcount
+
+        conn.commit()
+        conn.close()
+    return cleaned
 
 def add_catalog_chat(chat_id: int, name: str, description: str, member_count: int):
     with _lock:

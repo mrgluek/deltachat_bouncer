@@ -1155,5 +1155,136 @@ class TestBouncerBot(unittest.TestCase):
             self.assertNotIn(70, c_ids)
             self.assertEqual(len(kick_candidates), 0)
 
+    def test_resilient_lock_defined_and_usable(self):
+        """Verify resilient_lock exists as a threading.Lock and functions properly."""
+        self.assertTrue(hasattr(bot, 'resilient_lock'))
+        import threading
+        # Ensure it behaves as a lock
+        acquired = bot.resilient_lock.acquire(timeout=1.0)
+        self.assertTrue(acquired)
+        bot.resilient_lock.release()
+
+    def test_cmping_domain_validation(self):
+        """Verify domain validation rejects invalid strings and potential command injections."""
+        mock_bot = MagicMock()
+        mock_event = MagicMock()
+        mock_event.msg.chat_id = 9010
+        mock_event.msg.id = 111
+
+        with patch('bot._send') as mock_send, patch('bot._react'):
+            # Invalid domains
+            for bad in ["bad;rm-rf", "domain..com", "-invalid.com", "foo/bar"]:
+                mock_event.payload = bad
+                bot.cmping_command(mock_bot, 1, mock_event)
+                mock_send.assert_called()
+                last_call_text = mock_send.call_args[0][3]
+                self.assertIn("Invalid server domain", last_call_text)
+
+            # Too many arguments check
+            mock_event.payload = "server1.org server2.org server3.org"
+            bot.cmping_command(mock_bot, 1, mock_event)
+            last_call_text = mock_send.call_args[0][3]
+            self.assertIn("Only 1 or 2 server parameters are supported", last_call_text)
+
+            # Valid domain
+            with patch('bot._get_bot_domains', return_value=["relay1.org"]), patch('threading.Thread') as mock_thread:
+                bot._chat_cmping_anti_spam.clear()
+                mock_event.payload = "chatmail.example.org"
+                bot.cmping_command(mock_bot, 1, mock_event)
+                mock_thread.assert_called()
+
+    def test_addtransport_private_chat_enforcement(self):
+        """Verify /addtransport is rejected in group chats to protect credentials."""
+        mock_bot = MagicMock()
+        mock_event = MagicMock()
+        mock_event.msg.chat_id = 9020
+        mock_event.msg.from_id = 10  # Admin
+        mock_event.payload = "user@example.com secret123"
+
+        with patch('bot._is_dc_admin', return_value=True), patch('bot._send') as mock_send:
+            # When run in a Group chat
+            mock_bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Group"}
+            bot.addtransport_command(mock_bot, 1, mock_event)
+            mock_send.assert_called()
+            sent_text = mock_send.call_args[0][3]
+            self.assertIn("private 1-on-1 chat", sent_text)
+            mock_bot.rpc.add_or_update_transport.assert_not_called()
+
+            # When run in a Single (private 1-on-1) chat
+            mock_send.reset_mock()
+            mock_bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Single"}
+            bot.addtransport_command(mock_bot, 1, mock_event)
+            mock_bot.rpc.add_or_update_transport.assert_called_with(1, {"addr": "user@example.com", "password": "secret123"})
+            sent_text = mock_send.call_args[0][3]
+            self.assertIn("Backup transport `user@example.com` added", sent_text)
+
+    def test_slap_cooldown_anti_spam(self):
+        """Verify /slap enforces cooldown for non-admin users."""
+        mock_bot = MagicMock()
+        mock_event = MagicMock()
+        mock_event.msg.chat_id = 9030
+        mock_event.msg.from_id = 55  # Non-admin
+        mock_event.msg.id = 100
+        mock_event.payload = "someone"
+
+        bot._chat_slap_anti_spam.clear()
+        with patch('bot._is_dc_admin', return_value=False), patch('bot._send') as mock_send:
+            # First slap proceeds
+            bot.slap_command(mock_bot, 1, mock_event)
+            self.assertIn(9030, bot._chat_slap_anti_spam)
+
+            # Immediate second slap is blocked by cooldown
+            mock_send.reset_mock()
+            bot.slap_command(mock_bot, 1, mock_event)
+            mock_send.assert_called()
+            sent_text = mock_send.call_args[0][3]
+            self.assertIn("Please wait", sent_text)
+
+    def test_transport_stats_buffering_and_flushing(self):
+        """Verify transport sent/received stats are buffered and written to DB on flush."""
+        addr = "relay_buffered@example.com"
+        # Clear buffer and reset flush timer
+        database._transport_stats_buffer.clear()
+        database._last_transport_flush = time.time()
+
+        database.increment_transport_sent(addr)
+        database.increment_transport_sent(addr)
+        database.increment_transport_received(addr)
+
+        # Before flush, buffer contains counts
+        self.assertIn(addr, database._transport_stats_buffer)
+        self.assertEqual(database._transport_stats_buffer[addr]["sent"], 2)
+        self.assertEqual(database._transport_stats_buffer[addr]["recv"], 1)
+
+        # get_all_transport_stats automatically flushes buffer
+        stats = database.get_all_transport_stats()
+        matching = [s for s in stats if s['addr'] == addr]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]['msgs_sent'], 2)
+        self.assertEqual(matching[0]['msgs_received'], 1)
+
+    def test_database_cleanup_old_records(self):
+        """Verify cleanup_old_records prunes away notifications and cmping history older than threshold."""
+        now = time.time()
+        old_ts = now - (35 * 86400)   # 35 days ago (should be cleaned)
+        recent_ts = now - (5 * 86400) # 5 days ago (should be kept)
+
+        # Add away notification
+        database.mark_notified_away(101, 201, old_ts)
+        database.mark_notified_away(102, 202, recent_ts)
+
+        # Add cmping history
+        database.add_cmping_history("src1.org", "dst1.org", 120.0, checked_at=old_ts)
+        database.add_cmping_history("src2.org", "dst2.org", 150.0, checked_at=recent_ts)
+
+        cleaned = database.cleanup_old_records(retention_days=30)
+        self.assertGreaterEqual(cleaned.get("away_notifications", 0), 1)
+        self.assertGreaterEqual(cleaned.get("cmping_history", 0), 1)
+
+        # Recent records must still exist
+        self.assertTrue(database.has_notified_away(102, 202, recent_ts))
+        avg, count = database.get_average_ping_for_server("src2.org")
+        self.assertEqual(count, 1)
+
 if __name__ == '__main__':
     unittest.main()

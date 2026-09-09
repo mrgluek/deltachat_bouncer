@@ -65,7 +65,8 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/chat<ID> [message]` — Request an invite link to the group (Private chat only).
 - `/dchannels` — Show the catalog of registered Delta Chat channels.
 - `/dchannel<ID>` — Request the invite link to a channel.
-- `/cmping <server1> ...` — Ping mail relays to/from specified target servers (15s cooldown).
+- `/cmping <server1> ...` — Ping mail relays to/from specified target servers (15s cooldown, domain-validated).
+- `/slap [username]` — Slap a user with a large trout (or reply to a message; 15s cooldown).
 - `/approve<ID>` — Approve a pending join request for a private group (Group chat only).
 - `/decline<ID> [reason]` — Decline a pending join request for a private group with an optional reason (Group chat only).
 - `/contact<ID>` — Get a contact object for the given ID (e.g., `/contact123`).
@@ -83,7 +84,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/private <on/off>` — Toggle cataloged chat privacy status (Admin only).
 - `/welcome [on/off/on <text>]` — Configure welcome messages for new members (Admin only).
 - `/transports` — Show configured mail relays & stats (Admin only).
-- `/addtransport` — Add a backup mail relay (Admin only).
+- `/addtransport` — Add a backup mail relay (Admin only, private 1-on-1 chat only for credential security).
 - `/rmtransport <addr>` — Remove a mail relay (Admin only).
 - `/setprimary <addr>` — Switch the primary mail relay (Admin only).
 - `/resilient` — Toggle resilient sending mode across all relays (Admin only).

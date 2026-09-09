@@ -22,7 +22,7 @@ import database
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
 
-VERSION = "2.9.0"
+VERSION = "2.9.1"
 
 
 def log_version_info(bot):
@@ -73,9 +73,11 @@ _chat_anti_spam: dict[int, float] = {}
 _chat_relays_anti_spam: dict[int, float] = {}
 _chat_search_anti_spam: dict[int, float] = {}
 _chat_cmping_anti_spam: dict[int, float] = {}
+_chat_slap_anti_spam: dict[int, float] = {}
 _domain_locks: dict[str, threading.Lock] = {}
 _domain_locks_lock = threading.Lock()
 _cmping_global_lock = threading.Lock()
+resilient_lock = threading.Lock()
 
 # CMPing monitoring state
 _cmping_monitor_idx_db = database.get_config("cmping_monitor_index")
@@ -112,9 +114,28 @@ def _get_domain_lock(domain: str) -> threading.Lock:
             _domain_locks[domain] = threading.Lock()
         return _domain_locks[domain]
 
+def _prune_anti_spam_dicts():
+    """Prune anti-spam entries older than 3600 seconds to prevent memory growth."""
+    now = time.time()
+    cutoff = now - 3600
+    for spam_dict in (_chat_anti_spam, _chat_relays_anti_spam, _chat_search_anti_spam, _chat_cmping_anti_spam, _chat_slap_anti_spam):
+        expired = [cid for cid, ts in list(spam_dict.items()) if ts < cutoff]
+        for cid in expired:
+            spam_dict.pop(cid, None)
+
+def _prune_domain_locks(active_domains: set[str]):
+    """Remove locks for domains that are no longer monitored."""
+    with _domain_locks_lock:
+        stale = [d for d in list(_domain_locks.keys()) if d not in active_domains]
+        for d in stale:
+            _domain_locks.pop(d, None)
+
 BOUNCE_COOLDOWN_SECONDS = 60   # 1 minute for general commands (/bounce, /top, /relays)
 SEARCH_COOLDOWN_SECONDS = 10   # 10 seconds for /search command
 CMPING_COOLDOWN_SECONDS = 15   # 15 seconds for /cmping command
+SLAP_COOLDOWN_SECONDS = 15     # 15 seconds for /slap command
+
+DOMAIN_REGEX = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)+$')
 
 REGULAR_MAIL_DOMAINS = {
     "yandex.ru", "yandex.com", "ya.ru",
@@ -155,7 +176,8 @@ def _get_contact_fingerprint(bot, accid, contact_id, contact=None):
                 t_addr = t.get('addr', '') if isinstance(t, dict) else getattr(t, 'addr', '')
                 if t_addr:
                     bot_addrs.append(t_addr.lower().strip())
-        except: pass
+        except Exception:
+            pass
         
         if bot_addrs:
             for args in [(accid, contact_id), (contact_id,)]:
@@ -227,18 +249,18 @@ def _is_dc_admin(bot, accid, contact_id):
         admin_fp = database.get_admin_fingerprint()
         if admin_fp:
             c_fp = _get_contact_fingerprint(bot, accid, contact_id, contact=contact)
-            logger.info(f"Admin check (FP) for {contact_id}: stored={admin_fp}, contact={c_fp}")
+            logger.debug(f"Admin check (FP) for {contact_id}: stored={admin_fp}, contact={c_fp}")
             if c_fp:
                 if admin_fp.upper() in c_fp.upper().split(','):
                     return True
             
-            logger.info(f"Admin check: Fingerprint mismatch or missing for {contact_id}")
+            logger.debug(f"Admin check: Fingerprint mismatch or missing for {contact_id}")
             return False
         
         # 2. Check email
         sender_email = contact.address
         admin_email = database.get_config("admin_dc_email")
-        logger.info(f"Admin check (Email) for {contact_id}: stored={admin_email}, contact={sender_email}")
+        logger.debug(f"Admin check (Email) for {contact_id}: stored={admin_email}, contact={sender_email}")
         if admin_email and sender_email and admin_email.lower().strip() == sender_email.lower().strip():
             return True
             
@@ -347,7 +369,7 @@ def _get_top_posters_report(bot, accid, chat_id):
             name = contact.name or contact.display_name or "Unknown"
             medal = medals[i] if i < len(medals) else f"{i+1}."
             report += f"{medal} **{name}**: {count} msgs\n"
-        except:
+        except Exception:
             continue
     return report
 
@@ -665,6 +687,24 @@ def _background_monitor_loop(bot, accid):
             
             # Refresh member counts for all catalog chats and channels
             _refresh_catalog_member_counts(bot, accid)
+
+            # Periodic cleanup of old records and flush transport statistics
+            try:
+                database.flush_transport_stats()
+                cleaned = database.cleanup_old_records(retention_days=30)
+                if any(cleaned.values()):
+                    logger.info(f"Database periodic cleanup completed: {cleaned}")
+            except Exception as clean_err:
+                logger.warning(f"Error during periodic DB cleanup: {clean_err}")
+
+            # Prune anti-spam timestamps and unused domain locks
+            try:
+                _prune_anti_spam_dicts()
+                bot_domains = set(_get_bot_domains(bot, accid))
+                mon_domains = set(database.get_all_cmping_monitors())
+                _prune_domain_locks(bot_domains | mon_domains)
+            except Exception as prune_err:
+                logger.warning(f"Error during memory pruning: {prune_err}")
             
         except Exception as e:
             logger.error(f"Background loop error: {e}")
@@ -1218,7 +1258,8 @@ def _setup_resilient_mode(bot):
 
         # 1. Send the message normally via the current primary transport (non-blocking queueing)
         try:
-            msg_id = original_send_msg(account_id, chat_id, msg_data)
+            with resilient_lock:
+                msg_id = original_send_msg(account_id, chat_id, msg_data)
             bot.logger.info(f"Resilient send: initial msg queued with ID {msg_id} on transport {initial_addr}.")
         except Exception as send_err:
             bot.logger.error(f"Resilient send: failed to queue initial message: {send_err}")
@@ -1648,16 +1689,22 @@ def on_start(bot, args):
     from deltachat2 import SpecialContactId, Bot, EventType
     from deltachat2.transport import JsonRpcError
 
-    _processed_msg_ids = set()
+    from collections import OrderedDict
+    _processed_msg_ids = OrderedDict()
+
+    def _is_and_mark_processed(msgid: int) -> bool:
+        if msgid in _processed_msg_ids:
+            return True
+        _processed_msg_ids[msgid] = True
+        while len(_processed_msg_ids) > 2000:
+            _processed_msg_ids.popitem(last=False)
+        return False
 
     def custom_process_messages(accid: int, retry=True) -> None:
         try:
             for msgid in bot.rpc.get_next_msgs(accid):
-                if msgid in _processed_msg_ids:
+                if _is_and_mark_processed(msgid):
                     continue
-                _processed_msg_ids.add(msgid)
-                if len(_processed_msg_ids) > 1000:
-                    _processed_msg_ids.clear()
                 msg = bot.rpc.get_message(accid, msgid)
                 outgoing = msg.from_id == SpecialContactId.SELF
                 logger.debug(f"custom_process_messages: msgid={msgid}, from_id={msg.from_id}, is_info={msg.is_info}, text={msg.text!r}")
@@ -1672,11 +1719,8 @@ def on_start(bot, args):
                 custom_process_messages(accid, False)
 
     def custom_process_message(accid: int, msgid: int) -> None:
-        if msgid in _processed_msg_ids:
+        if _is_and_mark_processed(msgid):
             return
-        _processed_msg_ids.add(msgid)
-        if len(_processed_msg_ids) > 1000:
-            _processed_msg_ids.clear()
         try:
             msg = bot.rpc.get_message(accid, msgid)
             outgoing = msg.from_id == SpecialContactId.SELF
@@ -2155,7 +2199,7 @@ def kick_command(bot, accid, event):
         chat_contacts = bot.rpc.get_chat_contacts(accid, msg.chat_id)
     except Exception as e:
         logger.error(f"Failed to get chat contacts in /kick: {e}")
-        _send(bot, accid, msg.chat_id, f"❌ Failed to retrieve group members: {e}")
+        _send(bot, accid, msg.chat_id, "❌ Failed to retrieve group members.")
         return
 
     chat_contact_set = set(chat_contacts)
@@ -2231,7 +2275,7 @@ def kick_command(bot, accid, event):
             kicked_success.append(f"• **{name}** ({address}) [ID: {cid}]")
         except Exception as e:
             logger.error(f"Failed to kick contact {cid} from chat {msg.chat_id}: {e}")
-            kicked_failed.append(f"• ID {cid}: {e}")
+            kicked_failed.append(f"• ID {cid}: Failed to remove from group.")
 
     reply_parts = []
     if kicked_success:
@@ -2245,6 +2289,16 @@ def kick_command(bot, accid, event):
 @dc_cli.on(events.NewMessage(command="/slap"))
 def slap_command(bot, accid, event):
     msg = event.msg
+    now = time.time()
+    if not _is_dc_admin(bot, accid, msg.from_id):
+        last_slap = _chat_slap_anti_spam.get(msg.chat_id, 0)
+        diff = now - last_slap
+        if diff < SLAP_COOLDOWN_SECONDS:
+            remaining_sec = max(1, int(SLAP_COOLDOWN_SECONDS - diff))
+            _send(bot, accid, msg.chat_id, f"⌛️ Please wait {remaining_sec}s before using /slap again.")
+            return
+
+    _chat_slap_anti_spam[msg.chat_id] = now
     query = event.payload.strip() if event.payload else ""
     
     # Check if this is a reply to another message
@@ -2821,7 +2875,7 @@ def invite_command(bot, accid, event):
                     
     except Exception as e:
         logger.error(f"Failed to generate invite: {e}")
-        _send(bot, accid, msg.chat_id, f"❌ Failed to generate invite link: {e}")
+        _send(bot, accid, msg.chat_id, "❌ Failed to generate invite link. Please try again later.")
 
 @dc_cli.on(events.NewMessage(command="/transports"))
 def transports_command(bot, accid, event):
@@ -2932,6 +2986,17 @@ def addtransport_command(bot, accid, event):
         return
 
     payload = event.payload.strip() if event.payload else ""
+    # Require private chat for password protection
+    try:
+        chat = bot.rpc.get_basic_chat_info(accid, msg.chat_id)
+        chat_type = chat.get('chat_type', 'Single') if isinstance(chat, dict) else getattr(chat, 'chat_type', 'Single')
+    except Exception:
+        chat_type = 'Single'
+
+    if str(chat_type) != 'Single':
+        _send(bot, accid, msg.chat_id, "🔒 For security reasons, /addtransport can only be used in a private 1-on-1 chat with the bot.")
+        return
+
     if not payload:
         _send(bot, accid, msg.chat_id, 
             "Usage:\n"
@@ -2956,7 +3021,8 @@ def addtransport_command(bot, accid, event):
             bot.rpc.add_or_update_transport(accid, {"addr": addr, "password": password})
             _send(bot, accid, msg.chat_id, f"✅ Backup transport `{addr}` added.")
     except Exception as e:
-        _send(bot, accid, msg.chat_id, f"❌ Failed to add transport: {e}")
+        logger.error(f"Failed to add transport: {e}")
+        _send(bot, accid, msg.chat_id, "❌ Failed to add transport. Please check your credentials and try again.")
 
 @dc_cli.on(events.NewMessage(command="/setprimary"))
 def setprimary_command(bot, accid, event):
@@ -3130,7 +3196,7 @@ def relays_command(bot, accid, event):
 
     except Exception as e:
         logger.error(f"Error in /relays command: {e}")
-        _send(bot, accid, msg.chat_id, f"❌ Failed to check members: {e}")
+        _send(bot, accid, msg.chat_id, "❌ Failed to check members. Please try again.")
 
 @dc_cli.on(events.NewMessage(command="/chats"))
 def chats_command(bot, accid, event):
@@ -3807,6 +3873,11 @@ def cmping_command(bot, accid, event):
         _send(bot, accid, msg.chat_id, "❌ Only 1 or 2 server parameters are supported. Usage: /cmping <server> OR /cmping <server1> <server2>")
         return
 
+    for s in specified_servers:
+        if not DOMAIN_REGEX.match(s):
+            _send(bot, accid, msg.chat_id, f"❌ Invalid server domain: `{s}`. Please specify a valid domain name.")
+            return
+
     # Update cooldown
     _chat_cmping_anti_spam[msg.chat_id] = now
     
@@ -3842,8 +3913,8 @@ def cmpingadd_command(bot, accid, event):
         return
 
     domain = parts[1].strip().lower()
-    # Basic validation
-    if '.' not in domain or len(domain) < 3:
+    # Validate domain
+    if not DOMAIN_REGEX.match(domain):
         _send(bot, accid, msg.chat_id, f"❌ Invalid domain: {domain}")
         return
 
@@ -3878,6 +3949,9 @@ def cmpingdel_command(bot, accid, event):
         return
 
     domain = parts[1].strip().lower()
+    if not DOMAIN_REGEX.match(domain):
+        _send(bot, accid, msg.chat_id, f"❌ Invalid domain: {domain}")
+        return
     removed = database.remove_cmping_monitor(domain)
     if removed:
         # Clean up last results for this domain
@@ -4787,6 +4861,8 @@ def handle_all_messages(bot, accid, event):
             return
  
     # 2. Handle /approve<ID> command
+    # Architectural Note: /approve and /decline intentionally allow any group member to participate
+    # in membership approval (community-driven self-moderation). No admin check is required.
     elif text.startswith("/approve"):
         m = re.match(r'^/approve(\d+)$', text, re.IGNORECASE)
         if m:
@@ -4835,8 +4911,8 @@ def handle_all_messages(bot, accid, event):
                       
                 _send(bot, accid, msg.chat_id, f"✅ Request approved. A single-use invite link has been sent to **{req['requester_name']}**.")
             except Exception as e:
-                logger.error(f"Failed to approve request: {e}")
-                _send(bot, accid, msg.chat_id, f"❌ Error while approving request: {e}")
+                logger.error(f"Failed to approve request {request_id}: {e}")
+                _send(bot, accid, msg.chat_id, "❌ Error while approving request.")
             return
 
     # 3. Handle /decline<ID> [comment] command
@@ -4878,13 +4954,13 @@ def handle_all_messages(bot, accid, event):
                 _send(bot, accid, user_chat_id, decline_msg)
                 _send(bot, accid, msg.chat_id, f"❌ Request declined. The user has been notified.")
             except Exception as e:
-                logger.error(f"Failed to decline request: {e}")
-                _send(bot, accid, msg.chat_id, f"❌ Error while declining request: {e}")
+                logger.error(f"Failed to decline request {request_id}: {e}")
+                _send(bot, accid, msg.chat_id, "❌ Error while declining request.")
             return
 
     # 3. Original contact sharing logic
     elif text.startswith("/contact"):
-        logger.info(f"DEBUG: Processing contact request: {text}")
+        logger.debug(f"Processing contact request: {text}")
         try:
             id_str = text[8:].strip()
             if id_str.isdigit():
@@ -4901,7 +4977,7 @@ def handle_all_messages(bot, accid, event):
                             continue
                     
                     if contact_id in chat_contact_ids or _is_dc_admin(bot, accid, msg.from_id):
-                        logger.info(f"DEBUG: Sharing contact {contact_id} in chat {msg.chat_id}")
+                        logger.debug(f"Sharing contact {contact_id} in chat {msg.chat_id}")
                         temp_path = None
                         try:
                             # Generate vCard content using core RPC
@@ -4920,19 +4996,19 @@ def handle_all_messages(bot, accid, event):
                                     database.increment_transport_sent(addr)
                             except Exception:
                                 pass
-                            logger.info(f"DEBUG: Successfully shared contact {contact_id}")
+                            logger.debug(f"Successfully shared contact {contact_id}")
                         finally:
                             if temp_path and os.path.exists(temp_path):
                                 try:
                                     os.unlink(temp_path)
                                 except Exception as e:
-                                    logger.warning(f"DEBUG: Failed to delete temp vCard file {temp_path}: {e}")
+                                    logger.warning(f"Failed to delete temp vCard file {temp_path}: {e}")
                     else:
-                        logger.warning(f"DEBUG: User {msg.from_id} tried to access contact {contact_id} not in chat {msg.chat_id}")
+                        logger.warning(f"User {msg.from_id} tried to access contact {contact_id} not in chat {msg.chat_id}")
                 except Exception as e:
-                    logger.error(f"DEBUG: Error in contact security check: {e}")
+                    logger.error(f"Error in contact security check: {e}")
         except Exception as e:
-            logger.error(f"DEBUG: Error parsing contact ID: {e}")
+            logger.error(f"Error parsing contact ID: {e}")
 
 if __name__ == "__main__":
     import sys
