@@ -438,6 +438,14 @@ class TestBouncerBot(unittest.TestCase):
             return cid == 10
 
         with patch('bot._is_dc_admin', side_effect=is_admin_mock), patch.object(bot, '_send') as mock_send:
+            # Without warnings, NO ONE should be kicked
+            kicked_unwarned = bot._perform_autokick_for_chat(mock_bot, 1, chat_id, days=90)
+            self.assertEqual(len(kicked_unwarned), 0)
+
+            # Record warnings for 30 and 40 given 2 days ago (> 24h grace period)
+            database.record_autokick_warning(chat_id, 30, now - (2 * 86400))
+            database.record_autokick_warning(chat_id, 40, now - (2 * 86400))
+
             kicked = bot._perform_autokick_for_chat(mock_bot, 1, chat_id, days=90)
             self.assertEqual(len(kicked), 2)
             kicked_ids = [m["id"] for m in kicked]
@@ -446,6 +454,10 @@ class TestBouncerBot(unittest.TestCase):
             self.assertNotIn(1, kicked_ids)
             self.assertNotIn(10, kicked_ids)
             self.assertNotIn(20, kicked_ids)
+
+            # Verify warnings were cleared upon kick
+            self.assertIsNone(database.get_autokick_warning(chat_id, 30))
+            self.assertIsNone(database.get_autokick_warning(chat_id, 40))
 
             # Verify remove_contact_from_chat calls
             mock_bot.rpc.remove_contact_from_chat.assert_any_call(1, chat_id, 30)
@@ -814,6 +826,334 @@ class TestBouncerBot(unittest.TestCase):
         self.assertIn(f"Incident #{inc1_id}", edit_args[2])
         self.assertIn("Resolved", edit_args[2])
         self.assertEqual(len(database.get_all_active_cmping_incidents()), 0)
+
+    def test_autokick_database_warnings_and_ignored_fingerprints(self):
+        chat_id = 9911
+        cid1 = 301
+        cid2 = 302
+        now = time.time()
+
+        # Test warn_at
+        self.assertEqual(database.get_chat_last_autokick_warn_at(chat_id), 0.0)
+        database.set_chat_last_autokick_warn_at(chat_id, now)
+        self.assertAlmostEqual(database.get_chat_last_autokick_warn_at(chat_id), now, delta=1.0)
+
+        # Test warnings
+        self.assertIsNone(database.get_autokick_warning(chat_id, cid1))
+        database.record_autokick_warning(chat_id, cid1, now)
+        self.assertAlmostEqual(database.get_autokick_warning(chat_id, cid1), now, delta=1.0)
+
+        database.record_autokick_warning(chat_id, cid2, now + 10)
+        self.assertIsNotNone(database.get_autokick_warning(chat_id, cid2))
+
+        # Clear one
+        database.clear_autokick_warning(chat_id, cid1)
+        self.assertIsNone(database.get_autokick_warning(chat_id, cid1))
+        self.assertIsNotNone(database.get_autokick_warning(chat_id, cid2))
+
+        # Clear chat
+        database.clear_chat_autokick_warnings(chat_id)
+        self.assertIsNone(database.get_autokick_warning(chat_id, cid2))
+
+        # Test ignored fingerprints
+        fp = "A" * 40
+        self.assertFalse(database.is_fingerprint_autokick_ignored(fp))
+        self.assertTrue(database.add_autokick_ignored_fingerprint(fp, note="TestBot"))
+        self.assertTrue(database.is_fingerprint_autokick_ignored(fp))
+        self.assertTrue(database.is_fingerprint_autokick_ignored("a" * 40))
+
+        all_ignored = database.get_all_autokick_ignored_fingerprints()
+        self.assertEqual(len(all_ignored), 1)
+        self.assertEqual(all_ignored[0][0], fp)
+        self.assertEqual(all_ignored[0][1], "TestBot")
+
+        self.assertTrue(database.remove_autokick_ignored_fingerprint(fp))
+        self.assertFalse(database.is_fingerprint_autokick_ignored(fp))
+        self.assertFalse(database.remove_autokick_ignored_fingerprint(fp))
+
+    def test_get_chat_autokick_warn_threshold(self):
+        self.assertEqual(bot._get_chat_autokick_warn_threshold(90), 83)
+        self.assertEqual(bot._get_chat_autokick_warn_threshold(30), 23)
+        self.assertEqual(bot._get_chat_autokick_warn_threshold(14), 7)
+        self.assertEqual(bot._get_chat_autokick_warn_threshold(7), 6)
+        self.assertEqual(bot._get_chat_autokick_warn_threshold(5), 4)
+        self.assertEqual(bot._get_chat_autokick_warn_threshold(2), 1)
+        self.assertEqual(bot._get_chat_autokick_warn_threshold(1), 1)
+
+    def test_perform_autokick_warnings_private_dm_and_24h_broadcast(self):
+        mock_bot = MagicMock()
+        chat_id = 7050
+        now = time.time()
+        database.set_chat_monitored_since(chat_id, now - (100 * 86400))
+        database.set_chat_autokick(chat_id, 90)
+
+        # Contacts in group:
+        # 10: admin (skip)
+        # 20: active 5d ago (skip)
+        # 30: inactive 85d ago (warning threshold is 83d -> should warn!)
+        # 40: inactive 95d ago (should warn!)
+        mock_bot.rpc.get_chat_contacts.return_value = [10, 20, 30, 40]
+        mock_bot.rpc.create_chat_by_contact_id.side_effect = lambda accid, cid: 9000 + cid
+        mock_bot.rpc.get_basic_chat_info.return_value = {"name": "Test Group"}
+
+        def get_contact_mock(accid, cid):
+            c = MagicMock()
+            c.id = cid
+            if cid == 10:
+                c.name = "Admin"
+                c.address = "admin@example.com"
+                c.last_seen = now - (95 * 86400)
+            elif cid == 20:
+                c.name = "ActiveUser"
+                c.address = "active@example.com"
+                c.last_seen = now - (5 * 86400)
+            elif cid == 30:
+                c.name = "WarnUser"
+                c.address = "warn@example.com"
+                c.last_seen = now - (85 * 86400)
+            elif cid == 40:
+                c.name = "OverdueUser"
+                c.address = "overdue@example.com"
+                c.last_seen = now - (95 * 86400)
+            return c
+
+        mock_bot.rpc.get_contact.side_effect = get_contact_mock
+
+        with patch('bot._is_dc_admin', side_effect=lambda b, a, cid: cid == 10), patch.object(bot, '_send') as mock_send:
+            warned = bot._perform_autokick_warnings_for_chat(mock_bot, 1, chat_id, days=90)
+            self.assertEqual(len(warned), 2)
+            warned_ids = [c["id"] for c in warned]
+            self.assertIn(30, warned_ids)
+            self.assertIn(40, warned_ids)
+
+            # Check that private DMs were sent to 30 and 40
+            mock_bot.rpc.create_chat_by_contact_id.assert_any_call(1, 30)
+            mock_bot.rpc.create_chat_by_contact_id.assert_any_call(1, 40)
+
+            # Check that warnings were recorded in DB
+            self.assertIsNotNone(database.get_autokick_warning(chat_id, 30))
+            self.assertIsNotNone(database.get_autokick_warning(chat_id, 40))
+
+            # Group broadcast was sent
+            self.assertAlmostEqual(database.get_chat_last_autokick_warn_at(chat_id), now, delta=2.0)
+
+            # Second run within 24h: no new DMs and no group broadcast
+            mock_send.reset_mock()
+            mock_bot.rpc.create_chat_by_contact_id.reset_mock()
+            warned2 = bot._perform_autokick_warnings_for_chat(mock_bot, 1, chat_id, days=90)
+            self.assertEqual(len(warned2), 2)
+            mock_bot.rpc.create_chat_by_contact_id.assert_not_called()
+            mock_send.assert_not_called()
+
+    def test_autokick_away_and_ignored_fingerprint_exemptions(self):
+        mock_bot = MagicMock()
+        chat_id = 7060
+        now = time.time()
+        database.set_chat_monitored_since(chat_id, now - (100 * 86400))
+        database.set_chat_autokick(chat_id, 90)
+
+        # Contact 30: inactive 95d, has /away status -> MUST NOT be warned or kicked
+        # Contact 40: inactive 95d, has ignored fingerprint -> MUST NOT be warned or kicked
+        # Contact 50: inactive 95d, normal -> CAN be warned/kicked
+        mock_bot.rpc.get_chat_contacts.return_value = [30, 40, 50]
+        mock_bot.rpc.create_chat_by_contact_id.side_effect = lambda accid, cid: 9000 + cid
+        mock_bot.rpc.get_basic_chat_info.return_value = {"name": "Test Group"}
+
+        fp40 = "B" * 40
+        database.add_autokick_ignored_fingerprint(fp40, note="Bot 40")
+        database.set_away_status(30, "On vacation")
+
+        def get_contact_mock(accid, cid):
+            c = MagicMock()
+            c.id = cid
+            c.last_seen = now - (95 * 86400)
+            if cid == 30:
+                c.name = "AwayUser"
+                c.address = "away@example.com"
+            elif cid == 40:
+                c.name = "IgnoredBot"
+                c.address = "bot@example.com"
+                c.fingerprint = fp40
+            elif cid == 50:
+                c.name = "RegularInactive"
+                c.address = "reg@example.com"
+            return c
+
+        mock_bot.rpc.get_contact.side_effect = get_contact_mock
+
+        with patch('bot._is_dc_admin', return_value=False), patch('bot._get_contact_fingerprint', side_effect=lambda b, a, cid, contact=None: fp40 if cid == 40 else None), patch.object(bot, '_send'):
+            warn_candidates, _ = bot._get_chat_autokick_candidates(mock_bot, 1, chat_id, 90)
+            c_ids = [c["id"] for c in warn_candidates]
+            self.assertNotIn(30, c_ids) # exempt because of /away
+            self.assertNotIn(40, c_ids) # exempt because of ignored fingerprint
+            self.assertIn(50, c_ids)
+
+    def test_bounce_command_with_autokick(self):
+        mock_bot = MagicMock()
+        chat_id = 7070
+        now = time.time()
+        database.set_chat_monitored_since(chat_id, now - (100 * 86400))
+        database.set_chat_autokick(chat_id, 90)
+
+        mock_event = MagicMock()
+        mock_event.msg.chat_id = chat_id
+        mock_event.msg.from_id = 10
+        mock_event.msg.quote = None
+        mock_event.payload = ""
+
+        # Contact 30 is inactive 85d (> 83d warn threshold)
+        mock_bot.rpc.get_chat_contacts.return_value = [1, 10, 30]
+        def get_contact_mock(accid, cid):
+            c = MagicMock()
+            c.id = cid
+            c.display_name = None
+            if cid == 1:
+                c.name = "BotSelf"
+                c.address = "bot@example.com"
+                c.last_seen = now
+            elif cid == 10:
+                c.name = "Admin"
+                c.address = "admin@example.com"
+                c.last_seen = now
+            elif cid == 30:
+                c.name = "WarnUser"
+                c.address = "warn@example.com"
+                c.last_seen = now - (85 * 86400)
+            return c
+        mock_bot.rpc.get_contact.side_effect = get_contact_mock
+
+        with patch('bot._is_dc_admin', side_effect=lambda b, a, cid: cid == 10), patch.object(bot, '_send') as mock_send:
+            bot.bounce_command(mock_bot, 1, mock_event)
+            mock_send.assert_called_once()
+            msg_text = mock_send.call_args[0][3]
+            self.assertIn("Inactivity Warning", msg_text)
+            self.assertIn("WarnUser", msg_text)
+
+    def test_autokick_ignore_and_unignore_commands(self):
+        mock_bot = MagicMock()
+        chat_id = 7080
+        mock_bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Group"}
+        mock_bot.rpc.get_chat_contacts.return_value = [10, 60]
+
+        mock_contact = MagicMock()
+        mock_contact.id = 60
+        mock_contact.name = "ServiceBot"
+        mock_contact.display_name = None
+        mock_contact.address = "service@example.com"
+
+        mock_admin = MagicMock()
+        mock_admin.id = 10
+        mock_admin.name = "Admin"
+        mock_admin.display_name = None
+        mock_admin.address = "admin@example.com"
+
+        def get_contact_mock(accid, cid):
+            if cid == 60:
+                return mock_contact
+            elif cid == 10:
+                return mock_admin
+            return None
+
+        mock_bot.rpc.get_contact.side_effect = get_contact_mock
+
+        fp60 = "C" * 40
+
+        # 1. /autokick ignore service@example.com
+        mock_event = MagicMock()
+        mock_event.msg.chat_id = chat_id
+        mock_event.msg.from_id = 10
+        mock_event.payload = "ignore service@example.com"
+
+        with patch('bot._is_dc_admin', return_value=True), patch('bot._get_contact_fingerprint', return_value=fp60), patch.object(bot, '_send') as mock_send:
+            bot.autokick_command(mock_bot, 1, mock_event)
+            self.assertTrue(database.is_fingerprint_autokick_ignored(fp60))
+            mock_send.assert_called_once()
+            self.assertIn("Added", mock_send.call_args[0][3])
+
+            # 2. /autokick ignore list
+            mock_event.payload = "ignore list"
+            mock_send.reset_mock()
+            bot.autokick_command(mock_bot, 1, mock_event)
+            mock_send.assert_called_once()
+            self.assertIn("Ignored Members/Bots", mock_send.call_args[0][3])
+
+            # 3. /autokick unignore
+            mock_event.payload = f"unignore {fp60}"
+            mock_send.reset_mock()
+            bot.autokick_command(mock_bot, 1, mock_event)
+            self.assertFalse(database.is_fingerprint_autokick_ignored(fp60))
+            mock_send.assert_called_once()
+            self.assertIn("Removed", mock_send.call_args[0][3])
+
+    def test_warning_cleared_when_member_becomes_active(self):
+        mock_bot = MagicMock()
+        chat_id = 7090
+        now = time.time()
+        database.set_chat_monitored_since(chat_id, now - (100 * 86400))
+        database.set_chat_autokick(chat_id, 90)
+
+        # Contact 30 previously received a warning
+        database.record_autokick_warning(chat_id, 30, now - (3 * 86400))
+        self.assertIsNotNone(database.get_autokick_warning(chat_id, 30))
+
+        # Now contact 30 sends a message -> last_seen becomes active (e.g. today)
+        mock_bot.rpc.get_chat_contacts.return_value = [1, 10, 30]
+        def get_contact_mock(accid, cid):
+            c = MagicMock()
+            c.id = cid
+            c.display_name = None
+            if cid == 30:
+                c.name = "ActiveAgain"
+                c.address = "activeagain@example.com"
+                c.last_seen = now # active right now!
+            else:
+                c.name = "Admin"
+                c.address = "admin@example.com"
+                c.last_seen = now
+            return c
+        mock_bot.rpc.get_contact.side_effect = get_contact_mock
+
+        with patch('bot._is_dc_admin', side_effect=lambda b, a, cid: cid == 10), patch.object(bot, '_send'):
+            warn_candidates, kick_candidates = bot._get_chat_autokick_candidates(mock_bot, 1, chat_id, 90)
+            self.assertEqual(len(warn_candidates), 0)
+            self.assertEqual(len(kick_candidates), 0)
+
+            # Warning MUST have been automatically cleared!
+            self.assertIsNone(database.get_autokick_warning(chat_id, 30))
+
+    def test_new_member_grace_period_first_seen(self):
+        mock_bot = MagicMock()
+        chat_id = 7095
+        now = time.time()
+        # Group monitored for 200 days
+        database.set_chat_monitored_since(chat_id, now - (200 * 86400))
+        database.set_chat_autokick(chat_id, 90)
+
+        # Contact 70 just joined 2 days ago (last_seen=0, but first_seen_at = now - 2 days)
+        database.ensure_contact_first_seen(70, now - (2 * 86400))
+
+        mock_bot.rpc.get_chat_contacts.return_value = [1, 10, 70]
+        def get_contact_mock(accid, cid):
+            c = MagicMock()
+            c.id = cid
+            c.display_name = None
+            if cid == 70:
+                c.name = "NewMember"
+                c.address = "new@example.com"
+                c.last_seen = 0
+            else:
+                c.name = "Admin"
+                c.address = "admin@example.com"
+                c.last_seen = now
+            return c
+        mock_bot.rpc.get_contact.side_effect = get_contact_mock
+
+        with patch('bot._is_dc_admin', side_effect=lambda b, a, cid: cid == 10), patch.object(bot, '_send'):
+            warn_candidates, kick_candidates = bot._get_chat_autokick_candidates(mock_bot, 1, chat_id, 90)
+            # New member has only been in the group 2 days (< 83d warning threshold) -> MUST NOT be warned or kicked!
+            c_ids = [c["id"] for c in warn_candidates]
+            self.assertNotIn(70, c_ids)
+            self.assertEqual(len(kick_candidates), 0)
 
 if __name__ == '__main__':
     unittest.main()

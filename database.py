@@ -32,6 +32,27 @@ def init_db():
         columns = [info[1] for info in cursor.fetchall()]
         if "autokick_days" not in columns:
             cursor.execute("ALTER TABLE chats ADD COLUMN autokick_days INTEGER DEFAULT 0")
+        if "last_autokick_warn_at" not in columns:
+            cursor.execute("ALTER TABLE chats ADD COLUMN last_autokick_warn_at REAL DEFAULT 0")
+
+        # Autokick warnings tracking (per chat and contact)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS autokick_warnings (
+                chat_id INTEGER,
+                contact_id INTEGER,
+                warned_at REAL,
+                PRIMARY KEY (chat_id, contact_id)
+            )
+        ''')
+
+        # Autokick ignored cryptographic fingerprints
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS autokick_ignored_fingerprints (
+                fingerprint TEXT PRIMARY KEY,
+                note TEXT,
+                added_at REAL
+            )
+        ''')
 
         # Transport statistics
         cursor.execute('''
@@ -279,6 +300,120 @@ def get_all_autokick_chats() -> list[tuple[int, int]]:
         rows = cursor.fetchall()
         conn.close()
         return [(r[0], r[1]) for r in rows]
+
+def get_chat_last_autokick_warn_at(chat_id: int) -> float:
+    """Get the timestamp of the last 24h daily autokick warning broadcast in this chat."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT last_autokick_warn_at FROM chats WHERE chat_id = ?", (chat_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if (row and row[0] is not None) else 0.0
+
+def set_chat_last_autokick_warn_at(chat_id: int, timestamp: float):
+    """Set the timestamp of the last 24h daily autokick warning broadcast in this chat."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM chats WHERE chat_id = ?", (chat_id,))
+        if cursor.fetchone():
+            cursor.execute("UPDATE chats SET last_autokick_warn_at = ? WHERE chat_id = ?", (timestamp, chat_id))
+        else:
+            cursor.execute("INSERT INTO chats (chat_id, monitored_since, autokick_days, last_autokick_warn_at) VALUES (?, ?, 0, ?)", (chat_id, time.time(), timestamp))
+        conn.commit()
+        conn.close()
+
+def record_autokick_warning(chat_id: int, contact_id: int, timestamp: float):
+    """Record that an autokick warning was issued for a contact in a chat."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO autokick_warnings (chat_id, contact_id, warned_at) VALUES (?, ?, ?)",
+            (chat_id, contact_id, timestamp)
+        )
+        conn.commit()
+        conn.close()
+
+def get_autokick_warning(chat_id: int, contact_id: int) -> float | None:
+    """Get the timestamp when an autokick warning was issued for a contact in a chat."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT warned_at FROM autokick_warnings WHERE chat_id = ? AND contact_id = ?", (chat_id, contact_id))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+
+def clear_autokick_warning(chat_id: int, contact_id: int):
+    """Clear the autokick warning for a contact in a chat (e.g. if they spoke or were kicked)."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM autokick_warnings WHERE chat_id = ? AND contact_id = ?", (chat_id, contact_id))
+        conn.commit()
+        conn.close()
+
+def clear_chat_autokick_warnings(chat_id: int):
+    """Clear all autokick warnings for a chat."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM autokick_warnings WHERE chat_id = ?", (chat_id,))
+        conn.commit()
+        conn.close()
+
+def add_autokick_ignored_fingerprint(fingerprint: str, note: str = "") -> bool:
+    """Add a cryptographic fingerprint to the autokick ignore list."""
+    clean_fp = fingerprint.strip().replace(" ", "").replace(":", "").upper()
+    if not clean_fp:
+        return False
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO autokick_ignored_fingerprints (fingerprint, note, added_at) VALUES (?, ?, ?)",
+            (clean_fp, note.strip(), time.time())
+        )
+        conn.commit()
+        conn.close()
+    return True
+
+def remove_autokick_ignored_fingerprint(fingerprint: str) -> bool:
+    """Remove a cryptographic fingerprint from the autokick ignore list. Returns True if removed."""
+    clean_fp = fingerprint.strip().replace(" ", "").replace(":", "").upper()
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM autokick_ignored_fingerprints WHERE fingerprint = ?", (clean_fp,))
+        affected = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+    return affected
+
+def is_fingerprint_autokick_ignored(fingerprint: str) -> bool:
+    """Check if a cryptographic fingerprint is in the autokick ignore list."""
+    if not fingerprint:
+        return False
+    clean_fp = fingerprint.strip().replace(" ", "").replace(":", "").upper()
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM autokick_ignored_fingerprints WHERE fingerprint = ?", (clean_fp,))
+        row = cursor.fetchone()
+        conn.close()
+        return bool(row)
+
+def get_all_autokick_ignored_fingerprints() -> list[tuple[str, str, float]]:
+    """Return all ignored fingerprints as [(fingerprint, note, added_at), ...]."""
+    with _lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT fingerprint, note, added_at FROM autokick_ignored_fingerprints ORDER BY added_at ASC")
+        rows = cursor.fetchall()
+        conn.close()
+        return [(r[0], r[1] or "", float(r[2])) for r in rows]
 
 def get_admin_fingerprint():
     """Get the saved admin DC fingerprint."""

@@ -22,7 +22,7 @@ import database
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
 
-VERSION = "2.8.2"
+VERSION = "2.9.0"
 
 
 def log_version_info(bot):
@@ -246,6 +246,28 @@ def _is_dc_admin(bot, accid, contact_id):
         logger.error(f"Critical error in admin check: {e}")
     return False
 
+def _is_contact_autokick_ignored(bot, accid, contact_id, contact=None) -> bool:
+    """Check if the contact's cryptographic fingerprint is in the autokick ignore list."""
+    try:
+        c_fp = _get_contact_fingerprint(bot, accid, contact_id, contact=contact)
+        if c_fp:
+            for fp in c_fp.upper().split(','):
+                clean = fp.strip()
+                if clean and database.is_fingerprint_autokick_ignored(clean):
+                    return True
+    except Exception as e:
+        logger.error(f"Error checking autokick ignore for contact {contact_id}: {e}")
+    return False
+
+def _get_chat_autokick_warn_threshold(autokick_days: int) -> int:
+    """Calculate the inactivity threshold in days when warnings start.
+    If autokick > 7 days: warnings start at autokick - 7 days.
+    If autokick <= 7 days: warnings start at autokick - 1 days (minimum 1 day).
+    """
+    if autokick_days > 7:
+        return autokick_days - 7
+    return max(1, autokick_days - 1)
+
 def _send(bot, accid, chat_id, text, reply_to_id=None):
     msg_data = MsgData(text=text)
     if reply_to_id:
@@ -411,12 +433,13 @@ def _check_chat_inactivity(bot, accid, chat_id) -> str:
 
     return report
 
-def _perform_autokick_for_chat(bot, accid, chat_id: int, days: int) -> list[dict]:
-    """Check inactive members in chat_id and kick anyone inactive for > days.
-    Returns a list of kicked member info dicts: [{'id': ..., 'name': ..., 'address': ..., 'reason': ...}].
+def _get_chat_autokick_candidates(bot, accid, chat_id: int, days: int) -> tuple[list[dict], list[dict]]:
+    """Inspect contacts in chat_id and return (warn_candidates, kick_candidates).
+    - warn_candidates: inactive >= warn_threshold_days, not exempt.
+    - kick_candidates: inactive >= days, not exempt, AND has received a warning at least 24h ago.
     """
     if days <= 0:
-        return []
+        return [], []
 
     monitored_since = database.get_chat_monitored_since(chat_id)
     now = time.time()
@@ -428,13 +451,17 @@ def _perform_autokick_for_chat(bot, accid, chat_id: int, days: int) -> list[dict
         contacts = bot.rpc.get_chat_contacts(accid, chat_id)
     except Exception as e:
         logger.error(f"Failed to get chat contacts for autokick in {chat_id}: {e}")
-        return []
+        return [], []
 
     if len(contacts) <= 2:
-        return []
+        return [], []
 
-    threshold_seconds = days * 24 * 3600
-    kicked_members = []
+    warn_threshold_days = _get_chat_autokick_warn_threshold(days)
+    warn_threshold_seconds = warn_threshold_days * 24 * 3600
+    kick_threshold_seconds = days * 24 * 3600
+
+    warn_candidates = []
+    kick_candidates = []
 
     for contact_id in contacts:
         if contact_id == DC_CONTACT_ID_SELF or contact_id <= 9:
@@ -447,6 +474,14 @@ def _perform_autokick_for_chat(bot, accid, chat_id: int, days: int) -> list[dict
             if contact.address and contact.address.lower() == "deltachat@system.local":
                 continue
 
+            # Exempt users whose cryptographic fingerprint is in the ignore list
+            if _is_contact_autokick_ignored(bot, accid, contact_id, contact=contact):
+                continue
+
+            # Exempt users who currently have an active /away status
+            if database.get_away_status(contact_id) is not None:
+                continue
+
             if isinstance(contact, dict):
                 last_seen = contact.get("last_seen", 0)
             else:
@@ -455,35 +490,131 @@ def _perform_autokick_for_chat(bot, accid, chat_id: int, days: int) -> list[dict
             name = contact.name or contact.display_name or "Unknown"
             address = contact.address or "no_email@example.com"
 
-            should_kick = False
-            reason = ""
-
             if last_seen == 0:
-                # If never seen, only kick if bot has monitored this group for at least `days` days
-                if now - monitored_since >= threshold_seconds:
-                    should_kick = True
-                    reason = f"never seen in >{days}d of observation"
+                first_seen = database.get_contact_first_seen(contact_id)
+                if first_seen is not None:
+                    inactive_duration = now - first_seen
+                    days_ago = int(inactive_duration / (24 * 3600))
+                    reason = f"never seen in {days_ago}d since joined"
+                else:
+                    inactive_duration = now - monitored_since
+                    days_ago = int(inactive_duration / (24 * 3600))
+                    reason = f"never seen in >{days_ago}d of observation"
             else:
                 inactive_duration = now - last_seen
-                if inactive_duration > threshold_seconds:
-                    days_ago = int(inactive_duration / (24 * 3600))
-                    should_kick = True
-                    reason = f"inactive for {days_ago}d (threshold: {days}d)"
+                days_ago = int(inactive_duration / (24 * 3600))
+                reason = f"inactive for {days_ago}d (threshold: {days}d)"
 
-            if should_kick:
-                try:
-                    logger.info(f"Auto-kicking member {name} ({address}, contact_id={contact_id}) from chat {chat_id}: {reason}")
-                    bot.rpc.remove_contact_from_chat(accid, chat_id, contact_id)
-                    kicked_members.append({
-                        "id": contact_id,
-                        "name": name,
-                        "address": address,
-                        "reason": reason
-                    })
-                except Exception as kick_err:
-                    logger.error(f"Failed to auto-kick contact {contact_id} from chat {chat_id}: {kick_err}")
+            # If the user is currently active (less than warning threshold), clear any old warning
+            if inactive_duration < warn_threshold_seconds:
+                if database.get_autokick_warning(chat_id, contact_id) is not None:
+                    database.clear_autokick_warning(chat_id, contact_id)
+                continue
+
+            candidate = {
+                "id": contact_id,
+                "name": name,
+                "address": address,
+                "reason": reason,
+                "inactive_days": days_ago,
+                "inactive_duration": inactive_duration
+            }
+            warn_candidates.append(candidate)
+
+            # Only kick if inactive for >= days AND user has already received a warning at least 24h ago
+            if inactive_duration >= kick_threshold_seconds:
+                warned_at = database.get_autokick_warning(chat_id, contact_id)
+                if warned_at is not None and (now - warned_at >= 86400):
+                    kick_candidates.append(candidate)
+
         except Exception as e:
-            logger.error(f"Error checking contact {contact_id} in autokick: {e}")
+            logger.error(f"Error checking contact {contact_id} in autokick candidates: {e}")
+
+    return warn_candidates, kick_candidates
+
+
+def _perform_autokick_warnings_for_chat(bot, accid, chat_id: int, days: int, force_group: bool = False) -> list[dict]:
+    """Check inactive members in chat_id and issue warnings:
+    1. Send private 1-on-1 warning to newly detected candidates.
+    2. Broadcast daily warning in group chat (once every 24h).
+    Returns list of warning candidates.
+    """
+    if days <= 0:
+        return []
+
+    now = time.time()
+    warn_candidates, _ = _get_chat_autokick_candidates(bot, accid, chat_id, days)
+    if not warn_candidates:
+        return []
+
+    # 1. Send private 1-on-1 warning to each candidate who hasn't received one yet
+    chat_name = "the group"
+    try:
+        chat_info = bot.rpc.get_basic_chat_info(accid, chat_id)
+        chat_name = chat_info.get('name', 'the group') if isinstance(chat_info, dict) else getattr(chat_info, 'name', 'the group')
+    except Exception:
+        pass
+
+    for c in warn_candidates:
+        existing_warning = database.get_autokick_warning(chat_id, c["id"])
+        if existing_warning is None:
+            try:
+                private_chat_id = bot.rpc.create_chat_by_contact_id(accid, c["id"])
+                remaining = max(1, days - c["inactive_days"])
+                dm_text = (
+                    f"⚠️ **Inactivity Warning for \"{chat_name}\"**\n\n"
+                    f"You have been inactive in **{chat_name}** for {c['inactive_days']} days. "
+                    f"Inactive members are automatically removed after {days} days.\n\n"
+                    f"You will be removed in approximately **{remaining} day(s)**. "
+                    f"If you wish to remain in **{chat_name}**, please post a message in the group!"
+                )
+                _send(bot, accid, private_chat_id, dm_text)
+                logger.info(f"Sent autokick DM warning to {c['name']} ({c['address']}, id={c['id']}) for chat {chat_id}")
+            except Exception as dm_err:
+                logger.error(f"Failed to send private autokick warning to contact {c['id']}: {dm_err}")
+
+            database.record_autokick_warning(chat_id, c["id"], now)
+
+    # 2. Daily broadcast in the group chat (at most once every 24h)
+    last_warn_at = database.get_chat_last_autokick_warn_at(chat_id)
+    if force_group or (now - last_warn_at >= 86400):
+        try:
+            lines = []
+            for c in warn_candidates:
+                remaining = max(1, days - c["inactive_days"])
+                lines.append(f"• **{c['name']}** ({c['address']}) — {c['reason']} ({remaining}d remaining)")
+
+            group_msg = (
+                f"⚠️ **Auto-kick Inactivity Warning:**\n"
+                f"The following member(s) will be automatically removed due to inactivity (threshold: {days}d). "
+                f"To remain in the group, please post a message here:\n\n" + "\n".join(lines)
+            )
+            _send(bot, accid, chat_id, group_msg)
+            database.set_chat_last_autokick_warn_at(chat_id, now)
+        except Exception as e:
+            logger.error(f"Failed to send daily autokick warning broadcast in chat {chat_id}: {e}")
+
+    return warn_candidates
+
+
+def _perform_autokick_for_chat(bot, accid, chat_id: int, days: int) -> list[dict]:
+    """Check inactive members in chat_id and kick anyone inactive for >= days WHO HAS RECEIVED A WARNING.
+    Returns a list of kicked member info dicts: [{'id': ..., 'name': ..., 'address': ..., 'reason': ...}].
+    """
+    if days <= 0:
+        return []
+
+    _, kick_candidates = _get_chat_autokick_candidates(bot, accid, chat_id, days)
+    kicked_members = []
+
+    for c in kick_candidates:
+        try:
+            logger.info(f"Auto-kicking member {c['name']} ({c['address']}, contact_id={c['id']}) from chat {chat_id}: {c['reason']}")
+            bot.rpc.remove_contact_from_chat(accid, chat_id, c['id'])
+            database.clear_autokick_warning(chat_id, c['id'])
+            kicked_members.append(c)
+        except Exception as kick_err:
+            logger.error(f"Failed to auto-kick contact {c['id']} from chat {chat_id}: {kick_err}")
 
     if kicked_members:
         try:
@@ -527,6 +658,7 @@ def _background_monitor_loop(bot, accid):
                         # Run autokick check if enabled for this group
                         autokick_days = database.get_chat_autokick(chat_id)
                         if autokick_days > 0:
+                            _perform_autokick_warnings_for_chat(bot, accid, chat_id, autokick_days)
                             _perform_autokick_for_chat(bot, accid, chat_id, autokick_days)
                 except Exception as e:
                     logger.error(f"Error checking chat {chat_id} in background monitor: {e}")
@@ -1781,11 +1913,31 @@ def bounce_command(bot, accid, event):
     # Update timestamp
     _chat_anti_spam[msg.chat_id] = now
 
-    report = _check_chat_inactivity(bot, accid, msg.chat_id)
-    if report:
-        _send(bot, accid, msg.chat_id, report)
+    autokick_days = database.get_chat_autokick(msg.chat_id)
+    if autokick_days > 0:
+        warn_threshold = _get_chat_autokick_warn_threshold(autokick_days)
+        warn_candidates, _ = _get_chat_autokick_candidates(bot, accid, msg.chat_id, autokick_days)
+        if warn_candidates:
+            lines = []
+            for c in warn_candidates:
+                remaining = max(1, autokick_days - c["inactive_days"])
+                lines.append(f"• /contact{c['id']} **{c['name']}** ({c['address']}) — {c['reason']} ({remaining}d remaining)")
+            days_left = autokick_days - warn_threshold
+            unit_str = f"<{days_left}d" if days_left > 1 else "<1d"
+            report = (
+                f"⚠️ **Inactivity Warning ({unit_str} until auto-kick):**\n"
+                f"Auto-kick threshold for this group: **{autokick_days} days** (warning at > {warn_threshold} days).\n\n"
+                + "\n".join(lines)
+            )
+            _send(bot, accid, msg.chat_id, report)
+        else:
+            _send(bot, accid, msg.chat_id, f"✅ All users are active (no members within warning threshold of {autokick_days}d auto-kick).")
     else:
-        _send(bot, accid, msg.chat_id, "✅ All users are active or this is not a group chat.")
+        report = _check_chat_inactivity(bot, accid, msg.chat_id)
+        if report:
+            _send(bot, accid, msg.chat_id, report)
+        else:
+            _send(bot, accid, msg.chat_id, "✅ All users are active or this is not a group chat.")
 
 
 @dc_cli.on(events.NewMessage(command="/autokick"))
@@ -1812,35 +1964,150 @@ def autokick_command(bot, accid, event):
 
     if not payload or payload_lower == "status":
         current_days = database.get_chat_autokick(msg.chat_id)
+        ignored_count = len(database.get_all_autokick_ignored_fingerprints())
         if current_days > 0:
+            warn_threshold = _get_chat_autokick_warn_threshold(current_days)
             status_reply = (
                 f"🛡️ **Auto-kick is ON** for this group (threshold: **{current_days} days**).\n\n"
-                f"Members inactive for more than {current_days} days will be automatically removed.\n\n"
+                f"• Inactivity warning begins at: **{warn_threshold} days**\n"
+                f"• Daily warning broadcast: active (once every 24h)\n"
+                f"• Single private DM warning sent to inactive candidates\n"
+                f"• Ignored members/bots: **{ignored_count}**\n\n"
                 f"To change or disable:\n"
                 f"• `/autokick <days>` (e.g. `/autokick 30`)\n"
+                f"• `/autokick ignore <email/nick>` — exempt member by fingerprint\n"
+                f"• `/autokick unignore <fingerprint/email/nick>` — remove exemption\n"
                 f"• `/autokick off`"
             )
         else:
             status_reply = (
                 f"🛡️ **Auto-kick is OFF** for this group.\n\n"
+                f"• Ignored members/bots: **{ignored_count}**\n\n"
                 f"To enable:\n"
                 f"• `/autokick on` (default: 90 days)\n"
-                f"• `/autokick <days>` (e.g. `/autokick 30`)"
+                f"• `/autokick <days>` (e.g. `/autokick 30`)\n"
+                f"• `/autokick ignore <email/nick>` — exempt member by fingerprint"
             )
         _send(bot, accid, msg.chat_id, status_reply)
         return
 
+    if payload_lower.startswith("ignore"):
+        parts = payload.split(maxsplit=1)
+        if len(parts) == 1 or parts[1].strip().lower() in ("list", "show", "status"):
+            ignored = database.get_all_autokick_ignored_fingerprints()
+            if not ignored:
+                _send(bot, accid, msg.chat_id, "🛡️ **Auto-kick ignore list is empty.**\n\nUse `/autokick ignore <email/nick/id>` to exempt a member by their cryptographic fingerprint.")
+            else:
+                lines = []
+                for fp, note, _ in ignored:
+                    note_str = f" **{note}** — " if note else ""
+                    lines.append(f"• {note_str}`{fp[:8]}...{fp[-8:]}`")
+                _send(bot, accid, msg.chat_id, f"🛡️ **Auto-kick Ignored Members/Bots ({len(ignored)}):**\n\n" + "\n".join(lines) + "\n\nUse `/autokick unignore <fingerprint/email/nick>` to remove.")
+            return
+
+        target = parts[1].strip()
+        clean_target = target.replace(" ", "").replace(":", "").upper()
+        if re.match(r'^[0-9A-F]{32,64}$', clean_target):
+            database.add_autokick_ignored_fingerprint(clean_target, note="Direct fingerprint entry")
+            _send(bot, accid, msg.chat_id, f"🛡️ Fingerprint `{clean_target}` added to auto-kick ignore list.")
+            return
+
+        matched_contacts = []
+        try:
+            contacts = bot.rpc.get_chat_contacts(accid, msg.chat_id)
+        except Exception as e:
+            logger.error(f"Failed to get chat contacts: {e}")
+            contacts = []
+
+        clean_q = target.lstrip('@').lower()
+        seen_ids = set()
+        for cid in contacts:
+            if cid == DC_CONTACT_ID_SELF or cid <= 9:
+                continue
+            try:
+                c = bot.rpc.get_contact(accid, cid)
+                c_name = str(c.name).lower() if (hasattr(c, 'name') and isinstance(c.name, str)) else ""
+                c_display = str(c.display_name).lower() if (hasattr(c, 'display_name') and isinstance(c.display_name, str)) else ""
+                c_addr = str(c.address).lower() if (hasattr(c, 'address') and isinstance(c.address, str)) else ""
+                if (clean_q == str(cid) or
+                    (c_addr and (clean_q == c_addr or clean_q in c_addr.split('@')[0])) or
+                    (c_name and clean_q in c_name) or
+                    (c_display and clean_q in c_display)):
+                    if cid not in seen_ids:
+                        seen_ids.add(cid)
+                        matched_contacts.append(c)
+            except Exception:
+                continue
+
+        if not matched_contacts:
+            _send(bot, accid, msg.chat_id, f"🔍 Participant '{target}' was not found in this group.")
+            return
+
+        if len(matched_contacts) > 1:
+            candidates_str = ", ".join([f"**{c.name or c.address}** ({c.address})" for c in matched_contacts[:5]])
+            _send(bot, accid, msg.chat_id, f"⚠️ Multiple participants matched '{target}': {candidates_str}. Please specify exact email or contact ID.")
+            return
+
+        target_contact = matched_contacts[0]
+        c_fp = _get_contact_fingerprint(bot, accid, target_contact.id, contact=target_contact)
+        c_name = target_contact.name if (hasattr(target_contact, 'name') and isinstance(target_contact.name, str)) else (target_contact.display_name if (hasattr(target_contact, 'display_name') and isinstance(target_contact.display_name, str)) else "User")
+        c_addr = target_contact.address if (hasattr(target_contact, 'address') and isinstance(target_contact.address, str)) else "unknown"
+        if not c_fp:
+            _send(bot, accid, msg.chat_id, f"⚠️ Could not find a cryptographic fingerprint for **{c_name}** ({c_addr}). Ensure end-to-end encryption is established.")
+            return
+
+        note = f"{c_name} ({c_addr})"
+        for fp in c_fp.upper().split(','):
+            clean_fp = fp.strip()
+            if clean_fp:
+                database.add_autokick_ignored_fingerprint(clean_fp, note=note)
+
+        _send(bot, accid, msg.chat_id, f"🛡️ Added **{c_name}** ({c_addr}) to auto-kick ignore list.\nFingerprint: `{c_fp}`")
+        return
+
+    if payload_lower.startswith("unignore"):
+        parts = payload.split(maxsplit=1)
+        if len(parts) < 2:
+            _send(bot, accid, msg.chat_id, "⚠️ Usage: `/autokick unignore <fingerprint/email/nick>`")
+            return
+
+        target = parts[1].strip()
+        clean_target = target.replace(" ", "").replace(":", "").upper()
+        if database.remove_autokick_ignored_fingerprint(clean_target):
+            _send(bot, accid, msg.chat_id, f"✅ Removed `{clean_target}` from auto-kick ignore list.")
+            return
+
+        ignored = database.get_all_autokick_ignored_fingerprints()
+        found_fps = []
+        target_lower = target.lower()
+        for fp, note, _ in ignored:
+            if target_lower in note.lower() or target_lower in fp.lower():
+                found_fps.append((fp, note))
+
+        if not found_fps:
+            _send(bot, accid, msg.chat_id, f"🔍 No ignored entry found matching '{target}'.")
+            return
+
+        for fp, note in found_fps:
+            database.remove_autokick_ignored_fingerprint(fp)
+
+        removed_desc = ", ".join([f"**{note}** (`{fp[:8]}...`)" if note else f"`{fp[:8]}...`" for fp, note in found_fps])
+        _send(bot, accid, msg.chat_id, f"✅ Removed from auto-kick ignore list: {removed_desc}")
+        return
+
     if payload_lower in ("off", "disable", "stop", "0"):
         database.set_chat_autokick(msg.chat_id, 0)
+        database.clear_chat_autokick_warnings(msg.chat_id)
         _send(bot, accid, msg.chat_id, "🛑 **Auto-kick disabled** for this group.")
         return
 
     if payload_lower in ("on", "enable"):
         default_days = 90
         database.set_chat_autokick(msg.chat_id, default_days)
+        warn_threshold = _get_chat_autokick_warn_threshold(default_days)
         _send(bot, accid, msg.chat_id, 
-              f"✅ **Auto-kick enabled** for this group with a threshold of **{default_days} days**.\n\n"
-              f"Members inactive for more than {default_days} days will be automatically removed during periodic checks.")
+              f"✅ **Auto-kick enabled** for this group with a threshold of **{default_days} days** (warnings start at **{warn_threshold} days**).\n\n"
+              f"Members inactive for more than {default_days} days who have received a warning will be automatically removed.")
         return
 
     if payload.isdigit():
@@ -1849,9 +2116,10 @@ def autokick_command(bot, accid, event):
             _send(bot, accid, msg.chat_id, "⚠️ Please specify a valid number of days between 1 and 3650 (e.g. `/autokick 30`).")
             return
         database.set_chat_autokick(msg.chat_id, days)
+        warn_threshold = _get_chat_autokick_warn_threshold(days)
         _send(bot, accid, msg.chat_id, 
-              f"✅ **Auto-kick enabled** for this group with a threshold of **{days} days**.\n\n"
-              f"Members inactive for more than {days} days will be automatically removed during periodic checks.")
+              f"✅ **Auto-kick enabled** for this group with a threshold of **{days} days** (warnings start at **{warn_threshold} days**).\n\n"
+              f"Members inactive for more than {days} days who have received a warning will be automatically removed.")
         return
 
     _send(bot, accid, msg.chat_id,
@@ -1859,6 +2127,8 @@ def autokick_command(bot, accid, event):
           "• `/autokick` — Show current auto-kick status\n"
           "• `/autokick on` — Enable with default 90-day threshold\n"
           "• `/autokick <days>` — Enable with custom threshold (e.g. `/autokick 30`)\n"
+          "• `/autokick ignore <email/nick/id>` — Add member to ignore list by fingerprint\n"
+          "• `/autokick unignore <fingerprint/email/nick>` — Remove from ignore list\n"
           "• `/autokick off` — Disable auto-kick")
 
 
@@ -2382,7 +2652,7 @@ def help_command(bot, accid, event):
         f"👋 Hi {sender_email}!\n\n"
         f"{status_text}\n\n"
         f"**Commands:**\n"
-        f"/bounce [username] — Show last activity of a user, or trigger inactivity check in this group (Threshold: {INACTIVITY_DAYS_THRESHOLD} days).\n"
+        f"/bounce [username] — Show user activity, or list members near auto-kick threshold in group.\n"
         f"/search [query1] ... — Search members by email/domain (e.g. @testrun.org) or reply to a message.\n"
         f"/relays — Find group members using regular mail providers.\n"
         f"/top    — Show top 10 posters in the last 24 hours.\n"
@@ -2421,7 +2691,7 @@ def help_command(bot, accid, event):
         help_text += "/rmtransport <addr> — Remove a mail relay\n"
         help_text += "/setprimary <addr> — Switch the primary mail relay\n"
         help_text += "/resilient — Toggle resilient sending mode (all relays)\n"
-        help_text += "/autokick [on/off/days] — Auto-kick members inactive for > N days (default: 90d)\n"
+        help_text += "/autokick [on/off/days/ignore/unignore] — Auto-kick inactive members with warnings & fingerprint ignore\n"
         help_text += "/kick <user_id> — Remove a member from the current group\n"
         help_text += "/chatadd [desc] — Add current chat to catalog\n"
         help_text += "/chatremove — Remove current chat from catalog\n"

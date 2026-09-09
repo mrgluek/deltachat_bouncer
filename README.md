@@ -4,8 +4,9 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 
 ## Features
 
-- ⚠️ **Inactivity Reports (`/bounce`):** Trigger a manual scan for inactive group members. Reports total members, active count, and a list of inactive users (default threshold: 21 days).
-- 🧹 **Automatic Inactivity Kick (`/autokick`):** Automatically purge stale, inactive members from group chats in the background. Disabled by default, configurable with custom threshold (default: 90 days, e.g. `/autokick 30`).
+- ⚠️ **Inactivity Reports (`/bounce`):** In groups with `/autokick` enabled, displays members approaching the auto-kick threshold (< 7 days or < 1 day remaining). In other groups, reports members inactive for over 21 days.
+- 🧹 **Automatic Inactivity Kick with Warnings (`/autokick`):** Automatically purge stale, inactive members from group chats in the background. Features a two-stage warning system: sends a private 1-on-1 direct message warning to inactive candidates and broadcasts a daily summary to the group (once every 24h). Members are kicked only after receiving a warning and passing a 24-hour grace period. Supports cryptographic fingerprint exemptions (`/autokick ignore`) and `/away` vacation status exemptions.
+- 🛡️ **Auto-kick Fingerprint Ignore List (`/autokick ignore`):** Exempt specific members or service bots from auto-kick by resolving and storing their cryptographic key fingerprint.
 - 👞 **Manual Member Kick (`/kick <userid>`):** Remove a specific member or multiple members from a group chat by contact ID (e.g. `/kick 123` or `/kick /contact123`), search query, or by replying to their message.
 - 📖 **Group Chat Catalog (`/chats`):** Users can browse all group chats cataloged by the bot, complete with name, description, and real-time membership count.
 - 📢 **Delta Chat Channels Catalog (`/dchannels`):** Users can browse all channels cataloged by the bot, complete with name and description.
@@ -55,7 +56,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 
 ## Commands
 
-- `/bounce` — Trigger an immediate inactivity check in the current group (Threshold: 21 days).
+- `/bounce [username]` — Show user activity, or check inactive members in current group (Threshold: warning zone if `/autokick` is on, otherwise 21 days).
 - `/search [email1] ...` — Search for group members by one or more emails (case-insensitive substring match) or by replying to a message containing email addresses. Searches across all active transports/secondary addresses.
 - `/relays` — Find group members using regular mail providers.
 - `/top` — Show the 10 most active members in the last 24 hours.
@@ -68,10 +69,10 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/approve<ID>` — Approve a pending join request for a private group (Group chat only).
 - `/decline<ID> [reason]` — Decline a pending join request for a private group with an optional reason (Group chat only).
 - `/contact<ID>` — Get a contact object for the given ID (e.g., `/contact123`).
-- `/help` — Show available commands and bot information (Threshold: 21 days).
+- `/help` — Show available commands and bot information.
 - `/donate` — Support project development ❤️
 - `/initadmin` — Claim administrative ownership (private chat only).
-- `/autokick [on/off/days]` — Configure auto-kick of inactive members for current group (default: 90 days, e.g. `/autokick 30`) (Admin only).
+- `/autokick [on/off/days/ignore/unignore]` — Configure auto-kick with warnings (default: 90 days, e.g. `/autokick 30`) or manage cryptographic fingerprint ignore list (`/autokick ignore <email/nick>`, `/autokick unignore <fp/email>`) (Admin only).
 - `/kick <user_id>` — Remove a member from the current group by contact ID, search query, or message reply (Admin only).
 - `/chatadd [description]` — Add the current group chat to the catalog (Admin only). Falls back to group description if not provided.
 - `/chatremove` — Remove the current group chat from the catalog (Admin only).
