@@ -4,7 +4,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 
 ## Features
 
-- ⚠️ **Inactivity Reports (`/bounce`):** In groups with `/autokick` enabled, displays members approaching the auto-kick threshold (< 7 days or < 1 day remaining). In other groups, reports members inactive for over 21 days.
+- ⚠️ **Inactivity Reports (`/bounce`):** In groups with `/autokick` enabled, displays members approaching the auto-kick threshold (< 7 days or < 1 day remaining) as well as observation progress for silent members still in their grace period. In other groups, reports members inactive for over 21 days.
 - 🧹 **Automatic Inactivity Kick with Warnings (`/autokick`):** Automatically purge stale, inactive members from group chats in the background. Features a two-stage warning system: sends a private 1-on-1 direct message warning to inactive candidates and broadcasts a daily summary to the group (once every 24h). Members are kicked only after receiving a warning and passing a 24-hour grace period. Supports cryptographic fingerprint exemptions (`/autokick ignore`) and `/away` vacation status exemptions.
 - 🛡️ **Auto-kick Fingerprint Ignore List (`/autokick ignore`):** Exempt specific members or service bots from auto-kick by resolving and storing their cryptographic key fingerprint.
 - 👞 **Manual Member Kick (`/kick <userid>`):** Remove a specific member or multiple members from a group chat by contact ID (e.g. `/kick 123` or `/kick /contact123`), search query, or by replying to their message.
@@ -56,7 +56,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 
 ## Commands
 
-- `/bounce [username]` — Show user activity, or check inactive members in current group (Threshold: warning zone if `/autokick` is on, otherwise 21 days).
+- `/bounce [username]` — Show user activity, or check inactive members in current group (Shows warning candidates and observation progress if `/autokick` is on, otherwise 21 days).
 - `/search [email1] ...` — Search for group members by one or more emails (case-insensitive substring match) or by replying to a message containing email addresses. Searches across all active transports/secondary addresses.
 - `/relays` — Find group members using regular mail providers.
 - `/top` — Show the 10 most active members in the last 24 hours.

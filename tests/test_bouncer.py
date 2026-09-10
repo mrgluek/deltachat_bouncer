@@ -1348,6 +1348,120 @@ class TestBouncerBot(unittest.TestCase):
         self.assertEqual(database.get_contact_first_seen(501), now)
         self.assertEqual(database.get_contact_first_seen(505), later)
 
+    def test_autokick_overview_and_bounce_reporting(self):
+        """Verify _get_chat_autokick_overview returns correct metrics and /bounce displays observation progress."""
+        mock_bot = MagicMock()
+        chat_id = 7090
+        now = time.time()
+        # Group monitored for 15 days, autokick = 90 (warn threshold = 83d)
+        database.set_chat_monitored_since(chat_id, now - (15 * 86400))
+        database.set_chat_autokick(chat_id, 90)
+
+        # Contact 1: bot self
+        # Contact 10: admin (active)
+        # Contact 20: active member (last_seen = 2 days ago)
+        # Contact 30: silent member under observation (last_seen = 0, first_seen = now - 15d)
+        # Contact 40: silent member joined 5 days ago (last_seen = 0, first_seen = now - 5d)
+        database.ensure_contact_first_seen(30, now - (15 * 86400))
+        database.ensure_contact_first_seen(40, now - (5 * 86400))
+
+        mock_bot.rpc.get_chat_contacts.return_value = [1, 10, 20, 30, 40]
+        def get_contact_mock(accid, cid):
+            c = MagicMock()
+            c.id = cid
+            c.display_name = None
+            if cid == 1:
+                c.name = "BotSelf"
+                c.address = "bot@example.com"
+                c.last_seen = now
+            elif cid == 10:
+                c.name = "Admin"
+                c.address = "admin@example.com"
+                c.last_seen = now
+            elif cid == 20:
+                c.name = "ActiveUser"
+                c.address = "active@example.com"
+                c.last_seen = now - (2 * 86400)
+            elif cid == 30:
+                c.name = "SilentOld"
+                c.address = "old@example.com"
+                c.last_seen = 0
+            elif cid == 40:
+                c.name = "SilentNew"
+                c.address = "new@example.com"
+                c.last_seen = 0
+            return c
+        mock_bot.rpc.get_contact.side_effect = get_contact_mock
+
+        with patch('bot._is_dc_admin', side_effect=lambda b, a, cid: cid == 10):
+            overview = bot._get_chat_autokick_overview(mock_bot, 1, chat_id, 90)
+            self.assertEqual(overview["monitored_days"], 15)
+            self.assertEqual(overview["total_members"], 3) # 20, 30, 40 (excluding self and admin)
+            self.assertEqual(overview["active_count"], 1) # 20
+            self.assertEqual(overview["silent_count"], 2) # 30, 40
+            # Earliest warning: warn_threshold is 83d. Contact 30 has 15d observation -> 83 - 15 = 68 days left
+            self.assertEqual(overview["earliest_warn_days"], 68)
+            self.assertEqual(len(overview["warn_candidates"]), 0)
+
+            # Test /bounce command output in this scenario
+            mock_event = MagicMock()
+            mock_event.msg.chat_id = chat_id
+            mock_event.msg.from_id = 10
+            mock_event.msg.quote = None
+            mock_event.payload = ""
+
+            with patch.object(bot, '_send') as mock_send:
+                bot.bounce_command(mock_bot, 1, mock_event)
+                mock_send.assert_called_once()
+                msg_text = mock_send.call_args[0][3]
+                self.assertIn("Observation in progress", msg_text)
+                self.assertIn("**2 member(s)** have not posted since monitoring began", msg_text)
+                self.assertIn("Earliest warnings will start in **68 days**", msg_text)
+                self.assertIn("Monitoring this group for: **15 days**", msg_text)
+
+            # Test /autokick status output includes monitored days & observation count
+            mock_bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Group"}
+            with patch.object(bot, '_send') as mock_send:
+                mock_event.payload = "status"
+                bot.autokick_command(mock_bot, 1, mock_event)
+                mock_send.assert_called_once()
+                status_text = mock_send.call_args[0][3]
+                self.assertIn("Group monitored for: **15 days**", status_text)
+                self.assertIn("Members under observation: **2 silent**", status_text)
+                self.assertIn("earliest warning in **68 days**", status_text)
+
+    def test_bounce_reporting_all_active(self):
+        """Verify /bounce displays all-active when every member has posted recently."""
+        mock_bot = MagicMock()
+        chat_id = 7095
+        now = time.time()
+        database.set_chat_monitored_since(chat_id, now - (30 * 86400))
+        database.set_chat_autokick(chat_id, 90)
+
+        mock_bot.rpc.get_chat_contacts.return_value = [1, 10, 21, 22]
+        def get_contact_mock(accid, cid):
+            c = MagicMock()
+            c.id = cid
+            c.display_name = None
+            c.name = f"User{cid}"
+            c.address = f"user{cid}@example.com"
+            c.last_seen = now - (5 * 86400)
+            return c
+        mock_bot.rpc.get_contact.side_effect = get_contact_mock
+
+        mock_event = MagicMock()
+        mock_event.msg.chat_id = chat_id
+        mock_event.msg.from_id = 10
+        mock_event.msg.quote = None
+        mock_event.payload = ""
+
+        with patch('bot._is_dc_admin', side_effect=lambda b, a, cid: cid == 10), patch.object(bot, '_send') as mock_send:
+            bot.bounce_command(mock_bot, 1, mock_event)
+            mock_send.assert_called_once()
+            msg_text = mock_send.call_args[0][3]
+            self.assertIn("All 2 members are active", msg_text)
+
 
 if __name__ == '__main__':
     unittest.main()
+

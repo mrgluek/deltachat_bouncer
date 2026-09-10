@@ -22,7 +22,7 @@ import database
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
 
-VERSION = "2.9.2"
+VERSION = "2.9.3"
 
 
 def log_version_info(bot):
@@ -455,13 +455,32 @@ def _check_chat_inactivity(bot, accid, chat_id) -> str:
 
     return report
 
-def _get_chat_autokick_candidates(bot, accid, chat_id: int, days: int) -> tuple[list[dict], list[dict]]:
-    """Inspect contacts in chat_id and return (warn_candidates, kick_candidates).
-    - warn_candidates: inactive >= warn_threshold_days, not exempt.
-    - kick_candidates: inactive >= days, not exempt, AND has received a warning at least 24h ago.
+def _get_chat_autokick_overview(bot, accid, chat_id: int, days: int) -> dict:
+    """Collect autokick statistics and candidates for chat_id.
+    Returns a dict with:
+    - 'monitored_days': int
+    - 'total_members': int (eligible members inspected)
+    - 'active_count': int (members with recent activity)
+    - 'silent_count': int (never seen members still within observation window)
+    - 'earliest_warn_days': int | None (minimum days until a silent member reaches warn threshold)
+    - 'warn_candidates': list[dict]
+    - 'kick_candidates': list[dict]
+    - 'ignored_count': int
+    - 'away_count': int
     """
+    empty_result = {
+        "monitored_days": 0,
+        "total_members": 0,
+        "active_count": 0,
+        "silent_count": 0,
+        "earliest_warn_days": None,
+        "warn_candidates": [],
+        "kick_candidates": [],
+        "ignored_count": 0,
+        "away_count": 0,
+    }
     if days <= 0:
-        return [], []
+        return empty_result
 
     monitored_since = database.get_chat_monitored_since(chat_id)
     now = time.time()
@@ -469,14 +488,17 @@ def _get_chat_autokick_candidates(bot, accid, chat_id: int, days: int) -> tuple[
         monitored_since = now
         database.set_chat_monitored_since(chat_id, monitored_since)
 
+    monitored_days = int((now - monitored_since) / (24 * 3600))
+    empty_result["monitored_days"] = monitored_days
+
     try:
         contacts = bot.rpc.get_chat_contacts(accid, chat_id)
     except Exception as e:
         logger.error(f"Failed to get chat contacts for autokick in {chat_id}: {e}")
-        return [], []
+        return empty_result
 
     if len(contacts) <= 2:
-        return [], []
+        return empty_result
 
     warn_threshold_days = _get_chat_autokick_warn_threshold(days)
     warn_threshold_seconds = warn_threshold_days * 24 * 3600
@@ -484,6 +506,12 @@ def _get_chat_autokick_candidates(bot, accid, chat_id: int, days: int) -> tuple[
 
     warn_candidates = []
     kick_candidates = []
+    total_members = 0
+    active_count = 0
+    silent_count = 0
+    earliest_warn_days = None
+    ignored_count = 0
+    away_count = 0
 
     for contact_id in contacts:
         if contact_id == DC_CONTACT_ID_SELF or contact_id <= 9:
@@ -496,12 +524,16 @@ def _get_chat_autokick_candidates(bot, accid, chat_id: int, days: int) -> tuple[
             if contact.address and contact.address.lower() == "deltachat@system.local":
                 continue
 
+            total_members += 1
+
             # Exempt users whose cryptographic fingerprint is in the ignore list
             if _is_contact_autokick_ignored(bot, accid, contact_id, contact=contact):
+                ignored_count += 1
                 continue
 
             # Exempt users who currently have an active /away status
             if database.get_away_status(contact_id) is not None:
+                away_count += 1
                 continue
 
             if isinstance(contact, dict):
@@ -517,7 +549,7 @@ def _get_chat_autokick_candidates(bot, accid, chat_id: int, days: int) -> tuple[
                 if first_seen is not None:
                     inactive_duration = now - first_seen
                     days_ago = int(inactive_duration / (24 * 3600))
-                    reason = f"never seen in {days_ago}d since joined"
+                    reason = f"never seen in {days_ago}d of observation"
                 else:
                     inactive_duration = now - monitored_since
                     days_ago = int(inactive_duration / (24 * 3600))
@@ -531,6 +563,14 @@ def _get_chat_autokick_candidates(bot, accid, chat_id: int, days: int) -> tuple[
             if inactive_duration < warn_threshold_seconds:
                 if database.get_autokick_warning(chat_id, contact_id) is not None:
                     database.clear_autokick_warning(chat_id, contact_id)
+
+                if last_seen == 0:
+                    silent_count += 1
+                    days_left = max(1, warn_threshold_days - days_ago)
+                    if earliest_warn_days is None or days_left < earliest_warn_days:
+                        earliest_warn_days = days_left
+                else:
+                    active_count += 1
                 continue
 
             candidate = {
@@ -552,7 +592,26 @@ def _get_chat_autokick_candidates(bot, accid, chat_id: int, days: int) -> tuple[
         except Exception as e:
             logger.error(f"Error checking contact {contact_id} in autokick candidates: {e}")
 
-    return warn_candidates, kick_candidates
+    return {
+        "monitored_days": monitored_days,
+        "total_members": total_members,
+        "active_count": active_count,
+        "silent_count": silent_count,
+        "earliest_warn_days": earliest_warn_days,
+        "warn_candidates": warn_candidates,
+        "kick_candidates": kick_candidates,
+        "ignored_count": ignored_count,
+        "away_count": away_count,
+    }
+
+
+def _get_chat_autokick_candidates(bot, accid, chat_id: int, days: int) -> tuple[list[dict], list[dict]]:
+    """Inspect contacts in chat_id and return (warn_candidates, kick_candidates).
+    - warn_candidates: inactive >= warn_threshold_days, not exempt.
+    - kick_candidates: inactive >= days, not exempt, AND has received a warning at least 24h ago.
+    """
+    overview = _get_chat_autokick_overview(bot, accid, chat_id, days)
+    return overview["warn_candidates"], overview["kick_candidates"]
 
 
 def _perform_autokick_warnings_for_chat(bot, accid, chat_id: int, days: int, force_group: bool = False) -> list[dict]:
@@ -1959,8 +2018,15 @@ def bounce_command(bot, accid, event):
 
     autokick_days = database.get_chat_autokick(msg.chat_id)
     if autokick_days > 0:
+        overview = _get_chat_autokick_overview(bot, accid, msg.chat_id, autokick_days)
+        warn_candidates = overview["warn_candidates"]
         warn_threshold = _get_chat_autokick_warn_threshold(autokick_days)
-        warn_candidates, _ = _get_chat_autokick_candidates(bot, accid, msg.chat_id, autokick_days)
+        monitored_days = overview["monitored_days"]
+        silent_count = overview["silent_count"]
+        active_count = overview["active_count"]
+        total_members = overview["total_members"]
+        earliest_warn = overview["earliest_warn_days"]
+
         if warn_candidates:
             lines = []
             for c in warn_candidates:
@@ -1970,12 +2036,26 @@ def bounce_command(bot, accid, event):
             unit_str = f"<{days_left}d" if days_left > 1 else "<1d"
             report = (
                 f"⚠️ **Inactivity Warning ({unit_str} until auto-kick):**\n"
-                f"Auto-kick threshold for this group: **{autokick_days} days** (warning at > {warn_threshold} days).\n\n"
+                f"Auto-kick threshold for this group: **{autokick_days} days** (warning at > {warn_threshold} days).\n"
+                f"Monitoring this group for: **{monitored_days} days**.\n\n"
                 + "\n".join(lines)
             )
+            if silent_count > 0 and earliest_warn is not None:
+                report += f"\n\n_⏳ Plus {silent_count} other member(s) under observation (never seen, earliest warning in {earliest_warn}d)._"
             _send(bot, accid, msg.chat_id, report)
         else:
-            _send(bot, accid, msg.chat_id, f"✅ All users are active (no members within warning threshold of {autokick_days}d auto-kick).")
+            if silent_count > 0 and earliest_warn is not None:
+                report = (
+                    f"ℹ️ **Activity Check & Auto-kick Status**\n"
+                    f"• Monitoring this group for: **{monitored_days} days** (threshold: **{autokick_days}d**, warnings start at **{warn_threshold}d**)\n"
+                    f"• Active members recently: **{active_count}**\n\n"
+                    f"⏳ **Observation in progress:**\n"
+                    f"**{silent_count} member(s)** have not posted since monitoring began.\n"
+                    f"Earliest warnings will start in **{earliest_warn} days** (at day {warn_threshold} of observation)."
+                )
+                _send(bot, accid, msg.chat_id, report)
+            else:
+                _send(bot, accid, msg.chat_id, f"✅ All {total_members} members are active (posted within the last {autokick_days} days).")
     else:
         report = _check_chat_inactivity(bot, accid, msg.chat_id)
         if report:
@@ -1994,9 +2074,8 @@ def autokick_command(bot, accid, event):
     try:
         chat = bot.rpc.get_basic_chat_info(accid, msg.chat_id)
         chat_type = chat.get('chat_type', 'Single') if isinstance(chat, dict) else getattr(chat, 'chat_type', 'Single')
-    except Exception as e:
-        logger.error(f"Failed to get chat info for {msg.chat_id}: {e}")
-        chat_type = 'Single'
+    except Exception:
+        chat_type = "Single"
 
     GROUP_TYPES = {"Group", "Mailinglist", "OutBroadcast", "InBroadcast"}
     if str(chat_type) not in GROUP_TYPES:
@@ -2009,11 +2088,30 @@ def autokick_command(bot, accid, event):
     if not payload or payload_lower == "status":
         current_days = database.get_chat_autokick(msg.chat_id)
         ignored_count = len(database.get_all_autokick_ignored_fingerprints())
+        monitored_since = database.get_chat_monitored_since(msg.chat_id)
+        now = time.time()
+        monitored_days = int((now - monitored_since) / 86400) if monitored_since else 0
+
         if current_days > 0:
             warn_threshold = _get_chat_autokick_warn_threshold(current_days)
+            overview = _get_chat_autokick_overview(bot, accid, msg.chat_id, current_days)
+            silent_count = overview["silent_count"]
+            earliest_warn = overview["earliest_warn_days"]
+            warn_count = len(overview["warn_candidates"])
+
+            obs_detail = f"• Members under observation: **{silent_count} silent**"
+            if silent_count > 0 and earliest_warn is not None:
+                obs_detail += f" (earliest warning in **{earliest_warn} days**)"
+
+            days_left = current_days - warn_threshold
+            unit_str = f"<{days_left}d" if days_left > 1 else "<1d"
+
             status_reply = (
                 f"🛡️ **Auto-kick is ON** for this group (threshold: **{current_days} days**).\n\n"
+                f"• Group monitored for: **{overview['monitored_days']} days**\n"
                 f"• Inactivity warning begins at: **{warn_threshold} days**\n"
+                f"{obs_detail}\n"
+                f"• In warning zone ({unit_str} to kick): **{warn_count}**\n"
                 f"• Daily warning broadcast: active (once every 24h)\n"
                 f"• Single private DM warning sent to inactive candidates\n"
                 f"• Ignored members/bots: **{ignored_count}**\n\n"
@@ -2026,6 +2124,7 @@ def autokick_command(bot, accid, event):
         else:
             status_reply = (
                 f"🛡️ **Auto-kick is OFF** for this group.\n\n"
+                f"• Group monitored for: **{monitored_days} days**\n"
                 f"• Ignored members/bots: **{ignored_count}**\n\n"
                 f"To enable:\n"
                 f"• `/autokick on` (default: 90 days)\n"
