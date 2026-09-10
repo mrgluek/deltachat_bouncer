@@ -24,6 +24,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - 🛡️ **Secure Administration:** Claim ownership with `/initadmin`. Admins bypass rate limits and have exclusive control over bot settings.
 - 📱 **QR Code Link:** Generates a SecureJoin QR code in the logs for easy device linking.
 - 📋 **Startup Version Check:** Automatically checks and logs versions of Bouncer Bot, DeltaChat Core, RPC Client, `deltabot-cli`, and `cmping` at startup.
+- 🦠 **VirusTotal Inspection (`/virus`):** Inspect links or attached files for malware, phishing, and security threats using the VirusTotal API v3. Supports direct URL scans (`/virus <url>`), replies to messages containing links, or replies to messages with attached files. Employs a global FIFO queue and rate limiter (1 check every 15 seconds) to strictly adhere to VirusTotal free tier limits.
 - 🐳 **Docker Ready:** Easy deployment using Docker Compose.
 
 ## Setup
@@ -66,6 +67,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/dchannels` — Show the catalog of registered Delta Chat channels.
 - `/dchannel<ID>` — Request the invite link to a channel.
 - `/cmping <server1> ...` — Ping mail relays to/from specified target servers (15s cooldown, domain-validated).
+- `/virus <url>` — Scan a URL, or reply to a message containing a link or attached file with `/virus` to inspect with VirusTotal (15s global rate limit).
 - `/slap [username]` — Slap a user with a large trout (or reply to a message; 15s cooldown).
 - `/approve<ID>` — Approve a pending join request for a private group (Group chat only).
 - `/decline<ID> [reason]` — Decline a pending join request for a private group with an optional reason (Group chat only).

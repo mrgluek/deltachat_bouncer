@@ -21,6 +21,7 @@ services:
       - STATUS_TEXT
       - AVATAR_PATH
       - CMPING_MONITOR_INTERVAL
+      - VIRUSTOTAL_API_KEY
     deploy:
       resources:
         limits:
