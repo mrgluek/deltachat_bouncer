@@ -57,6 +57,7 @@ import bot
 
 class TestBouncerBot(unittest.TestCase):
     def setUp(self):
+        database.close_db()
         database.DB_PATH = TEST_DB
         database.init_db()
         bot._cmping_server_status = {}
@@ -64,6 +65,7 @@ class TestBouncerBot(unittest.TestCase):
         bot._cmping_last_results = {}
 
     def tearDown(self):
+        database.close_db()
         if os.path.exists(TEST_DB):
             try:
                 os.remove(TEST_DB)
@@ -1285,6 +1287,67 @@ class TestBouncerBot(unittest.TestCase):
         self.assertTrue(database.has_notified_away(102, 202, recent_ts))
         avg, count = database.get_average_ping_for_server("src2.org")
         self.assertEqual(count, 1)
+
+    def test_persistent_writer_and_pragmas(self):
+        """Verify writer connection is persistent and connections use synchronous=NORMAL and WAL."""
+        w_conn1 = database._get_writer_conn()
+        w_conn2 = database._get_writer_conn()
+        self.assertIs(w_conn1, w_conn2, "Writer connection must be reused and persistent")
+
+        # Check PRAGMAs on writer connection
+        sync_mode = w_conn1.execute("PRAGMA synchronous;").fetchone()[0]
+        # synchronous: 1 = NORMAL
+        self.assertEqual(sync_mode, 1, "Writer connection should have synchronous=NORMAL (1)")
+
+        j_mode = w_conn1.execute("PRAGMA journal_mode;").fetchone()[0]
+        self.assertEqual(j_mode.lower(), "wal", "Writer connection should be in WAL mode")
+
+        # Check PRAGMA on reader connection
+        r_conn = database._connect()
+        try:
+            r_sync = r_conn.execute("PRAGMA synchronous;").fetchone()[0]
+            self.assertEqual(r_sync, 1, "Reader connection should have synchronous=NORMAL (1)")
+        finally:
+            r_conn.close()
+
+        # Check close_db resets writer connection
+        database.close_db()
+        self.assertIsNone(database._writer_conn)
+
+    def test_concurrent_read_while_write_lock_held(self):
+        """Verify that reader queries execute without blocking even while _write_lock is held."""
+        import threading
+        database.set_config("concurrency_test_key", "initial_val")
+        read_results = {}
+        read_done = threading.Event()
+
+        with database._write_lock:
+            def reader_thread():
+                cfg = database.get_config("concurrency_test_key")
+                read_results["config"] = cfg
+                read_done.set()
+
+            t = threading.Thread(target=reader_thread)
+            t.start()
+            t.join(timeout=2.0)
+
+        self.assertTrue(read_done.is_set(), "Reader thread was blocked by _write_lock")
+        self.assertEqual(read_results["config"], "initial_val")
+
+    def test_ensure_contacts_first_seen_batch(self):
+        """Verify ensure_contacts_first_seen_batch records multiple contacts in a single transaction."""
+        now = time.time()
+        c_ids = [501, 502, 503, 504]
+        database.ensure_contacts_first_seen_batch(c_ids, now)
+        for cid in c_ids:
+            self.assertEqual(database.get_contact_first_seen(cid), now)
+
+        # Subsequent call with existing + new contact ignores existing
+        later = now + 100
+        database.ensure_contacts_first_seen_batch([501, 505], later)
+        self.assertEqual(database.get_contact_first_seen(501), now)
+        self.assertEqual(database.get_contact_first_seen(505), later)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -22,7 +22,7 @@ import database
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
 
-VERSION = "2.9.1"
+VERSION = "2.9.2"
 
 
 def log_version_info(bot):
@@ -725,10 +725,10 @@ def _refresh_catalog_member_counts(bot, accid):
                 contacts = bot.rpc.get_chat_contacts(accid, chat_id)
                 now = time.time()
                 member_count = sum(1 for c in contacts if c != 1)
-                # Seed first_seen for all contacts
-                for c in contacts:
-                    if c != 1:
-                        database.ensure_contact_first_seen(c, now)
+                # Seed first_seen for all contacts in a single batch transaction
+                valid_contacts = [c for c in contacts if c != 1]
+                if valid_contacts:
+                    database.ensure_contacts_first_seen_batch(valid_contacts, now)
                 old_count = cat_chat.get('member_count', 0)
                 if member_count != old_count:
                     database.update_catalog_chat_member_count(chat_id, member_count)
@@ -748,10 +748,10 @@ def _refresh_catalog_member_counts(bot, accid):
                 contacts = bot.rpc.get_chat_contacts(accid, chat_id)
                 now = time.time()
                 member_count = sum(1 for c in contacts if c != 1)
-                # Seed first_seen for all contacts
-                for c in contacts:
-                    if c != 1:
-                        database.ensure_contact_first_seen(c, now)
+                # Seed first_seen for all contacts in a single batch transaction
+                valid_contacts = [c for c in contacts if c != 1]
+                if valid_contacts:
+                    database.ensure_contacts_first_seen_batch(valid_contacts, now)
                 old_count = cat_chan.get('member_count', 0)
                 if member_count != old_count:
                     database.update_catalog_channel_member_count(chat_id, member_count)

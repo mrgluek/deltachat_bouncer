@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.9.2] - 2026-09-10
+
+### Performance & Database Architecture
+- **Persistent Writer Connection**:
+  - Replaced ad-hoc connection creation on every write with a dedicated persistent writer connection protected by `_write_lock` and standard transactional context manager (`_writer_transaction()`), eliminating connection teardown churn and disk sync overhead.
+- **Strict `PRAGMA synchronous = NORMAL` & `busy_timeout`**:
+  - Enforced `PRAGMA synchronous = NORMAL;`, `PRAGMA journal_mode = WAL;`, and `PRAGMA busy_timeout = 5000;` on all database connections (both readers and writer) across the entire codebase.
+- **Concurrent Non-Blocking WAL Reads**:
+  - Replaced the global `_lock` on read operations with independent read connections, allowing concurrent readers to execute simultaneously alongside the writer without lock contention.
+- **Batch Contact Seeding**:
+  - Replaced N+1 individual insert queries in catalog member count refresh (`_refresh_catalog_member_counts`) with `ensure_contacts_first_seen_batch()`, recording contacts in a single atomic transaction.
+
 ## [2.9.1] - 2026-09-09
 
 ### Security Hardening & Concurrency Fixes
