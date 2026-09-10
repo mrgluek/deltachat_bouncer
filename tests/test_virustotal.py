@@ -246,13 +246,19 @@ class TestVirusTotalInspection(unittest.TestCase):
             mock_event.payload = "https://new-domain.example.com"
 
             with patch.object(bot, "_send") as mock_send, patch.object(bot, "_react") as mock_react:
+                mock_send.return_value = 555
                 bot.virus_command(self.mock_bot, self.accid, mock_event)
                 time.sleep(0.1)
 
+                mock_react.assert_any_call(self.mock_bot, self.accid, 202, "⏳")
                 mock_react.assert_any_call(self.mock_bot, self.accid, 202, "☑️")
                 send_calls = [c[0][3] for c in mock_send.call_args_list]
-                report = next(t for t in send_calls if "VirusTotal URL Report" in t)
-                self.assertIn("VirusTotal URL Report — Clean", report)
+                self.assertTrue(any("VirusTotal URL Scan Submitted" in text for text in send_calls))
+                self.mock_bot.rpc.send_edit_request.assert_called_once()
+                edit_args = self.mock_bot.rpc.send_edit_request.call_args[0]
+                self.assertEqual(edit_args[0], self.accid)
+                self.assertEqual(edit_args[1], 555)
+                self.assertIn("VirusTotal URL Report — Clean", edit_args[2])
 
     @patch.object(bot, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
     @patch.object(bot, "_vt_api_request")
@@ -403,14 +409,22 @@ class TestVirusTotalInspection(unittest.TestCase):
                 mock_event.payload = ""
 
                 with patch.object(bot, "_send") as mock_send, patch.object(bot, "_react") as mock_react:
+                    mock_send.return_value = 777
                     bot.virus_command(self.mock_bot, self.accid, mock_event)
                     time.sleep(0.1)
 
                     mock_upload.assert_called_once()
+                    mock_react.assert_any_call(self.mock_bot, self.accid, 205, "⏳")
                     mock_react.assert_any_call(self.mock_bot, self.accid, 205, "☑️")
                     send_calls = [c[0][3] for c in mock_send.call_args_list]
-                    report = next(t for t in send_calls if "VirusTotal File Report" in t)
-                    self.assertIn("VirusTotal File Report — Clean", report)
+                    self.assertTrue(any("VirusTotal File Scan Submitted" in text for text in send_calls))
+                    self.mock_bot.rpc.send_edit_request.assert_called_once()
+                    edit_args = self.mock_bot.rpc.send_edit_request.call_args[0]
+                    self.assertEqual(edit_args[0], self.accid)
+                    self.assertEqual(edit_args[1], 777)
+                    self.assertIn("VirusTotal File Report — Clean", edit_args[2])
+                    self.assertIn("unique.bin", edit_args[2])
+                    self.assertIn(hashlib.sha256(b"Unique file content for upload test").hexdigest(), edit_args[2])
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
@@ -503,6 +517,77 @@ class TestVirusTotalInspection(unittest.TestCase):
                 mock_react.assert_any_call(self.mock_bot, self.accid, 208, "❌")
                 send_calls = [c[0][3] for c in mock_send.call_args_list]
                 self.assertTrue(any("Invalid VirusTotal API key" in t for t in send_calls))
+
+    @patch.object(bot, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
+    @patch.object(bot, "_vt_api_request")
+    def test_virus_command_url_multi_poll_then_complete(self, mock_api_req):
+        """Verify URL scan completes after multiple polling attempts."""
+        mock_api_req.side_effect = [
+            (None, 404, "Not found"),  # GET /urls/{id}
+            ({"data": {"id": "analysis-multi"}}, 200, None),  # POST /urls
+            ({"data": {"attributes": {"status": "queued"}}}, 200, None),  # poll 1
+            ({"data": {"attributes": {"status": "in_progress"}}}, 200, None),  # poll 2
+            (
+                {
+                    "data": {
+                        "attributes": {
+                            "status": "completed",
+                            "stats": {"harmless": 70, "malicious": 1, "suspicious": 0, "undetected": 5},
+                            "results": {"MalVendor": {"category": "malicious", "result": "malware"}},
+                            "date": 1700000000,
+                        }
+                    }
+                },
+                200,
+                None,
+            ),  # poll 3
+        ]
+
+        with patch.dict(os.environ, {"VIRUSTOTAL_API_KEY": "test_api_key"}):
+            mock_event = MagicMock()
+            mock_event.msg.chat_id = 100
+            mock_event.msg.id = 209
+            mock_event.payload = "https://multipoll-test.org"
+
+            with patch.object(bot, "_send") as mock_send, patch.object(bot, "_react") as mock_react:
+                mock_send.return_value = 888
+                bot.virus_command(self.mock_bot, self.accid, mock_event)
+                time.sleep(0.1)
+
+                mock_react.assert_any_call(self.mock_bot, self.accid, 209, "⏳")
+                mock_react.assert_any_call(self.mock_bot, self.accid, 209, "🚨")
+                self.mock_bot.rpc.send_edit_request.assert_called_once()
+                edit_args = self.mock_bot.rpc.send_edit_request.call_args[0]
+                self.assertEqual(edit_args[1], 888)
+                self.assertIn("VirusTotal URL Report — Malicious", edit_args[2])
+                self.assertIn("MalVendor", edit_args[2])
+
+    @patch.object(bot, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
+    @patch.object(bot, "_vt_api_request")
+    def test_virus_command_polling_timeout(self, mock_api_req):
+        """Verify URL scan reaches timeout after max_attempts and updates message."""
+        mock_api_req.side_effect = [
+            (None, 404, "Not found"),  # GET /urls/{id}
+            ({"data": {"id": "analysis-timeout"}}, 200, None),  # POST /urls
+        ] + [({"data": {"attributes": {"status": "queued"}}}, 200, None)] * 12
+
+        with patch.dict(os.environ, {"VIRUSTOTAL_API_KEY": "test_api_key"}):
+            mock_event = MagicMock()
+            mock_event.msg.chat_id = 100
+            mock_event.msg.id = 210
+            mock_event.payload = "https://timeout-test.org"
+
+            with patch.object(bot, "_send") as mock_send, patch.object(bot, "_react") as mock_react:
+                mock_send.return_value = 999
+                bot.virus_command(self.mock_bot, self.accid, mock_event)
+                time.sleep(0.1)
+
+                mock_react.assert_any_call(self.mock_bot, self.accid, 210, "⏳")
+                mock_react.assert_any_call(self.mock_bot, self.accid, 210, "⚪️")
+                self.mock_bot.rpc.send_edit_request.assert_called_once()
+                edit_args = self.mock_bot.rpc.send_edit_request.call_args[0]
+                self.assertEqual(edit_args[1], 999)
+                self.assertIn("taking longer than usual", edit_args[2])
 
 
 if __name__ == "__main__":

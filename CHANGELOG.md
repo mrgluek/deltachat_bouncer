@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.10.1] - 2026-09-10
+
+### Improvements
+- **In-Place Live Message Updates for VirusTotal Scans (`send_edit_request`)**:
+  - When submitting a new URL or file for analysis (404 in VirusTotal database), the bot now posts an immediate interim status message (`Analysis is in progress...`) and sets the `⏳` reaction.
+  - The worker polls VirusTotal in the background for up to 12 attempts (~3 minutes with the 15-second rate limiter).
+  - Upon completion, the bot updates the interim message in-place via Delta Chat RPC `send_edit_request` with the complete vendor detections and analysis report, and sets the final reaction (`☑️`, `⚠️`, `🚨`).
+  - If analysis exceeds 12 polling attempts, the message is updated with a timeout notice directing the user to the web report (`⚪️`).
+- **Clean Markdown URL Formatting**:
+  - Removed enclosing backticks around URLs in reports to prevent Delta Chat markdown parsers from appending `%60` to links.
+
 ## [2.10.0] - 2026-09-10
 
 ### Security & VirusTotal Inspection

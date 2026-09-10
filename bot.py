@@ -28,7 +28,7 @@ import database
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
 
-VERSION = "2.10.0"
+VERSION = "2.10.1"
 
 
 def log_version_info(bot):
@@ -4800,7 +4800,7 @@ def _format_vt_url_report(url: str, url_id: str, attrs: dict) -> tuple[str, str]
 
     lines = [
         f"{verdict_emoji} **VirusTotal URL Report — {verdict_label}**\n",
-        f"🔗 **URL:** `{url}`",
+        f"🔗 **URL:** {url}",
         f"🛡️ **Detections:** {malicious + suspicious}/{total} security vendors",
         f"📊 **Stats:** 🟢 {harmless} harmless | 🔴 {malicious} malicious | ⚠️ {suspicious} suspicious | ⚪️ {undetected} undetected",
     ]
@@ -4893,8 +4893,8 @@ def _format_vt_file_report(file_name: str, file_size: int, sha256: str, attrs: d
     return "\n".join(lines), reaction
 
 
-def _scan_url_virustotal(url: str, vt_key: str) -> tuple[str, str]:
-    """Scan or lookup a URL on VirusTotal. Returns (report_text, reaction_emoji)."""
+def _scan_url_virustotal(bot, accid, chat_id, msg_id, url: str, vt_key: str, max_attempts: int = 12) -> tuple[str | None, str | None]:
+    """Scan or lookup a URL on VirusTotal. Returns (report_text, reaction_emoji) or (None, None) if handled in-place."""
     url_id = base64.urlsafe_b64encode(url.encode("utf-8")).decode("ascii").rstrip("=")
 
     resp_data, status, err = _vt_api_request("GET", f"/urls/{url_id}", vt_key)
@@ -4913,32 +4913,60 @@ def _scan_url_virustotal(url: str, vt_key: str) -> tuple[str, str]:
         if not analysis_id:
             return "❌ VirusTotal returned invalid analysis response.", "❌"
 
+        gui_link = f"https://www.virustotal.com/gui/url/{url_id}"
+        interim_text = (
+            f"ℹ️ **VirusTotal URL Scan Submitted**\n\n"
+            f"🔗 **URL:** {url}\n\n"
+            f"Analysis is in progress. Please wait for the results...\n"
+            f"🌐 [View report on VirusTotal]({gui_link})"
+        )
+
+        status_msg_id = None
+        if bot and chat_id:
+            status_msg_id = _send(bot, accid, chat_id, interim_text, reply_to_id=msg_id)
+            if msg_id:
+                _react(bot, accid, msg_id, "⏳")
+
         # Poll analysis
-        a_data, a_status, a_err = _vt_api_request("GET", f"/analyses/{analysis_id}", vt_key)
-        if a_status == 200 and a_data:
-            attrs = a_data.get("data", {}).get("attributes", {})
-            if attrs.get("status") == "completed":
-                return _format_vt_url_report(url, url_id, attrs)
-            # Poll once more
+        for _ in range(max_attempts):
             a_data, a_status, a_err = _vt_api_request("GET", f"/analyses/{analysis_id}", vt_key)
             if a_status == 200 and a_data:
                 attrs = a_data.get("data", {}).get("attributes", {})
                 if attrs.get("status") == "completed":
-                    return _format_vt_url_report(url, url_id, attrs)
+                    report_text, reaction = _format_vt_url_report(url, url_id, attrs)
+                    if bot and chat_id and status_msg_id:
+                        try:
+                            bot.rpc.send_edit_request(accid, status_msg_id, report_text)
+                        except Exception as e:
+                            logger.warning(f"Failed to edit status message {status_msg_id}: {e}")
+                            _send(bot, accid, chat_id, report_text, reply_to_id=msg_id)
+                        if msg_id:
+                            _react(bot, accid, msg_id, reaction)
+                        return None, None
+                    return report_text, reaction
 
-        gui_link = f"https://www.virustotal.com/gui/url/{url_id}"
-        return (
-            f"ℹ️ **VirusTotal URL Scan Submitted**\n\n"
-            f"🔗 **URL:** `{url}`\n"
-            f"Analysis is in progress. You can check the results here:\n"
+        timeout_text = (
+            f"ℹ️ **VirusTotal URL Scan In Progress**\n\n"
+            f"🔗 **URL:** {url}\n\n"
+            f"Analysis is taking longer than usual on VirusTotal. You can view the live report here:\n"
             f"🌐 [View report on VirusTotal]({gui_link})"
-        ), "⏳"
+        )
+        if bot and chat_id and status_msg_id:
+            try:
+                bot.rpc.send_edit_request(accid, status_msg_id, timeout_text)
+            except Exception as e:
+                logger.warning(f"Failed to edit status message {status_msg_id}: {e}")
+                _send(bot, accid, chat_id, timeout_text, reply_to_id=msg_id)
+            if msg_id:
+                _react(bot, accid, msg_id, "⚪️")
+            return None, None
+        return timeout_text, "⚪️"
 
     return f"❌ VirusTotal API error: {err or f'Status {status}'}", "❌"
 
 
-def _scan_file_virustotal(file_info: dict, vt_key: str) -> tuple[str, str]:
-    """Scan or lookup a file on VirusTotal. Returns (report_text, reaction_emoji)."""
+def _scan_file_virustotal(bot, accid, chat_id, msg_id, file_info: dict, vt_key: str, max_attempts: int = 12) -> tuple[str | None, str | None]:
+    """Scan or lookup a file on VirusTotal. Returns (report_text, reaction_emoji) or (None, None) if handled in-place."""
     file_path = file_info["path"]
     file_name = file_info.get("filename") or os.path.basename(file_path)
 
@@ -4989,27 +5017,56 @@ def _scan_file_virustotal(file_info: dict, vt_key: str) -> tuple[str, str]:
         if not analysis_id:
             return "❌ VirusTotal returned invalid upload response.", "❌"
 
+        gui_link = f"https://www.virustotal.com/gui/file/{sha256}"
+        interim_text = (
+            f"ℹ️ **VirusTotal File Scan Submitted**\n\n"
+            f"📁 **File:** `{file_name}` ({_format_file_size(file_size)})\n"
+            f"🔑 **SHA-256:** `{sha256}`\n\n"
+            f"Analysis is in progress. Please wait for the results...\n"
+            f"🌐 [View report on VirusTotal]({gui_link})"
+        )
+
+        status_msg_id = None
+        if bot and chat_id:
+            status_msg_id = _send(bot, accid, chat_id, interim_text, reply_to_id=msg_id)
+            if msg_id:
+                _react(bot, accid, msg_id, "⏳")
+
         # Poll analysis
-        a_data, a_status, a_err = _vt_api_request("GET", f"/analyses/{analysis_id}", vt_key)
-        if a_status == 200 and a_data:
-            attrs = a_data.get("data", {}).get("attributes", {})
-            if attrs.get("status") == "completed":
-                return _format_vt_file_report(file_name, file_size, sha256, attrs)
-            # Poll once more
+        for _ in range(max_attempts):
             a_data, a_status, a_err = _vt_api_request("GET", f"/analyses/{analysis_id}", vt_key)
             if a_status == 200 and a_data:
                 attrs = a_data.get("data", {}).get("attributes", {})
                 if attrs.get("status") == "completed":
-                    return _format_vt_file_report(file_name, file_size, sha256, attrs)
+                    report_text, reaction = _format_vt_file_report(file_name, file_size, sha256, attrs)
+                    if bot and chat_id and status_msg_id:
+                        try:
+                            bot.rpc.send_edit_request(accid, status_msg_id, report_text)
+                        except Exception as e:
+                            logger.warning(f"Failed to edit status message {status_msg_id}: {e}")
+                            _send(bot, accid, chat_id, report_text, reply_to_id=msg_id)
+                        if msg_id:
+                            _react(bot, accid, msg_id, reaction)
+                        return None, None
+                    return report_text, reaction
 
-        gui_link = f"https://www.virustotal.com/gui/file/{sha256}"
-        return (
-            f"ℹ️ **VirusTotal File Scan Submitted**\n\n"
+        timeout_text = (
+            f"ℹ️ **VirusTotal File Scan In Progress**\n\n"
             f"📁 **File:** `{file_name}` ({_format_file_size(file_size)})\n"
             f"🔑 **SHA-256:** `{sha256}`\n\n"
-            f"Analysis is in progress. You can check the results here:\n"
+            f"Analysis is taking longer than usual on VirusTotal. You can view the live report here:\n"
             f"🌐 [View report on VirusTotal]({gui_link})"
-        ), "⏳"
+        )
+        if bot and chat_id and status_msg_id:
+            try:
+                bot.rpc.send_edit_request(accid, status_msg_id, timeout_text)
+            except Exception as e:
+                logger.warning(f"Failed to edit status message {status_msg_id}: {e}")
+                _send(bot, accid, chat_id, timeout_text, reply_to_id=msg_id)
+            if msg_id:
+                _react(bot, accid, msg_id, "⚪️")
+            return None, None
+        return timeout_text, "⚪️"
 
     return f"❌ VirusTotal API error: {err or f'Status {status}'}", "❌"
 
@@ -5022,12 +5079,14 @@ def bg_virus_worker(bot, accid, chat_id, msg_id, target_type, target_data, vt_ke
 
     try:
         if target_type == "url":
-            report_text, reaction = _scan_url_virustotal(target_data, vt_key)
+            report_text, reaction = _scan_url_virustotal(bot, accid, chat_id, msg_id, target_data, vt_key)
         else:
-            report_text, reaction = _scan_file_virustotal(target_data, vt_key)
+            report_text, reaction = _scan_file_virustotal(bot, accid, chat_id, msg_id, target_data, vt_key)
 
-        _react(bot, accid, msg_id, reaction)
-        _send(bot, accid, chat_id, report_text, reply_to_id=msg_id)
+        if report_text is not None:
+            if reaction:
+                _react(bot, accid, msg_id, reaction)
+            _send(bot, accid, chat_id, report_text, reply_to_id=msg_id)
     except Exception as e:
         logger.error(f"Error in bg_virus_worker: {e}", exc_info=True)
         _react(bot, accid, msg_id, "❌")
