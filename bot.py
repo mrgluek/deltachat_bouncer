@@ -5983,9 +5983,9 @@ def _format_post_time(ts: float) -> str:
         return ""
 
 
-def get_landing_page_html() -> str:
+def get_landing_page_html(ingress_path: str = "") -> str:
     global index_page_html_cache
-    if index_page_html_cache is not None:
+    if not ingress_path and index_page_html_cache is not None:
         return index_page_html_cache
 
     invite_link = get_bot_invite_link()
@@ -5993,14 +5993,15 @@ def get_landing_page_html() -> str:
     if invite_link.startswith("OPEN-CHAT:"):
         deep_link = "https://i.delta.chat/#" + invite_link[10:]
 
+    base_path = ingress_path.rstrip("/")
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Delta Chat Bouncer Bot</title>
-    <link rel="icon" type="image/png" href="/icon.png" />
-    <link rel="shortcut icon" href="/favicon.ico" />
+    <link rel="icon" type="image/png" href="{base_path}/icon.png" />
+    <link rel="shortcut icon" href="{base_path}/favicon.ico" />
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
@@ -6223,7 +6224,7 @@ def get_landing_page_html() -> str:
 <body>
     <header>
         <div class="logo-container">
-            <img src="/icon.png" alt="Bouncer Bot Logo" class="logo-img" onerror="this.style.display='none'" />
+            <img src="{base_path}/icon.png" alt="Bouncer Bot Logo" class="logo-img" onerror="this.style.display='none'" />
             <span class="logo-title">Bouncer Bot</span>
         </div>
         <div class="header-links">
@@ -6340,7 +6341,7 @@ def get_landing_page_html() -> str:
         <div class="modal-content">
             <h3>Add Bouncer Bot</h3>
             <p style="font-size: 0.9rem; color: var(--text-muted);">Scan this QR code with your Delta Chat mobile app or click the link below.</p>
-            <img src="/qr.png" alt="Bot QR Code" />
+            <img src="{base_path}/qr.png" alt="Bot QR Code" />
             <div style="display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap;">
                 <a href="{deep_link}" class="cta-btn" style="padding: 0.5rem 1rem; font-size: 0.9rem;">Open in Delta Chat</a>
                 <button class="close-btn" onclick="document.getElementById('qr-modal').style.display='none'">Close</button>
@@ -6358,7 +6359,7 @@ def get_landing_page_html() -> str:
     return html_content
 
 
-def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str) -> str:
+def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, ingress_path: str = "") -> str:
     token = channel.get("token", "")
     ch_name = channel.get("name") or "Channel"
     ch_desc = channel.get("description") or ""
@@ -6377,11 +6378,15 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str) ->
     elif invite_link.startswith("dcqr://"):
         join_link = "https://i.delta.chat/#" + invite_link[7:]
 
+    base_path = ingress_path.rstrip("/")
     ch_name_esc = html.escape(ch_name)
     ch_desc_summary = html.escape(ch_desc[:160]) if ch_desc else f"Preview posts from {ch_name_esc} on Delta Chat."
-    ch_url = f"{base_url.rstrip('/')}/c/{token}"
-    avatar_url = f"{ch_url}/avatar.png"
-    rss_url = f"{ch_url}/rss.xml"
+    has_full_base = bool(base_url and base_url.startswith(("http://", "https://")))
+    ch_url = f"{base_url.rstrip('/')}/c/{token}" if has_full_base else f"{base_path}/c/{token}"
+    avatar_url = f"{base_path}/c/{token}/avatar.png"
+    qr_img_url = f"{base_path}/c/{token}/qr.png"
+    rss_url = f"{base_url.rstrip('/')}/c/{token}/rss.xml" if has_full_base else f"{base_path}/c/{token}/rss.xml"
+    home_url = f"{base_path}/" if base_path else "/"
 
     # Build posts HTML
     posts_html_parts = []
@@ -6400,7 +6405,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str) ->
 
             media_html = ""
             if media_fn and msg_id:
-                media_url = f"/media/{token}/{msg_id}/{media_fn}"
+                media_url = f"{base_path}/media/{token}/{msg_id}/{media_fn}"
                 if media_type == "image":
                     media_html = f'<div class="post-media"><a href="{media_url}" target="_blank"><img src="{media_url}" alt="Post image" class="post-media-img" loading="lazy" /></a></div>'
                 elif media_type == "video":
@@ -6431,7 +6436,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str) ->
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{ch_name_esc} — Delta Chat Channel</title>
     <meta name="description" content="{ch_desc_summary}">
-    <link rel="icon" type="image/png" href="/c/{token}/avatar.png" />
+    <link rel="icon" type="image/png" href="{avatar_url}" />
     <link rel="alternate" type="application/rss+xml" title="{ch_name_esc} RSS Feed" href="{rss_url}">
 
     <!-- Open Graph / Social Sharing Cards -->
@@ -6724,7 +6729,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str) ->
 <body>
     <header>
         <div class="top-nav">
-            <a href="/">← Home</a>
+            <a href="{home_url}">← Home</a>
         </div>
         <div class="top-nav">
             <a href="{rss_url}">📡 RSS Feed</a>
@@ -6733,7 +6738,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str) ->
 
     <main>
         <section class="channel-card">
-            <img src="/c/{token}/avatar.png" alt="{ch_name_esc} Avatar" class="channel-avatar" onerror="this.src='/icon.png'" />
+            <img src="{avatar_url}" alt="{ch_name_esc} Avatar" class="channel-avatar" onerror="this.src='{base_path}/icon.png'" />
             <div class="channel-info">
                 <h1>{ch_name_esc}</h1>
                 {subscribers_pill}
@@ -6756,7 +6761,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str) ->
         <div class="modal-content">
             <h3>Scan with Delta Chat</h3>
             <p style="font-size: 0.9rem; color: var(--text-muted);">Scan this QR code with the Delta Chat camera to join <strong>{ch_name_esc}</strong>.</p>
-            <img src="/c/{token}/qr.png" alt="Channel Join QR Code" />
+            <img src="{qr_img_url}" alt="Channel Join QR Code" />
             <div style="display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap;">
                 <button class="close-btn" onclick="navigator.clipboard.writeText('{join_link}').then(() => alert('Link copied to clipboard!'))">Copy Link</button>
                 <button class="close-btn" onclick="document.getElementById('qr-modal').style.display='none'">Close</button>
@@ -6772,7 +6777,9 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str) ->
 """
 
 
-def get_tombstone_html(channel_name: str) -> str:
+def get_tombstone_html(channel_name: str, ingress_path: str = "") -> str:
+    base_path = ingress_path.rstrip("/")
+    home_url = f"{base_path}/" if base_path else "/"
     ch_esc = html.escape(channel_name)
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -6780,7 +6787,7 @@ def get_tombstone_html(channel_name: str) -> str:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Channel Removed — Delta Chat</title>
-    <link rel="icon" type="image/png" href="/icon.png" />
+    <link rel="icon" type="image/png" href="{base_path}/icon.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
@@ -6838,35 +6845,37 @@ def get_tombstone_html(channel_name: str) -> str:
         <div class="icon">🔒</div>
         <h1>Channel No Longer Available</h1>
         <p>The channel <strong>{ch_esc}</strong> has been removed from the public catalog and is no longer available for preview.</p>
-        <a href="/" class="btn">← Return to Home</a>
+        <a href="{home_url}" class="btn">← Return to Home</a>
     </div>
 </body>
 </html>
 """
 
 
-def get_404_html() -> str:
-    return """<!DOCTYPE html>
+def get_404_html(ingress_path: str = "") -> str:
+    base_path = ingress_path.rstrip("/")
+    home_url = f"{base_path}/" if base_path else "/"
+    return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Channel Not Found — Delta Chat</title>
-    <link rel="icon" type="image/png" href="/icon.png" />
+    <link rel="icon" type="image/png" href="{base_path}/icon.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
     <style>
-        :root {
+        :root {{
             --bg-color: #0b0f19;
             --card-bg: rgba(20, 26, 42, 0.7);
             --border-color: rgba(255, 255, 255, 0.08);
             --text-main: #f3f4f6;
             --text-muted: #9ca3af;
             --color-primary: #3b82f6;
-        }
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
+        }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{
             font-family: 'Outfit', sans-serif;
             background-color: var(--bg-color);
             color: var(--text-main);
@@ -6877,8 +6886,8 @@ def get_404_html() -> str:
             align-items: center;
             padding: 1.5rem;
             text-align: center;
-        }
-        .card {
+        }}
+        .card {{
             background: var(--card-bg);
             border: 1px solid var(--border-color);
             border-radius: 1.25rem;
@@ -6889,11 +6898,11 @@ def get_404_html() -> str:
             flex-direction: column;
             align-items: center;
             gap: 1.25rem;
-        }
-        .icon { font-size: 3rem; }
-        h1 { font-size: 1.75rem; font-weight: 700; }
-        p { color: var(--text-muted); font-size: 1rem; line-height: 1.5; }
-        .btn {
+        }}
+        .icon {{ font-size: 3rem; }}
+        h1 {{ font-size: 1.75rem; font-weight: 700; }}
+        p {{ color: var(--text-muted); font-size: 1rem; line-height: 1.5; }}
+        .btn {{
             display: inline-block;
             background: var(--color-primary);
             color: white;
@@ -6902,7 +6911,7 @@ def get_404_html() -> str:
             border-radius: 0.75rem;
             font-weight: 600;
             margin-top: 0.5rem;
-        }
+        }}
     </style>
 </head>
 <body>
@@ -6910,7 +6919,7 @@ def get_404_html() -> str:
         <div class="icon">🔍</div>
         <h1>Channel Not Found</h1>
         <p>The requested channel preview could not be found. Please check that the URL is correct.</p>
-        <a href="/" class="btn">← Return to Home</a>
+        <a href="{home_url}" class="btn">← Return to Home</a>
     </div>
 </body>
 </html>
@@ -7016,7 +7025,8 @@ async def handle_health(request):
 
 
 async def handle_index(request):
-    content = get_landing_page_html()
+    ingress_path = request.headers.get("X-Ingress-Path", "")
+    content = get_landing_page_html(ingress_path=ingress_path)
     return web.Response(text=content, content_type="text/html", headers={"Cache-Control": "public, max-age=300"})
 
 
@@ -7056,13 +7066,14 @@ async def handle_qr_png(request):
 
 
 async def handle_channel_preview(request):
+    ingress_path = request.headers.get("X-Ingress-Path", "")
     token = request.match_info.get('token')
     channel = database.get_catalog_channel_by_token(token)
     if not channel:
-        return web.Response(text=get_404_html(), status=404, content_type="text/html")
+        return web.Response(text=get_404_html(ingress_path=ingress_path), status=404, content_type="text/html")
 
     if channel.get('is_deleted'):
-        return web.Response(text=get_tombstone_html(channel.get("name") or "Channel"), status=200, content_type="text/html")
+        return web.Response(text=get_tombstone_html(channel.get("name") or "Channel", ingress_path=ingress_path), status=200, content_type="text/html")
 
     base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
     if not base_url:
@@ -7071,7 +7082,7 @@ async def handle_channel_preview(request):
         base_url = f"{scheme}://{host}"
 
     posts = database.get_channel_posts(channel['chat_id'], limit=50)
-    html_content = get_channel_preview_html(channel, posts, base_url)
+    html_content = get_channel_preview_html(channel, posts, base_url, ingress_path=ingress_path)
     return web.Response(text=html_content, content_type="text/html", headers={"Cache-Control": "public, max-age=60"})
 
 
@@ -7187,6 +7198,7 @@ async def handle_channel_rss(request):
         base_url = f"{scheme}://{host}"
 
     try:
+        posts = database.get_channel_posts(channel['chat_id'], limit=50)
         rss_xml = get_channel_rss_xml(channel, posts, base_url)
         return web.Response(text=rss_xml, content_type="application/rss+xml", charset="utf-8", headers={"Cache-Control": "public, max-age=300"})
     except Exception as e:
@@ -7196,7 +7208,9 @@ async def handle_channel_rss(request):
 
 async def handle_channel_rss_redirect(request):
     token = request.match_info.get('token')
-    raise web.HTTPFound(f"/c/{token}/rss.xml")
+    ingress_path = request.headers.get("X-Ingress-Path", "")
+    base_path = ingress_path.rstrip("/")
+    raise web.HTTPFound(f"{base_path}/c/{token}/rss.xml")
 
 
 async def handle_media_file(request):

@@ -213,6 +213,7 @@ class TestWebPreview(unittest.TestCase):
                 "media_path": "test_media_dir/token/photo.jpg"
             }
         ]
+        # Channel preview without ingress
         preview_html = bot.get_channel_preview_html(channel, posts, "https://channels.example.com")
         self.assertIn("Design", preview_html)
         self.assertIn("UI/UX talks", preview_html)
@@ -220,16 +221,41 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn("https://delta.chat", preview_html)
         self.assertIn("photo.jpg", preview_html)
         self.assertIn(f"/c/{token}/rss.xml", preview_html)
+        self.assertIn("15 subscribers", preview_html)
+        self.assertIn('href="/"', preview_html)
+
+        # Channel preview with 1 member (shows Channel badge)
+        channel_single = dict(channel)
+        channel_single["member_count"] = 1
+        single_html = bot.get_channel_preview_html(channel_single, [], "")
+        self.assertIn("📢 Channel", single_html)
+
+        # Channel preview with ingress
+        ingress = "/api/hassio_ingress/token123"
+        preview_ingress = bot.get_channel_preview_html(channel, posts, "", ingress_path=ingress)
+        self.assertIn(f"{ingress}/c/{token}/avatar.png", preview_ingress)
+        self.assertIn(f"{ingress}/c/{token}/qr.png", preview_ingress)
+        self.assertIn(f"{ingress}/media/{token}/2/photo.jpg", preview_ingress)
+        self.assertIn(f'href="{ingress}/"', preview_ingress)
+
+        # Landing page with ingress
+        landing_ingress = bot.get_landing_page_html(ingress_path=ingress)
+        self.assertIn(f"{ingress}/icon.png", landing_ingress)
+        self.assertIn(f"{ingress}/qr.png", landing_ingress)
 
         # Tombstone HTML
-        tombstone_html = bot.get_tombstone_html(channel["name"])
+        tombstone_html = bot.get_tombstone_html(channel["name"], ingress_path=ingress)
         self.assertIn("Channel Removed", tombstone_html)
         self.assertIn("Design", tombstone_html)
         self.assertIn("has been removed from the public catalog", tombstone_html)
+        self.assertIn(f'href="{ingress}/"', tombstone_html)
+        self.assertIn(f'{ingress}/icon.png', tombstone_html)
 
         # 404 HTML
-        not_found_html = bot.get_404_html()
+        not_found_html = bot.get_404_html(ingress_path=ingress)
         self.assertIn("Channel Not Found", not_found_html)
+        self.assertIn(f'href="{ingress}/"', not_found_html)
+        self.assertIn(f'{ingress}/icon.png', not_found_html)
 
     def test_rss_xml_generation(self):
         token = database.add_catalog_channel(
