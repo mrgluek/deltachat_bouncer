@@ -36,7 +36,7 @@ import database
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.11.4"
+VERSION = "2.11.5"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -6266,6 +6266,44 @@ def get_landing_page_html(ingress_path: str = "") -> str:
         deep_link = "https://i.delta.chat/#" + invite_link[10:]
 
     base_path = ingress_path.rstrip("/")
+    bg_url = f"{base_path}/background.jpg"
+    home_url = f"{base_path}/" if base_path else "/"
+    channels = database.get_all_catalog_channels()
+
+    channel_items = []
+    for ch in channels:
+        t = ch.get("token")
+        if not t:
+            continue
+        c_name = html.escape(ch.get("name") or "Channel")
+        c_desc = html.escape(ch.get("description") or "")
+        c_desc_short = (c_desc[:120] + "…") if len(c_desc) > 120 else c_desc
+        c_members = ch.get("member_count") or 0
+        c_mem_str = f"👥 {c_members} subscribers" if c_members > 1 else "📢 Channel"
+        c_url = f"{base_path}/c/{t}"
+        c_avatar = f"{base_path}/c/{t}/avatar.png"
+        channel_items.append(f"""
+            <a href="{c_url}" class="channel-card-item">
+                <img src="{c_avatar}" alt="{c_name}" class="channel-card-avatar" onerror="this.src='{base_path}/icon.png'" />
+                <div class="channel-card-content">
+                    <div class="channel-card-title">{c_name}</div>
+                    <div class="channel-card-meta">{c_mem_str}</div>
+                    {f'<div class="channel-card-desc">{c_desc_short}</div>' if c_desc_short else ''}
+                </div>
+            </a>
+        """)
+
+    channels_section = ""
+    if channel_items:
+        channels_section = f"""
+        <section class="card">
+            <h2>📢 Public Channels ({len(channel_items)})</h2>
+            <div class="channels-grid">
+                {''.join(channel_items)}
+            </div>
+        </section>
+        """
+
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -6274,233 +6312,289 @@ def get_landing_page_html(ingress_path: str = "") -> str:
     <title>Delta Chat Bouncer Bot</title>
     <link rel="icon" type="image/png" href="{base_path}/icon.png" />
     <link rel="shortcut icon" href="{base_path}/favicon.ico" />
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
     <style>
         :root {{
-            --bg-color: #0b0f19;
-            --card-bg: rgba(20, 26, 42, 0.7);
-            --border-color: rgba(255, 255, 255, 0.08);
-            --text-main: #f3f4f6;
-            --text-muted: #9ca3af;
-            --color-up: #10b981;
-            --color-primary: #3b82f6;
-            --glow-primary: rgba(59, 130, 246, 0.4);
+            --bg-color: #19232b;
+            --card-bg: #232d36;
+            --card-border: rgba(255, 255, 255, 0.08);
+            --text-main: #e9edef;
+            --text-muted: #8696a0;
+            --color-primary: #2090ea;
+            --accent-blue: #53bdeb;
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
-            font-family: 'Outfit', sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif;
             background-color: var(--bg-color);
+            background-image: url('{bg_url}');
+            background-repeat: repeat;
+            background-size: 430px auto;
+            background-attachment: fixed;
             color: var(--text-main);
             min-height: 100vh;
             display: flex;
             flex-direction: column;
             justify-content: space-between;
-            background-image: 
-                radial-gradient(circle at 10% 20%, rgba(59, 130, 246, 0.07) 0%, transparent 40%),
-                radial-gradient(circle at 90% 80%, rgba(16, 185, 129, 0.05) 0%, transparent 40%);
+            -webkit-font-smoothing: antialiased;
         }}
         header {{
-            padding: 2rem 1.5rem;
-            max-width: 900px;
+            padding: 1.5rem 1rem;
+            max-width: 760px;
             width: 100%;
             margin: 0 auto;
             display: flex;
             justify-content: space-between;
             align-items: center;
         }}
-        .logo-container {{ display: flex; align-items: center; gap: 0.75rem; text-decoration: none; }}
-        .logo-img {{ width: 36px; height: 36px; border-radius: 8px; object-fit: cover; }}
+        .logo-container {{
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            text-decoration: none;
+            color: var(--text-main);
+        }}
+        .logo-img {{ width: 32px; height: 32px; border-radius: 8px; object-fit: cover; }}
         .logo-title {{
-            font-size: 1.5rem;
+            font-size: 1.25rem;
             font-weight: 700;
-            background: linear-gradient(135deg, #3b82f6, #10b981);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+            color: #ffffff;
         }}
         .header-links a {{
             color: var(--text-muted);
             text-decoration: none;
-            font-size: 0.95rem;
-            transition: color 0.2s;
+            font-size: 0.9rem;
+            transition: color 0.15s;
         }}
         .header-links a:hover {{ color: var(--text-main); }}
         main {{
             flex-grow: 1;
-            max-width: 900px;
+            max-width: 760px;
             width: 100%;
             margin: 0 auto;
-            padding: 0 1.5rem 3rem;
+            padding: 0 1rem 2.5rem;
             display: flex;
             flex-direction: column;
-            gap: 2.5rem;
+            gap: 1.5rem;
         }}
         .hero {{
             text-align: center;
-            padding: 2rem 0 1rem;
+            padding: 1.5rem 0 0.5rem;
             display: flex;
             flex-direction: column;
             align-items: center;
-            gap: 1.25rem;
+            gap: 1rem;
         }}
         .hero-badge {{
             display: inline-flex;
             align-items: center;
-            gap: 0.5rem;
-            background: rgba(59, 130, 246, 0.1);
-            border: 1px solid rgba(59, 130, 246, 0.25);
-            padding: 0.35rem 0.85rem;
+            gap: 0.4rem;
+            background: rgba(32, 144, 234, 0.12);
+            border: 1px solid rgba(32, 144, 234, 0.25);
+            padding: 0.3rem 0.75rem;
             border-radius: 9999px;
-            font-size: 0.85rem;
-            color: #60a5fa;
+            font-size: 0.82rem;
+            color: var(--accent-blue);
             font-weight: 500;
         }}
         .hero h1 {{
-            font-size: 2.5rem;
+            font-size: 2rem;
             font-weight: 700;
-            line-height: 1.2;
-            background: linear-gradient(135deg, #ffffff, #9ca3af);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+            line-height: 1.25;
+            color: #ffffff;
         }}
         .hero p {{
-            font-size: 1.15rem;
-            color: var(--text-muted);
-            max-width: 680px;
+            font-size: 1rem;
+            color: #d1d5db;
+            max-width: 640px;
             line-height: 1.6;
         }}
-        .cta-btn {{
+        .btn {{
             display: inline-flex;
             align-items: center;
-            gap: 0.5rem;
-            background: linear-gradient(135deg, #3b82f6, #2563eb);
-            color: white;
-            padding: 0.85rem 1.75rem;
-            border-radius: 0.75rem;
+            gap: 0.45rem;
+            padding: 0.65rem 1.35rem;
+            border-radius: 8px;
             text-decoration: none;
-            font-weight: 600;
-            font-size: 1rem;
-            box-shadow: 0 4px 15px var(--glow-primary);
-            transition: transform 0.2s, box-shadow 0.2s;
+            font-weight: 500;
+            font-size: 0.95rem;
             cursor: pointer;
             border: none;
+            font-family: inherit;
+            transition: background 0.15s, opacity 0.15s;
         }}
-        .cta-btn:hover {{
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(59, 130, 246, 0.6);
+        .btn-primary {{
+            background: var(--color-primary);
+            color: #ffffff;
         }}
+        .btn-primary:hover {{ background: #1a7ec9; }}
         .card {{
             background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 1rem;
-            padding: 2rem;
-            backdrop-filter: blur(12px);
-            position: relative;
-            overflow: hidden;
-        }}
-        .card::before {{
-            content: '';
-            position: absolute;
-            top: 0; left: 0; right: 0;
-            height: 3px;
-            background: linear-gradient(90deg, #3b82f6, #10b981);
+            border: 1px solid var(--card-border);
+            border-radius: 14px;
+            padding: 1.5rem;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
         }}
         .card h2 {{
-            font-size: 1.4rem;
+            font-size: 1.25rem;
             font-weight: 600;
-            margin-bottom: 1.25rem;
+            color: #ffffff;
+            margin-bottom: 1rem;
             display: flex;
             align-items: center;
             gap: 0.5rem;
+        }}
+        .channels-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 0.75rem;
+        }}
+        .channel-card-item {{
+            display: flex;
+            align-items: center;
+            gap: 0.85rem;
+            padding: 0.75rem;
+            background: rgba(0, 0, 0, 0.18);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 10px;
+            text-decoration: none;
+            color: var(--text-main);
+            transition: background 0.15s, border-color 0.15s;
+        }}
+        .channel-card-item:hover {{
+            background: rgba(0, 0, 0, 0.32);
+            border-color: rgba(255, 255, 255, 0.12);
+        }}
+        .channel-card-avatar {{
+            width: 46px;
+            height: 46px;
+            border-radius: 50%;
+            object-fit: cover;
+            flex-shrink: 0;
+            background: #19232b;
+        }}
+        .channel-card-content {{
+            overflow: hidden;
+            flex-grow: 1;
+        }}
+        .channel-card-title {{
+            font-weight: 600;
+            font-size: 0.95rem;
+            color: #ffffff;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+        .channel-card-meta {{
+            font-size: 0.78rem;
+            color: var(--text-muted);
+            margin-top: 1px;
+        }}
+        .channel-card-desc {{
+            font-size: 0.82rem;
+            color: #9ca3af;
+            margin-top: 2px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }}
         .features-grid {{
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-            gap: 1.5rem;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 1.25rem;
         }}
         .feature-item {{
             display: flex;
-            gap: 0.85rem;
+            gap: 0.75rem;
         }}
-        .feature-icon {{ font-size: 1.5rem; flex-shrink: 0; line-height: 1; }}
-        .feature-text h3 {{ font-size: 1.05rem; font-weight: 600; margin-bottom: 0.35rem; }}
-        .feature-text p {{ font-size: 0.9rem; color: var(--text-muted); line-height: 1.45; }}
+        .feature-icon {{ font-size: 1.35rem; flex-shrink: 0; line-height: 1.2; }}
+        .feature-text h3 {{ font-size: 0.98rem; font-weight: 600; color: #ffffff; margin-bottom: 0.25rem; }}
+        .feature-text p {{ font-size: 0.88rem; color: var(--text-muted); line-height: 1.5; }}
         .commands-table {{
             width: 100%;
             border-collapse: collapse;
-            margin-top: 0.5rem;
+            margin-top: 0.25rem;
         }}
         .commands-table th, .commands-table td {{
             text-align: left;
-            padding: 0.75rem 1rem;
-            border-bottom: 1px solid var(--border-color);
+            padding: 0.65rem 0.75rem;
+            border-bottom: 1px solid var(--card-border);
+            font-size: 0.9rem;
         }}
         .commands-table th {{
             color: var(--text-muted);
-            font-size: 0.85rem;
+            font-size: 0.8rem;
             text-transform: uppercase;
-            letter-spacing: 0.05em;
+            letter-spacing: 0.04em;
         }}
         .commands-table code {{
-            background: rgba(255, 255, 255, 0.06);
-            padding: 0.2rem 0.4rem;
+            background: rgba(0, 0, 0, 0.25);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            padding: 0.15rem 0.4rem;
             border-radius: 4px;
-            color: #60a5fa;
-            font-family: monospace;
-            font-size: 0.9rem;
+            color: var(--accent-blue);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+            font-size: 0.85rem;
         }}
         footer {{
-            border-top: 1px solid var(--border-color);
-            padding: 2rem 1.5rem;
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            padding: 1.5rem 1rem;
             text-align: center;
             color: var(--text-muted);
-            font-size: 0.9rem;
+            font-size: 0.85rem;
         }}
-        footer a {{ color: var(--color-primary); text-decoration: none; }}
-        footer a:hover {{ text-decoration: underline; }}
+        footer a {{ color: var(--text-muted); text-decoration: underline; text-underline-offset: 2px; }}
+        footer a:hover {{ color: var(--text-main); }}
         .modal {{
             display: none;
             position: fixed;
             top: 0; left: 0; width: 100%; height: 100%;
             background: rgba(0, 0, 0, 0.75);
-            backdrop-filter: blur(8px);
+            backdrop-filter: blur(6px);
             z-index: 1000;
             justify-content: center;
             align-items: center;
         }}
         .modal-content {{
-            background: #141a2a;
-            border: 1px solid var(--border-color);
-            border-radius: 1rem;
-            padding: 2rem;
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 14px;
+            padding: 1.75rem;
             text-align: center;
-            max-width: 400px;
+            max-width: 380px;
             width: 90%;
             display: flex;
             flex-direction: column;
-            gap: 1.25rem;
+            gap: 1rem;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
         }}
-        .modal-content img {{ width: 220px; height: 220px; margin: 0 auto; border-radius: 8px; }}
+        .modal-content img {{
+            width: 220px;
+            height: 220px;
+            margin: 0 auto;
+            border-radius: 8px;
+            background: #ffffff;
+            padding: 8px;
+        }}
         .close-btn {{
-            background: rgba(255, 255, 255, 0.1);
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.1);
             color: var(--text-main);
-            border: none;
             padding: 0.5rem 1rem;
-            border-radius: 0.5rem;
+            border-radius: 6px;
             cursor: pointer;
             font-family: inherit;
         }}
+        .close-btn:hover {{ background: rgba(255, 255, 255, 0.14); }}
     </style>
 </head>
 <body>
     <header>
-        <div class="logo-container">
+        <a href="{home_url}" class="logo-container">
             <img src="{base_path}/icon.png" alt="Bouncer Bot Logo" class="logo-img" onerror="this.style.display='none'" />
-            <span class="logo-title">Bouncer Bot</span>
-        </div>
+            <span class="logo-title">Delta Chat Bouncer</span>
+        </a>
         <div class="header-links">
-            <a href="https://github.com/mrgluek/deltachat_bouncer" target="_blank">GitHub</a>
+            <a href="https://github.com/mrgluek/deltachat_bouncer" target="_blank" rel="noopener noreferrer">GitHub</a>
         </div>
     </header>
 
@@ -6509,10 +6603,12 @@ def get_landing_page_html(ingress_path: str = "") -> str:
             <div class="hero-badge">🛡️ Group Quality & Channel Gateway</div>
             <h1>Maintain Group Quality & Channel Web Previews</h1>
             <p>Bouncer bot maintains group quality by monitoring inactivity and saving server resources by pruning stale users. It features inactivity reports, automatic two-stage warnings & kicks, VirusTotal security inspection, CMPing server monitoring, and clean web previews & RSS feeds for public channels.</p>
-            <button class="cta-btn" onclick="document.getElementById('qr-modal').style.display='flex'">
+            <button class="btn btn-primary" onclick="document.getElementById('qr-modal').style.display='flex'">
                 <span>📱</span> Add Bot to Delta Chat
             </button>
         </section>
+
+        {channels_section}
 
         <section class="card">
             <h2>✨ Core Capabilities</h2>
@@ -6615,7 +6711,7 @@ def get_landing_page_html(ingress_path: str = "") -> str:
             <p style="font-size: 0.9rem; color: var(--text-muted);">Scan this QR code with your Delta Chat mobile app or click the link below.</p>
             <img src="{base_path}/qr.png" alt="Bot QR Code" />
             <div style="display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap;">
-                <a href="{deep_link}" class="cta-btn" style="padding: 0.5rem 1rem; font-size: 0.9rem;">Open in Delta Chat</a>
+                <a href="{deep_link}" class="btn btn-primary" style="padding: 0.5rem 1rem; font-size: 0.9rem;">Open in Delta Chat</a>
                 <button class="close-btn" onclick="document.getElementById('qr-modal').style.display='none'">Close</button>
             </div>
         </div>
@@ -6688,13 +6784,16 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
                     media_html = f'<div class="post-media"><a href="{media_url}" download class="post-media-file">📎 Download {html.escape(media_fn)}</a></div>'
 
             post_card = f"""
-            <article class="post-card">
-                <div class="post-header">
+            <article class="post-bubble post-card">
+                <div class="post-bubble-header post-header">
                     <span class="post-author">{from_name}</span>
-                    <span class="post-date">{time_str}</span>
                 </div>
                 {f'<div class="post-body">{p_text}</div>' if p_text else ''}
                 {media_html}
+                <div class="post-meta">
+                    <time class="post-time post-date" title="{time_str}">{time_str}</time>
+                    <span class="post-status-check">✓</span>
+                </div>
             </article>
             """
             posts_html_parts.append(post_card)
@@ -6722,38 +6821,39 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
     <meta name="twitter:description" content="{ch_desc_summary}">
     <meta name="twitter:image" content="{avatar_url}">
 
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {{
-            --bg-color: #0b0f19;
-            --card-bg: rgba(20, 26, 42, 0.7);
-            --border-color: rgba(255, 255, 255, 0.08);
-            --text-main: #f3f4f6;
-            --text-muted: #9ca3af;
-            --color-primary: #3b82f6;
-            --color-up: #10b981;
-            --glow-primary: rgba(59, 130, 246, 0.4);
+            --bg-color: #19232b;
+            --bubble-bg: #232d36;
+            --border-subtle: rgba(255, 255, 255, 0.08);
+            --border-bubble: rgba(255, 255, 255, 0.05);
+            --text-main: #e9edef;
+            --text-muted: #8696a0;
+            --text-secondary: #aebac1;
+            --color-primary: #2090ea;
+            --color-author: #53bdeb;
+            --color-success: #00a884;
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
-            font-family: 'Outfit', sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif;
             background-color: var(--bg-color);
+            background-image: url('{base_path}/background.jpg');
+            background-repeat: repeat;
+            background-size: 430px auto;
+            background-attachment: fixed;
             color: var(--text-main);
             min-height: 100vh;
             display: flex;
             flex-direction: column;
             justify-content: space-between;
-            background-image: 
-                radial-gradient(circle at 10% 20%, rgba(59, 130, 246, 0.06) 0%, transparent 40%),
-                radial-gradient(circle at 90% 80%, rgba(16, 185, 129, 0.04) 0%, transparent 40%);
+            -webkit-font-smoothing: antialiased;
         }}
         header {{
-            padding: 1.5rem;
-            max-width: 760px;
+            max-width: 680px;
             width: 100%;
             margin: 0 auto;
+            padding: 1.25rem 1rem 0.5rem;
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -6762,186 +6862,189 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
             color: var(--text-muted);
             text-decoration: none;
             font-size: 0.9rem;
-            display: flex;
+            font-weight: 500;
+            display: inline-flex;
             align-items: center;
-            gap: 0.4rem;
+            gap: 0.35rem;
+            transition: color 0.15s;
         }}
         .top-nav a:hover {{ color: var(--text-main); }}
         main {{
             flex-grow: 1;
-            max-width: 760px;
+            max-width: 680px;
             width: 100%;
             margin: 0 auto;
-            padding: 0 1.25rem 3rem;
+            padding: 0.75rem 1rem 3rem;
             display: flex;
             flex-direction: column;
-            gap: 1.75rem;
+            gap: 1.25rem;
         }}
         .channel-card {{
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 1.25rem;
-            padding: 2rem;
-            backdrop-filter: blur(12px);
+            background: var(--bubble-bg);
+            border: 1px solid var(--border-subtle);
+            border-radius: 14px;
+            padding: 1.75rem 1.5rem;
             display: flex;
             flex-direction: column;
             align-items: center;
             text-align: center;
-            gap: 1.25rem;
+            gap: 1rem;
             position: relative;
-            overflow: hidden;
-        }}
-        .channel-card::before {{
-            content: '';
-            position: absolute;
-            top: 0; left: 0; right: 0;
-            height: 4px;
-            background: linear-gradient(90deg, #3b82f6, #10b981);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
         }}
         .channel-avatar {{
-            width: 96px;
-            height: 96px;
+            width: 88px;
+            height: 88px;
             border-radius: 50%;
             object-fit: cover;
-            border: 3px solid rgba(59, 130, 246, 0.4);
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+            border: 2px solid rgba(255, 255, 255, 0.12);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }}
+        .channel-info {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.4rem;
         }}
         .channel-info h1 {{
-            font-size: 1.85rem;
-            font-weight: 700;
-            margin-bottom: 0.5rem;
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: var(--text-main);
+            word-break: break-word;
         }}
         .subscribers-pill {{
             display: inline-flex;
             align-items: center;
-            gap: 0.4rem;
-            background: rgba(16, 185, 129, 0.1);
-            color: #34d399;
-            border: 1px solid rgba(16, 185, 129, 0.25);
-            padding: 0.25rem 0.75rem;
+            gap: 0.35rem;
+            background: rgba(83, 189, 235, 0.12);
+            color: var(--color-author);
+            border: 1px solid rgba(83, 189, 235, 0.25);
+            padding: 0.2rem 0.75rem;
             border-radius: 9999px;
-            font-size: 0.85rem;
+            font-size: 0.8rem;
             font-weight: 500;
-            margin-bottom: 0.75rem;
         }}
         .channel-desc {{
-            font-size: 1rem;
-            color: var(--text-muted);
+            font-size: 0.95rem;
+            color: var(--text-secondary);
             line-height: 1.55;
-            max-width: 600px;
+            max-width: 580px;
             word-break: break-word;
+            margin-top: 0.25rem;
         }}
+        .channel-desc a {{
+            color: var(--color-author);
+            text-decoration: none;
+        }}
+        .channel-desc a:hover {{ text-decoration: underline; }}
         .actions-row {{
             display: flex;
-            gap: 0.75rem;
+            gap: 0.65rem;
             flex-wrap: wrap;
             justify-content: center;
-            margin-top: 0.5rem;
+            margin-top: 0.25rem;
         }}
         .btn {{
             display: inline-flex;
             align-items: center;
-            gap: 0.5rem;
-            padding: 0.75rem 1.4rem;
-            border-radius: 0.75rem;
+            justify-content: center;
+            gap: 0.45rem;
+            padding: 0.65rem 1.25rem;
+            border-radius: 8px;
             text-decoration: none;
-            font-weight: 600;
-            font-size: 0.95rem;
+            font-weight: 500;
+            font-size: 0.92rem;
             cursor: pointer;
             border: none;
-            transition: transform 0.2s, background 0.2s, box-shadow 0.2s;
             font-family: inherit;
+            transition: background 0.15s, transform 0.15s;
         }}
         .btn-primary {{
-            background: linear-gradient(135deg, #3b82f6, #2563eb);
-            color: white;
-            box-shadow: 0 4px 15px var(--glow-primary);
+            background: var(--color-primary);
+            color: #ffffff;
         }}
         .btn-primary:hover {{
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(59, 130, 246, 0.6);
+            background: #1b7ed3;
         }}
         .btn-secondary {{
-            background: rgba(255, 255, 255, 0.08);
+            background: rgba(255, 255, 255, 0.07);
             color: var(--text-main);
-            border: 1px solid var(--border-color);
+            border: 1px solid var(--border-subtle);
         }}
         .btn-secondary:hover {{
-            background: rgba(255, 255, 255, 0.14);
-            transform: translateY(-2px);
+            background: rgba(255, 255, 255, 0.12);
         }}
         .feed-section h2 {{
-            font-size: 1.25rem;
+            font-size: 1.05rem;
             font-weight: 600;
-            margin-bottom: 1rem;
+            margin-bottom: 0.85rem;
             color: var(--text-muted);
             display: flex;
             align-items: center;
-            gap: 0.5rem;
+            gap: 0.45rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
         }}
-        .post-card {{
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 1rem;
-            padding: 1.5rem;
-            margin-bottom: 1rem;
-            backdrop-filter: blur(8px);
+        .post-bubble, .post-card {{
+            background: var(--bubble-bg);
+            border: 1px solid var(--border-bubble);
+            border-radius: 12px;
+            padding: 10px 14px 8px;
+            margin-bottom: 0.75rem;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
             display: flex;
             flex-direction: column;
-            gap: 0.85rem;
+            gap: 0.35rem;
         }}
-        .post-header {{
+        .post-bubble-header, .post-header {{
             display: flex;
             justify-content: space-between;
             align-items: baseline;
-            gap: 1rem;
+            gap: 0.75rem;
         }}
         .post-author {{
             font-weight: 600;
-            font-size: 0.95rem;
-            color: #60a5fa;
-        }}
-        .post-date {{
-            font-size: 0.8rem;
-            color: var(--text-muted);
-            white-space: nowrap;
+            font-size: 0.92rem;
+            color: var(--color-author);
         }}
         .post-body {{
-            font-size: 0.98rem;
-            line-height: 1.6;
+            font-size: 0.96rem;
+            line-height: 1.52;
+            color: var(--text-main);
             word-break: break-word;
         }}
-        .post-body a {{ color: var(--color-primary); text-decoration: none; }}
+        .post-body a {{ color: var(--color-author); text-decoration: none; }}
         .post-body a:hover {{ text-decoration: underline; }}
         .post-body blockquote {{
-            border-left: 3px solid var(--color-primary);
-            padding: 0.4rem 0.8rem;
-            margin: 0.5rem 0;
-            color: var(--text-muted);
-            background: rgba(255, 255, 255, 0.03);
-            border-radius: 0 0.5rem 0.5rem 0;
+            border-left: 3px solid var(--color-author);
+            padding: 4px 10px;
+            margin: 6px 0;
+            color: var(--text-secondary);
+            background: rgba(83, 189, 235, 0.08);
+            border-radius: 0 6px 6px 0;
+            font-size: 0.92rem;
         }}
         .post-body code {{
-            font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+            font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
             font-size: 0.88em;
             background: rgba(255, 255, 255, 0.08);
-            padding: 0.15em 0.4em;
+            padding: 0.15em 0.35em;
             border-radius: 4px;
-            color: #93c5fd;
+            color: #79c0ff;
         }}
         .post-body pre {{
-            background: #0d1322;
-            border: 1px solid var(--border-color);
-            border-radius: 0.75rem;
-            padding: 0.9rem;
+            background: #18222d;
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            padding: 10px 12px;
             overflow-x: auto;
-            margin: 0.6rem 0;
+            margin: 6px 0;
         }}
         .post-body pre code {{
             background: none;
             padding: 0;
-            color: #e2e8f0;
-            font-size: 0.88rem;
+            color: var(--text-main);
+            font-size: 0.86rem;
             display: block;
         }}
         .post-body del {{
@@ -6949,7 +7052,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
             text-decoration: line-through;
         }}
         .spoiler {{
-            background: rgba(255, 255, 255, 0.18);
+            background: rgba(255, 255, 255, 0.16);
             color: transparent;
             border-radius: 4px;
             padding: 0.1em 0.35em;
@@ -6958,93 +7061,119 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
             transition: background 0.2s, color 0.2s;
         }}
         .spoiler:hover, .spoiler.revealed {{
-            background: rgba(255, 255, 255, 0.08);
+            background: rgba(255, 255, 255, 0.06);
             color: inherit;
             user-select: text;
         }}
         .post-media {{
-            margin-top: 0.5rem;
-            border-radius: 0.75rem;
+            margin-top: 4px;
+            border-radius: 8px;
             overflow: hidden;
         }}
         .post-media-img {{
             max-width: 100%;
-            max-height: 480px;
+            max-height: 520px;
             object-fit: contain;
-            border-radius: 0.75rem;
+            border-radius: 8px;
             display: block;
         }}
         .post-media-video {{
             max-width: 100%;
-            border-radius: 0.75rem;
+            border-radius: 8px;
             background: #000;
+            display: block;
         }}
         .post-media-audio {{
             width: 100%;
-            margin-top: 0.25rem;
+            margin-top: 4px;
         }}
         .post-media-file {{
             display: inline-flex;
             align-items: center;
-            gap: 0.5rem;
+            gap: 8px;
             background: rgba(255, 255, 255, 0.06);
-            border: 1px solid var(--border-color);
-            padding: 0.6rem 1rem;
-            border-radius: 0.5rem;
+            border: 1px solid var(--border-subtle);
+            padding: 8px 14px;
+            border-radius: 8px;
             color: var(--text-main);
             text-decoration: none;
             font-size: 0.9rem;
+            transition: background 0.15s;
         }}
-        .post-media-file:hover {{ background: rgba(255, 255, 255, 0.12); }}
+        .post-media-file:hover {{ background: rgba(255, 255, 255, 0.1); }}
+        .post-meta {{
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-top: 4px;
+            user-select: none;
+        }}
+        .post-time {{
+            color: var(--text-muted);
+            font-size: 11px;
+        }}
+        .post-status-check {{
+            color: var(--color-author);
+            font-size: 11px;
+            font-weight: bold;
+        }}
         .empty-feed {{
             text-align: center;
-            padding: 3rem 1rem;
+            padding: 2.5rem 1rem;
             color: var(--text-muted);
-            font-size: 1rem;
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 1rem;
+            font-size: 0.95rem;
+            background: var(--bubble-bg);
+            border: 1px solid var(--border-bubble);
+            border-radius: 12px;
         }}
         footer {{
-            border-top: 1px solid var(--border-color);
-            padding: 2rem 1.5rem;
+            border-top: 1px solid var(--border-subtle);
+            padding: 1.75rem 1rem;
             text-align: center;
             color: var(--text-muted);
             font-size: 0.85rem;
         }}
-        footer a {{ color: var(--color-primary); text-decoration: none; }}
+        footer a {{ color: var(--color-author); text-decoration: none; }}
+        footer a:hover {{ text-decoration: underline; }}
         .modal {{
             display: none;
             position: fixed;
             top: 0; left: 0; width: 100%; height: 100%;
             background: rgba(0, 0, 0, 0.75);
-            backdrop-filter: blur(8px);
+            backdrop-filter: blur(4px);
             z-index: 1000;
             justify-content: center;
             align-items: center;
         }}
         .modal-content {{
-            background: #141a2a;
-            border: 1px solid var(--border-color);
-            border-radius: 1rem;
-            padding: 2rem;
+            background: var(--bubble-bg);
+            border: 1px solid var(--border-subtle);
+            border-radius: 14px;
+            padding: 1.75rem;
             text-align: center;
-            max-width: 400px;
+            max-width: 380px;
             width: 90%;
             display: flex;
             flex-direction: column;
-            gap: 1.25rem;
+            gap: 1rem;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
         }}
-        .modal-content img {{ width: 220px; height: 220px; margin: 0 auto; border-radius: 8px; }}
+        .modal-content img {{ width: 200px; height: 200px; margin: 0 auto; border-radius: 8px; }}
         .close-btn {{
-            background: rgba(255, 255, 255, 0.1);
+            background: rgba(255, 255, 255, 0.08);
             color: var(--text-main);
-            border: none;
+            border: 1px solid var(--border-subtle);
             padding: 0.5rem 1rem;
-            border-radius: 0.5rem;
+            border-radius: 6px;
             cursor: pointer;
             font-family: inherit;
+            font-size: 0.88rem;
+            transition: background 0.15s;
         }}
+        .close-btn:hover {{ background: rgba(255, 255, 255, 0.14); }}
     </style>
 </head>
 <body>
@@ -7109,22 +7238,23 @@ def get_tombstone_html(channel_name: str, ingress_path: str = "") -> str:
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Channel Removed — Delta Chat</title>
     <link rel="icon" type="image/png" href="{base_path}/icon.png" />
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
     <style>
         :root {{
-            --bg-color: #0b0f19;
-            --card-bg: rgba(20, 26, 42, 0.7);
-            --border-color: rgba(255, 255, 255, 0.08);
-            --text-main: #f3f4f6;
-            --text-muted: #9ca3af;
-            --color-primary: #3b82f6;
+            --bg-color: #19232b;
+            --bubble-bg: #232d36;
+            --border-subtle: rgba(255, 255, 255, 0.08);
+            --text-main: #e9edef;
+            --text-muted: #8696a0;
+            --color-primary: #2090ea;
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
-            font-family: 'Outfit', sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif;
             background-color: var(--bg-color);
+            background-image: url('{base_path}/background.jpg');
+            background-repeat: repeat;
+            background-size: 430px auto;
+            background-attachment: fixed;
             color: var(--text-main);
             min-height: 100vh;
             display: flex;
@@ -7133,38 +7263,43 @@ def get_tombstone_html(channel_name: str, ingress_path: str = "") -> str:
             align-items: center;
             padding: 1.5rem;
             text-align: center;
+            -webkit-font-smoothing: antialiased;
         }}
         .card {{
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 1.25rem;
-            padding: 3rem 2rem;
-            max-width: 520px;
+            background: var(--bubble-bg);
+            border: 1px solid var(--border-subtle);
+            border-radius: 14px;
+            padding: 2.5rem 2rem;
+            max-width: 480px;
             width: 100%;
             display: flex;
             flex-direction: column;
             align-items: center;
             gap: 1.25rem;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
         }}
         .icon {{ font-size: 3rem; }}
-        h1 {{ font-size: 1.75rem; font-weight: 700; }}
-        p {{ color: var(--text-muted); font-size: 1rem; line-height: 1.5; }}
+        h1 {{ font-size: 1.5rem; font-weight: 600; color: var(--text-main); }}
+        p {{ color: var(--text-muted); font-size: 0.95rem; line-height: 1.5; }}
         .btn {{
             display: inline-block;
             background: var(--color-primary);
-            color: white;
+            color: #ffffff;
             text-decoration: none;
-            padding: 0.75rem 1.5rem;
-            border-radius: 0.75rem;
-            font-weight: 600;
+            padding: 0.65rem 1.4rem;
+            border-radius: 8px;
+            font-weight: 500;
+            font-size: 0.92rem;
             margin-top: 0.5rem;
+            transition: background 0.15s;
         }}
+        .btn:hover {{ background: #1b7ed3; }}
     </style>
 </head>
 <body>
     <div class="card">
         <div class="icon">🔒</div>
-        <h1>Channel No Longer Available</h1>
+        <h1>Channel Removed</h1>
         <p>The channel <strong>{ch_esc}</strong> has been removed from the public catalog and is no longer available for preview.</p>
         <a href="{home_url}" class="btn">← Return to Home</a>
     </div>
@@ -7183,22 +7318,23 @@ def get_404_html(ingress_path: str = "") -> str:
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Channel Not Found — Delta Chat</title>
     <link rel="icon" type="image/png" href="{base_path}/icon.png" />
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
     <style>
         :root {{
-            --bg-color: #0b0f19;
-            --card-bg: rgba(20, 26, 42, 0.7);
-            --border-color: rgba(255, 255, 255, 0.08);
-            --text-main: #f3f4f6;
-            --text-muted: #9ca3af;
-            --color-primary: #3b82f6;
+            --bg-color: #19232b;
+            --bubble-bg: #232d36;
+            --border-subtle: rgba(255, 255, 255, 0.08);
+            --text-main: #e9edef;
+            --text-muted: #8696a0;
+            --color-primary: #2090ea;
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
-            font-family: 'Outfit', sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif;
             background-color: var(--bg-color);
+            background-image: url('{base_path}/background.jpg');
+            background-repeat: repeat;
+            background-size: 430px auto;
+            background-attachment: fixed;
             color: var(--text-main);
             min-height: 100vh;
             display: flex;
@@ -7207,32 +7343,37 @@ def get_404_html(ingress_path: str = "") -> str:
             align-items: center;
             padding: 1.5rem;
             text-align: center;
+            -webkit-font-smoothing: antialiased;
         }}
         .card {{
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 1.25rem;
-            padding: 3rem 2rem;
-            max-width: 520px;
+            background: var(--bubble-bg);
+            border: 1px solid var(--border-subtle);
+            border-radius: 14px;
+            padding: 2.5rem 2rem;
+            max-width: 480px;
             width: 100%;
             display: flex;
             flex-direction: column;
             align-items: center;
             gap: 1.25rem;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
         }}
         .icon {{ font-size: 3rem; }}
-        h1 {{ font-size: 1.75rem; font-weight: 700; }}
-        p {{ color: var(--text-muted); font-size: 1rem; line-height: 1.5; }}
+        h1 {{ font-size: 1.5rem; font-weight: 600; color: var(--text-main); }}
+        p {{ color: var(--text-muted); font-size: 0.95rem; line-height: 1.5; }}
         .btn {{
             display: inline-block;
             background: var(--color-primary);
-            color: white;
+            color: #ffffff;
             text-decoration: none;
-            padding: 0.75rem 1.5rem;
-            border-radius: 0.75rem;
-            font-weight: 600;
+            padding: 0.65rem 1.4rem;
+            border-radius: 8px;
+            font-weight: 500;
+            font-size: 0.92rem;
             margin-top: 0.5rem;
+            transition: background 0.15s;
         }}
+        .btn:hover {{ background: #1b7ed3; }}
     </style>
 </head>
 <body>
@@ -7333,6 +7474,20 @@ async def handle_icon(request):
     if os.path.exists(filename):
         headers = {'Cache-Control': 'public, max-age=31536000, immutable'}
         return web.FileResponse(filename, headers=headers)
+    return web.Response(status=404)
+
+
+async def handle_background(request):
+    base_dir = os.path.dirname(__file__) if "__file__" in globals() else "."
+    for candidate in (
+        "static/background.jpg",
+        "background.jpg",
+        os.path.join(base_dir, "static", "background.jpg"),
+        os.path.join(base_dir, "background.jpg"),
+    ):
+        if os.path.exists(candidate):
+            headers = {'Cache-Control': 'public, max-age=31536000, immutable'}
+            return web.FileResponse(candidate, headers=headers)
     return web.Response(status=404)
 
 
@@ -7574,6 +7729,8 @@ async def _run_web_server():
     app = web.Application()
     app.router.add_get('/icon.png', handle_icon)
     app.router.add_get('/favicon.ico', handle_icon)
+    app.router.add_get('/background.jpg', handle_background)
+    app.router.add_get('/static/background.jpg', handle_background)
     app.router.add_get('/robots.txt', handle_robots_txt)
     app.router.add_get('/health', handle_health)
     app.router.add_get('/qr.svg', handle_qr_svg)

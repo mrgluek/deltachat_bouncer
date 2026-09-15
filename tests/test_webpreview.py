@@ -487,6 +487,14 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn("Disallow: /", resp.text)
         self.assertNotIn("Allow: /", resp.text)
 
+    def test_handle_background(self):
+        import asyncio
+        req = MagicMock()
+        resp = asyncio.run(bot.handle_background(req))
+        self.assertEqual(resp.status, 200)
+        self.assertIn("immutable", resp.headers.get("Cache-Control", ""))
+        self.assertTrue(resp.path.endswith("background.jpg"))
+
     def test_dc_fallback_stripping_and_text_preservation(self):
         # 1. Stripping DC attachment fallback strings while keeping author text
         raw_with_img = "what if you just fuck off???\n\n>> 🧑‍💼 Debuging Memes Channel << [Image – 304.26 KiB]"
