@@ -36,7 +36,7 @@ import database
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.11.3"
+VERSION = "2.11.4"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -5410,22 +5410,68 @@ def handle_dc_info_message(bot, accid, event):
     
     is_member_event = False
     is_join_event = False
+    is_remove_event = False
     try:
         if smt == SystemMessageType.MEMBER_ADDED_TO_GROUP:
             is_member_event = True
             is_join_event = True
         elif smt == SystemMessageType.MEMBER_REMOVED_FROM_GROUP:
             is_member_event = True
+            is_remove_event = True
     except Exception:
         pass
         
     if not is_member_event:
         is_member_event = any(kw in smt_str or kw in msg_text for kw in ("memberadded", "memberremoved", "member_added", "member_removed", "left", "added", "removed"))
         is_join_event = any(kw in smt_str or kw in msg_text for kw in ("memberadded", "member_added", "joined", "added"))
-        
+        is_remove_event = any(kw in smt_str or kw in msg_text for kw in ("memberremoved", "member_removed", "left", "removed"))
+
+    info_contact_id = None
+    for attr_name in ('info_contact_id', 'infoContactId'):
+        val = getattr(msg, attr_name, None)
+        if val:
+            info_contact_id = val
+            break
+    if not info_contact_id and isinstance(msg, dict):
+        info_contact_id = msg.get('info_contact_id') or msg.get('infoContactId')
+
+    is_self_removed = False
+    if is_remove_event:
+        if info_contact_id == DC_CONTACT_ID_SELF:
+            is_self_removed = True
+        elif any(p in msg_text for p in ("you were removed", "you left", "removed you")):
+            is_self_removed = True
+        elif info_contact_id is None or info_contact_id == DC_CONTACT_ID_SELF:
+            try:
+                contacts = bot.rpc.get_chat_contacts(accid, dc_chat_id)
+                if DC_CONTACT_ID_SELF not in contacts:
+                    is_self_removed = True
+            except Exception:
+                is_self_removed = True
+
     if is_member_event:
+        catalog_channel = database.get_catalog_channel_by_chat_id(dc_chat_id)
+        if catalog_channel:
+            if is_self_removed:
+                database.remove_catalog_channel(dc_chat_id)
+                invalidate_channel_cache(chat_id=dc_chat_id, token=catalog_channel.get('token'))
+                logger.info(f"Bot was removed from channel {dc_chat_id} ('{catalog_channel.get('name')}'). Soft-removed channel from catalog.")
+                return
+            else:
+                try:
+                    contacts = bot.rpc.get_chat_contacts(accid, dc_chat_id)
+                    member_count = sum(1 for c in contacts if c != DC_CONTACT_ID_SELF)
+                    database.update_catalog_channel_member_count(dc_chat_id, member_count)
+                    logger.info(f"Updated member count for catalog channel {dc_chat_id} to {member_count}")
+                except Exception as e:
+                    logger.debug(f"Failed to update member count for catalog channel {dc_chat_id}: {e}")
+
         catalog_chat = database.get_catalog_chat_by_chat_id(dc_chat_id)
         if catalog_chat:
+            if is_self_removed:
+                database.remove_catalog_chat(dc_chat_id)
+                logger.info(f"Bot was removed from chat {dc_chat_id} ('{catalog_chat.get('name')}'). Removed chat from catalog.")
+                return
             try:
                 contacts = bot.rpc.get_chat_contacts(accid, dc_chat_id)
                 member_count = sum(1 for c in contacts if c != 1)
@@ -5434,17 +5480,7 @@ def handle_dc_info_message(bot, accid, event):
                 
                 # Check if it was a join event and welcome is enabled
                 if is_join_event and catalog_chat.get('welcome_enabled'):
-                    new_member_id = None
-                    
-                    # Try msg attributes first (may not exist in all deltachat2 versions)
-                    for attr_name in ('info_contact_id', 'infoContactId'):
-                        val = getattr(msg, attr_name, None)
-                        if val:
-                            new_member_id = val
-                            break
-                    if not new_member_id and isinstance(msg, dict):
-                        new_member_id = msg.get('info_contact_id') or msg.get('infoContactId')
-                    
+                    new_member_id = info_contact_id
                     logger.info(f"Welcome greeting: join event in chat {dc_chat_id}, msg.text={msg.text!r}, info_contact_id={new_member_id!r}")
                     
                     # Parse the system message text to extract who was added
@@ -6008,8 +6044,8 @@ _qr_cache: dict[str, tuple[bytes, str]] = {}  # key -> (bytes, content_type)
 def invalidate_channel_cache(chat_id: int = None, token: str = None) -> None:
     """Invalidate in-memory preview and RSS caches for a specific channel or all channels."""
     global index_page_html_cache, _channel_preview_cache, _channel_rss_cache
+    index_page_html_cache = None
     if chat_id is None and token is None:
-        index_page_html_cache = None
         _channel_preview_cache.clear()
         _channel_rss_cache.clear()
         return

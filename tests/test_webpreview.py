@@ -541,6 +541,91 @@ class TestWebPreview(unittest.TestCase):
         resp_png = asyncio.run(bot.handle_media_file(req_png))
         self.assertEqual(resp_png.status, 200)
 
+    def test_handle_dc_info_message_removes_channel_when_bot_removed(self):
+        token = database.add_catalog_channel(
+            chat_id=9001,
+            name="News Channel",
+            description="Breaking News",
+            member_count=100,
+            invite_link="https://i.delta.chat/#news"
+        )
+        self.assertIsNotNone(database.get_catalog_channel_by_chat_id(9001))
+
+        mock_bot = MagicMock()
+        mock_event = MagicMock()
+        mock_msg = MagicMock()
+        mock_msg.chat_id = 9001
+        from deltachat2 import SystemMessageType
+        mock_msg.system_message_type = SystemMessageType.MEMBER_REMOVED_FROM_GROUP
+        mock_msg.info_contact_id = 1
+        mock_msg.text = "You were removed from the group."
+        mock_event.msg = mock_msg
+
+        bot.handle_dc_info_message(mock_bot, 1, mock_event)
+
+        # Verify channel was soft-removed
+        self.assertIsNone(database.get_catalog_channel_by_chat_id(9001))
+        ch_del = database.get_catalog_channel_by_chat_id(9001, include_deleted=True)
+        self.assertIsNotNone(ch_del)
+        self.assertEqual(ch_del["is_deleted"], 1)
+
+    def test_handle_dc_info_message_channel_text_fallback_removal(self):
+        token = database.add_catalog_channel(
+            chat_id=9002,
+            name="Tech Channel",
+            description="Tech discussions",
+            member_count=50,
+            invite_link="https://i.delta.chat/#tech"
+        )
+        self.assertIsNotNone(database.get_catalog_channel_by_chat_id(9002))
+
+        mock_bot = MagicMock()
+        mock_event = MagicMock()
+        mock_msg = MagicMock()
+        mock_msg.chat_id = 9002
+        mock_msg.system_message_type = None
+        mock_msg.info_contact_id = None
+        mock_msg.text = "You were removed by the channel owner."
+        mock_event.msg = mock_msg
+
+        bot.handle_dc_info_message(mock_bot, 1, mock_event)
+
+        # Verify channel was soft-removed
+        self.assertIsNone(database.get_catalog_channel_by_chat_id(9002))
+        ch_del = database.get_catalog_channel_by_chat_id(9002, include_deleted=True)
+        self.assertIsNotNone(ch_del)
+        self.assertEqual(ch_del["is_deleted"], 1)
+
+    def test_handle_dc_info_message_channel_other_member_removed(self):
+        token = database.add_catalog_channel(
+            chat_id=9003,
+            name="Community Channel",
+            description="Community chat",
+            member_count=50,
+            invite_link="https://i.delta.chat/#comm"
+        )
+        self.assertIsNotNone(database.get_catalog_channel_by_chat_id(9003))
+
+        mock_bot = MagicMock()
+        mock_bot.rpc.get_chat_contacts.return_value = [1, 20, 30]
+        mock_event = MagicMock()
+        mock_msg = MagicMock()
+        mock_msg.chat_id = 9003
+        from deltachat2 import SystemMessageType
+        mock_msg.system_message_type = SystemMessageType.MEMBER_REMOVED_FROM_GROUP
+        mock_msg.info_contact_id = 42
+        mock_msg.text = "Member 42 removed by admin."
+        mock_event.msg = mock_msg
+
+        bot.handle_dc_info_message(mock_bot, 1, mock_event)
+
+        # Verify channel is NOT removed
+        ch = database.get_catalog_channel_by_chat_id(9003)
+        self.assertIsNotNone(ch)
+        self.assertEqual(ch["is_deleted"], 0)
+        # Member count updated (contacts excluding 1 -> 2 contacts)
+        self.assertEqual(ch["member_count"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
