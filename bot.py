@@ -6233,9 +6233,9 @@ def get_landing_page_html() -> str:
 
     <main>
         <section class="hero">
-            <div class="hero-badge">⚡ Delta Chat Gateway & IRC-style Bouncer</div>
-            <h1>Always-On Presence & Public Channel Gateway</h1>
-            <p>Bouncer keeps your contact presence reachable 24/7, moderates group chats, monitors server reachability via CMPing, scans attachments with VirusTotal, and hosts clean web previews for public channels.</p>
+            <div class="hero-badge">🛡️ Group Quality & Channel Gateway</div>
+            <h1>Maintain Group Quality & Channel Web Previews</h1>
+            <p>Bouncer bot maintains group quality by monitoring inactivity and saving server resources by pruning stale users. It features inactivity reports, automatic two-stage warnings & kicks, VirusTotal security inspection, CMPing server monitoring, and clean web previews & RSS feeds for public channels.</p>
             <button class="cta-btn" onclick="document.getElementById('qr-modal').style.display='flex'">
                 <span>📱</span> Add Bot to Delta Chat
             </button>
@@ -6245,45 +6245,45 @@ def get_landing_page_html() -> str:
             <h2>✨ Core Capabilities</h2>
             <div class="features-grid">
                 <div class="feature-item">
-                    <span class="feature-icon">🛡️</span>
+                    <span class="feature-icon">🧹</span>
                     <div class="feature-text">
-                        <h3>Always-On Bouncer</h3>
-                        <p>Maintains your 24/7 online presence, manages away notices with intelligent mention debouncing, and distributes contact cards.</p>
+                        <h3>Inactivity Reports & Auto-Kick</h3>
+                        <p>Monitors member activity, provides inactivity reports (<code>/bounce</code>), and automatically purges stale members with two-stage warnings and cryptographic fingerprint exemptions.</p>
                     </div>
                 </div>
                 <div class="feature-item">
                     <span class="feature-icon">📢</span>
                     <div class="feature-text">
-                        <h3>Public Channel Previews</h3>
-                        <p>Web previews for Delta Chat broadcast channels with live feeds, media attachments, QR join codes, and standard RSS feeds.</p>
+                        <h3>Public Channel Previews & RSS</h3>
+                        <p>Web previews for registered Delta Chat broadcast channels with live feeds, media attachments, QR join modals, and standard RSS 2.0 feeds.</p>
                     </div>
                 </div>
                 <div class="feature-item">
-                    <span class="feature-icon">⚡</span>
+                    <span class="feature-icon">📖</span>
                     <div class="feature-text">
-                        <h3>Automated Moderation</h3>
-                        <p>Automatic inactive member warnings and kicks with custom grace periods, admin overrides, and cryptographic fingerprint ignore rules.</p>
+                        <h3>Group & Channel Catalogs</h3>
+                        <p>Browse public and private group chats (<code>/chats</code>) and public broadcast channels (<code>/dchannels</code>) with real-time membership counts and join workflows.</p>
                     </div>
                 </div>
                 <div class="feature-item">
                     <span class="feature-icon">🌐</span>
                     <div class="feature-text">
                         <h3>CMPing Connectivity Monitor</h3>
-                        <p>Continuous network health checks across mail relays and Delta Chat servers, with real-time downtime incident reporting.</p>
+                        <p>Continuous network health checks across mail relays and Delta Chat servers, with incident-based dynamic alerting and root-cause fault isolation.</p>
                     </div>
                 </div>
                 <div class="feature-item">
-                    <span class="feature-icon">🔍</span>
+                    <span class="feature-icon">🦠</span>
                     <div class="feature-text">
-                        <h3>VirusTotal File Scanning</h3>
-                        <p>Instant file, attachment, and URL safety verification against 70+ antivirus scanners with real-time progress reactions.</p>
+                        <h3>VirusTotal Security Inspection</h3>
+                        <p>Inspect links, files, and attachments against 70+ antivirus engines with FIFO rate limiting and live in-place message updates.</p>
                     </div>
                 </div>
                 <div class="feature-item">
                     <span class="feature-icon">🔄</span>
                     <div class="feature-text">
-                        <h3>Resilient Multi-Relay Transport</h3>
-                        <p>Automatic failover and simultaneous multi-transport transmission to prevent deliverability bottlenecks.</p>
+                        <h3>Resilient Multi-Relay Failover</h3>
+                        <p>Automatic mail server failover with round-robin relay switching and exponential backoff retry to guarantee deliverability.</p>
                     </div>
                 </div>
             </div>
@@ -6300,32 +6300,36 @@ def get_landing_page_html() -> str:
                 </thead>
                 <tbody>
                     <tr>
+                        <td><code>/bounce</code></td>
+                        <td>Check user activity status or list group members near the inactivity threshold</td>
+                    </tr>
+                    <tr>
+                        <td><code>/autokick</code></td>
+                        <td>Configure automatic inactivity warnings and kicks (Admin only)</td>
+                    </tr>
+                    <tr>
                         <td><code>/dchannels</code></td>
                         <td>Browse the catalog of public Delta Chat channels with web preview links</td>
                     </tr>
                     <tr>
-                        <td><code>/bounce</code></td>
-                        <td>Check your activity status or list group members near the inactivity threshold</td>
-                    </tr>
-                    <tr>
-                        <td><code>/top</code></td>
-                        <td>Display the most active group members over the last 24 hours</td>
-                    </tr>
-                    <tr>
-                        <td><code>/away [text]</code></td>
-                        <td>Set your away status; auto-notifies users who mention or quote you</td>
-                    </tr>
-                    <tr>
-                        <td><code>/back</code></td>
-                        <td>Clear away status and restore normal presence</td>
+                        <td><code>/chats</code></td>
+                        <td>Browse the catalog of registered group chats available to join</td>
                     </tr>
                     <tr>
                         <td><code>/virus &lt;url/file&gt;</code></td>
-                        <td>Scan an attachment or link with VirusTotal</td>
+                        <td>Scan a link or attached file for security threats with VirusTotal</td>
                     </tr>
                     <tr>
-                        <td><code>/cmpingstatus</code></td>
-                        <td>View connectivity test results and monitored servers</td>
+                        <td><code>/cmping &lt;server&gt;</code></td>
+                        <td>Ping mail relays to/from specified target servers</td>
+                    </tr>
+                    <tr>
+                        <td><code>/top</code></td>
+                        <td>Display the 10 most active group members over the last 24 hours</td>
+                    </tr>
+                    <tr>
+                        <td><code>/away [text]</code></td>
+                        <td>Set vacation/away status (auto-notifies users who mention or quote you)</td>
                     </tr>
                 </tbody>
             </table>
