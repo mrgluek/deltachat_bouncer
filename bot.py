@@ -33,10 +33,11 @@ import qrcode
 import tempfile
 
 import database
+import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.11.6"
+VERSION = "2.12.0"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -4880,6 +4881,24 @@ def _ingest_channel_post(bot, accid, msg, catalog_channel: dict, token: str):
             )
             database.prune_channel_posts(chat_id, 100)
             invalidate_channel_cache(chat_id=chat_id, token=token)
+            # ── ActivityPub: queue post delivery to Fediverse followers ──
+            try:
+                followers_count = database.get_ap_followers_count(token)
+                if followers_count > 0:
+                    base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
+                    if base_url:
+                        post_data = {
+                            "msg_id": msg_id,
+                            "chat_id": chat_id,
+                            "text": text,
+                            "from_name": from_name,
+                            "media_type": media_type,
+                            "media_filename": media_filename,
+                            "timestamp": msg_ts,
+                        }
+                        activitypub.queue_post_delivery(token, post_data, base_url)
+            except Exception as e:
+                logger.warning(f"AP delivery queue error: {e}")
     except Exception as e:
         logger.error(f"Error ingesting channel post: {e}")
 
@@ -7576,8 +7595,64 @@ async def handle_background(request):
 
 
 async def handle_robots_txt(request):
-    headers = {"Cache-Control": "public, max-age=86400"}
-    content = "User-agent: *\nDisallow: /\n"
+    headers = {"Cache-Control": "public, max-age=86400, immutable"}
+    content = """# Bouncer Bot robots.txt — modeled after GoToSocial
+# AI scrapers and the like.
+# https://github.com/ai-robots-txt/ai.robots.txt/
+User-agent: AI2Bot
+User-agent: Ai2Bot-Dolma
+User-agent: Amazonbot
+User-agent: Applebot-Extended
+User-agent: Bytespider
+User-agent: CCBot
+User-agent: ChatGPT-User
+User-agent: ClaudeBot
+User-agent: Claude-Web
+User-agent: Diffbot
+User-agent: FacebookBot
+User-agent: facebookexternalhit
+User-agent: Google-Extended
+User-agent: GoogleOther
+User-agent: GPTBot
+User-agent: ImagesiftBot
+User-agent: img2dataset
+User-agent: Meta-ExternalAgent
+User-agent: Meta-ExternalFetcher
+User-agent: OAI-SearchBot
+User-agent: PetalBot
+User-agent: Scrapy
+User-agent: anthropic-ai
+User-agent: cohere-ai
+User-agent: DeepSeekBot
+User-agent: PerplexityBot
+User-agent: TikTokSpider
+Disallow: /
+
+# Marketing/SEO data scrapers
+User-agent: DataForSeoBot
+User-agent: Meltwater
+User-agent: SemrushBot-OCOB
+User-agent: SemrushBot-SWA
+Disallow: /
+
+# Rules for everything else.
+User-agent: *
+Crawl-delay: 500
+
+# Allow channel pages and media for legitimate indexing.
+Allow: /c/
+Allow: /media/
+
+# Disallow internal endpoints.
+Disallow: /health
+Disallow: /qr.svg
+Disallow: /qr.png
+
+# Disallow WebFinger (Fediverse handles it via direct HTTP, not crawlers).
+Disallow: /.well-known/webfinger
+Disallow: /.well-known/nodeinfo
+Disallow: /nodeinfo/
+"""
     return web.Response(text=content, content_type="text/plain", headers=headers)
 
 
@@ -7616,8 +7691,22 @@ async def handle_qr_png(request):
         logger.error(f"Error generating qr.png: {e}")
         return web.Response(status=500)
 
+def _get_base_url(request) -> str:
+    """Resolve the base URL for web handlers."""
+    base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
+    if not base_url:
+        scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
+        host = request.headers.get("X-Forwarded-Host", request.host)
+        base_url = f"{scheme}://{host}"
+    return base_url.rstrip("/")
+
 
 async def handle_channel_preview(request):
+    # ── ActivityPub Content Negotiation ──
+    accept = request.headers.get("Accept", "")
+    if "application/activity+json" in accept or 'profile="https://www.w3.org/ns/activitystreams"' in accept:
+        return await handle_ap_actor(request)
+
     ingress_path = request.headers.get("X-Ingress-Path", "")
     token = request.match_info.get('token')
 
@@ -7809,6 +7898,283 @@ async def handle_media_file(request):
     return web.FileResponse(target_path, headers={'Cache-Control': 'public, max-age=86400'})
 
 
+# ── ActivityPub Handlers ──
+
+async def handle_ap_actor(request):
+    """GET /c/{token} with Accept: application/activity+json -> Actor JSON."""
+    token = request.match_info.get('token')
+    channel = database.get_catalog_channel_by_token(token)
+    if not channel or channel.get('is_deleted'):
+        return web.Response(
+            status=404,
+            text=json.dumps({"error": "Channel not found"}),
+            content_type="application/activity+json",
+            charset="utf-8"
+        )
+    base_url = _get_base_url(request)
+    try:
+        priv_pem, pub_pem = activitypub.get_or_create_actor_keys(token)
+        actor_json = activitypub.build_actor_json(channel, base_url, pub_pem)
+        return web.Response(
+            text=json.dumps(actor_json, ensure_ascii=False),
+            content_type="application/activity+json",
+            charset="utf-8",
+            headers={"Cache-Control": "public, max-age=300"}
+        )
+    except Exception as e:
+        logger.error(f"Error building actor JSON for {token}: {e}")
+        return web.Response(status=500, text="Internal server error")
+
+
+async def handle_ap_inbox(request):
+    """POST /c/{token}/inbox — receive Follow/Undo/Delete activities."""
+    token = request.match_info.get('token')
+    channel = database.get_catalog_channel_by_token(token)
+    if not channel or channel.get('is_deleted'):
+        return web.Response(status=404, text="Channel not found")
+
+    body = await request.read()
+    if not body:
+        return web.Response(status=400, text="Empty request body")
+
+    # Verify HTTP Signature
+    sig_header = request.headers.get("Signature") or request.headers.get("signature") or ""
+    if not sig_header:
+        logger.warning(f"AP inbox request missing Signature header from {request.remote}")
+        return web.Response(status=401, text="Missing Signature header")
+
+    sig_dict = activitypub.parse_signature_header(sig_header)
+    key_id = sig_dict.get("keyId")
+    if not key_id:
+        return web.Response(status=401, text="Missing keyId in Signature")
+
+    # Fetch remote actor to get public key
+    actor_uri = key_id.split('#')[0]
+    remote_actor = await activitypub.fetch_remote_actor(actor_uri)
+    if not remote_actor or "publicKey" not in remote_actor:
+        return web.Response(status=401, text="Could not resolve remote actor public key")
+
+    pub_pem = remote_actor["publicKey"].get("publicKeyPem")
+    if not pub_pem:
+        return web.Response(status=401, text="Remote actor missing publicKeyPem")
+
+    req_path = request.path_qs if hasattr(request, 'path_qs') else request.path
+    if not activitypub.verify_http_signature(request.method, req_path, dict(request.headers), body, pub_pem):
+        logger.warning(f"AP signature verification failed for {key_id}")
+        return web.Response(status=401, text="Invalid signature")
+
+    try:
+        activity = json.loads(body.decode("utf-8"))
+    except Exception:
+        return web.Response(status=400, text="Invalid JSON body")
+
+    act_type = activity.get("type")
+    base_url = _get_base_url(request)
+    actor_url = f"{base_url}/c/{token}"
+
+    if act_type == "Follow":
+        follower_id = activity.get("actor")
+        if follower_id:
+            follower_actor = remote_actor if remote_actor.get("id") == follower_id else await activitypub.fetch_remote_actor(follower_id)
+            if follower_actor:
+                inbox = follower_actor.get("inbox")
+                shared_inbox = follower_actor.get("endpoints", {}).get("sharedInbox")
+                if inbox:
+                    database.add_ap_follower(token, follower_id, inbox, shared_inbox)
+                    logger.info(f"New AP follower for channel {token}: {follower_id}")
+                    # Build and send Accept activity
+                    accept_act = activitypub.build_accept_follow(actor_url, activity)
+                    accept_body = json.dumps(accept_act, ensure_ascii=False).encode("utf-8")
+                    priv_pem, pub_pem = activitypub.get_or_create_actor_keys(token)
+                    target_inbox = shared_inbox or inbox
+                    asyncio.create_task(activitypub.deliver_to_inbox(target_inbox, accept_body, priv_pem, f"{actor_url}#main-key"))
+        return web.Response(status=202, text="Accepted")
+
+    elif act_type == "Undo":
+        obj = activity.get("object")
+        if isinstance(obj, dict) and obj.get("type") == "Follow":
+            follower_id = activity.get("actor")
+            if follower_id:
+                database.remove_ap_follower(token, follower_id)
+                logger.info(f"Removed AP follower for channel {token}: {follower_id}")
+        return web.Response(status=202, text="Accepted")
+
+    elif act_type == "Delete":
+        deleted_actor = activity.get("actor") or activity.get("object")
+        if isinstance(deleted_actor, str):
+            database.remove_ap_followers_by_actor(deleted_actor)
+            logger.info(f"Removed deleted AP actor: {deleted_actor}")
+        return web.Response(status=202, text="Accepted")
+
+    return web.Response(status=202, text="Accepted")
+
+
+async def handle_ap_outbox(request):
+    """GET /c/{token}/outbox -> OrderedCollection."""
+    token = request.match_info.get('token')
+    channel = database.get_catalog_channel_by_token(token)
+    if not channel or channel.get('is_deleted'):
+        return web.Response(status=404, text="Channel not found")
+
+    base_url = _get_base_url(request)
+    outbox_url = f"{base_url}/c/{token}/outbox"
+    actor_url = f"{base_url}/c/{token}"
+
+    posts = database.get_channel_posts(channel['chat_id'], limit=50)
+    ordered_items = []
+    for p in posts:
+        note = activitypub.build_note(channel, p, base_url)
+        ordered_items.append(activitypub.build_create_activity(actor_url, note))
+
+    collection = activitypub.build_ordered_collection(outbox_url, len(ordered_items))
+    collection["orderedItems"] = ordered_items
+
+    return web.Response(
+        text=json.dumps(collection, ensure_ascii=False),
+        content_type="application/activity+json",
+        charset="utf-8",
+        headers={"Cache-Control": "public, max-age=60"}
+    )
+
+
+async def handle_ap_followers(request):
+    """GET /c/{token}/followers -> OrderedCollection (count only)."""
+    token = request.match_info.get('token')
+    channel = database.get_catalog_channel_by_token(token)
+    if not channel or channel.get('is_deleted'):
+        return web.Response(status=404, text="Channel not found")
+
+    base_url = _get_base_url(request)
+    followers_url = f"{base_url}/c/{token}/followers"
+    count = database.get_ap_followers_count(token)
+
+    collection = activitypub.build_ordered_collection(followers_url, count)
+    return web.Response(
+        text=json.dumps(collection, ensure_ascii=False),
+        content_type="application/activity+json",
+        charset="utf-8",
+        headers={"Cache-Control": "public, max-age=60"}
+    )
+
+
+async def handle_ap_post(request):
+    """GET /c/{token}/posts/{msg_id} -> Note object."""
+    token = request.match_info.get('token')
+    msg_id_str = request.match_info.get('msg_id')
+    try:
+        msg_id = int(msg_id_str)
+    except (ValueError, TypeError):
+        return web.Response(status=400, text="Invalid message ID")
+
+    channel = database.get_catalog_channel_by_token(token)
+    if not channel or channel.get('is_deleted'):
+        return web.Response(status=404, text="Channel not found")
+
+    posts = database.get_channel_posts(channel['chat_id'], limit=100)
+    found_post = None
+    for p in posts:
+        if p.get('msg_id') == msg_id or p.get('id') == msg_id:
+            found_post = p
+            break
+
+    if not found_post:
+        return web.Response(status=404, text="Post not found")
+
+    base_url = _get_base_url(request)
+    note = activitypub.build_note(channel, found_post, base_url)
+    return web.Response(
+        text=json.dumps(note, ensure_ascii=False),
+        content_type="application/activity+json",
+        charset="utf-8",
+        headers={"Cache-Control": "public, max-age=300"}
+    )
+
+
+async def handle_webfinger(request):
+    """GET /.well-known/webfinger?resource=acct:{token}@{domain} -> JRD JSON."""
+    resource = request.query.get("resource", "").strip()
+    if not resource.startswith("acct:"):
+        return web.Response(status=400, text="Bad Request: Missing or invalid resource query param")
+
+    user_host = resource[5:]
+    username = user_host.split("@")[0]
+
+    channel = database.get_catalog_channel_by_token(username)
+    if not channel or channel.get("is_deleted"):
+        return web.Response(status=404, text="User not found")
+
+    base_url = _get_base_url(request)
+    actor_url = f"{base_url}/c/{username}"
+
+    data = {
+        "subject": resource,
+        "aliases": [actor_url],
+        "links": [
+            {
+                "rel": "self",
+                "type": "application/activity+json",
+                "href": actor_url
+            },
+            {
+                "rel": "http://webfinger.net/rel/profile-page",
+                "type": "text/html",
+                "href": actor_url
+            }
+        ]
+    }
+    return web.Response(
+        text=json.dumps(data, ensure_ascii=False),
+        content_type="application/jrd+json",
+        charset="utf-8",
+        headers={"Cache-Control": "public, max-age=3600"}
+    )
+
+
+async def handle_nodeinfo_discovery(request):
+    """GET /.well-known/nodeinfo -> nodeinfo discovery document."""
+    base_url = _get_base_url(request)
+    data = {
+        "links": [
+            {
+                "rel": "http://nodeinfo.diaspora.software/ns/schema/2.0",
+                "href": f"{base_url}/nodeinfo/2.0"
+            }
+        ]
+    }
+    return web.json_response(data)
+
+
+async def handle_nodeinfo(request):
+    """GET /nodeinfo/2.0 -> NodeInfo 2.0 metadata."""
+    channels = database.get_all_catalog_channels(include_deleted=False)
+    data = {
+        "version": "2.0",
+        "software": {
+            "name": "deltachat-bouncer",
+            "version": VERSION
+        },
+        "protocols": ["activitypub"],
+        "services": {
+            "inbound": [],
+            "outbound": []
+        },
+        "openRegistrations": False,
+        "usage": {
+            "users": {
+                "total": len(channels)
+            }
+        },
+        "metadata": {
+            "nodeName": "Delta Chat Bouncer Channel Relay",
+            "nodeDescription": "Delta Chat channel broadcast to ActivityPub"
+        }
+    }
+    return web.json_response(
+        data,
+        content_type="application/json; profile=\"http://nodeinfo.diaspora.software/ns/schema/2.0#\""
+    )
+
+
 async def _run_web_server():
     app = web.Application()
     app.router.add_get('/icon.png', handle_icon)
@@ -7828,6 +8194,16 @@ async def _run_web_server():
     app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/rss', handle_channel_rss_redirect)
     app.router.add_get('/media/{token:[a-zA-Z0-9]{12}}/{msg_id:[0-9]+}/{filename}', handle_media_file)
 
+    # ActivityPub routes
+    app.router.add_get('/.well-known/webfinger', handle_webfinger)
+    app.router.add_get('/.well-known/nodeinfo', handle_nodeinfo_discovery)
+    app.router.add_get('/nodeinfo/2.0', handle_nodeinfo)
+    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/actor', handle_ap_actor)
+    app.router.add_post('/c/{token:[a-zA-Z0-9]{12}}/inbox', handle_ap_inbox)
+    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/outbox', handle_ap_outbox)
+    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/followers', handle_ap_followers)
+    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/posts/{msg_id:[0-9]+}', handle_ap_post)
+
     access_log_format = '%{X-Forwarded-For}i %t "%r" %s %b "%{Referer}i" "%{User-Agent}i"'
     runner = web.AppRunner(app, access_log_format=access_log_format)
     await runner.setup()
@@ -7837,6 +8213,12 @@ async def _run_web_server():
     logger.info(f"Starting Bouncer channel preview web server on 0.0.0.0:{port}...")
     await site.start()
     logger.info("Channel preview web server is running.")
+
+    # Initialize ActivityPub delivery worker in this web loop
+    try:
+        await activitypub.init_delivery_worker(asyncio.get_running_loop())
+    except Exception as e:
+        logger.warning(f"Could not initialize ActivityPub delivery worker: {e}")
 
     while True:
         await asyncio.sleep(3600)

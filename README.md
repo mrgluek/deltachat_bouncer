@@ -11,6 +11,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - 📖 **Group Chat Catalog (`/chats`):** Users can browse all group chats cataloged by the bot, complete with name, description, and real-time membership count.
 - 📢 **Delta Chat Channels Catalog (`/dchannels`):** Users can browse all channels cataloged by the bot, complete with name and description.
 - 🌐 **Channel Web Preview & RSS Feeds (`/c/{token}`):** Public web previews for registered channels with live message history, attachments, QR code join modals, and standard RSS 2.0 feeds (`/c/{token}/rss.xml`). Soft-delete tombstone handling ensures graceful messaging when channels are removed from the catalog.
+- 🪐 **Fediverse / ActivityPub Federation (`@<token>@domain`):** Every registered channel acts as a full Fediverse actor (`type: "Service"` / 🤖 Bot). Users on Mastodon, Pleroma, Misskey, etc., can search `@<token>@<domain>` via WebFinger (`RFC 7033`), follow channels, and receive new messages and media attachments in their home feeds via authenticated HTTP Signatures (`draft-cavage-http-signatures`).
 - 🔐 **Join Approval Workflows:** Supports public and private groups. Requests to join public groups immediately receive an invite link, while private groups (`🔐`) require approvals from existing members in the group via dynamic `/approve<ID>` commands.
 - 👋🏻 **Custom Welcome Messages (`/welcome`):** Configure customizable welcoming greetings for new members joining the group, with stats (total chats in common) and custom rules text.
 - 🔗 **Invite Link (`/invite`):** Generate a SecureJoin invite link and QR code image for the current group chat. Available to all users with a 10-minute cooldown (admins are exempt). For private group chats, the generated link is single-use and will be automatically deleted from the chat once a new member joins.
@@ -142,6 +143,33 @@ If the bot's data directory has already grown due to old media attachments, you 
 # Clean up existing downloaded attachments/blobs
 rm -rf /home/tgbridge/deltachat_bouncer/data/bouncer/accounts/*/dc.db-blobs/*
 ```
+
+## Fediverse / ActivityPub Federation
+
+Every channel registered in the Bouncer Bot automatically federates with the Fediverse (ActivityPub / ActivityStreams 2.0).
+
+### Following a Channel from Mastodon / Fediverse
+
+1. In your Mastodon (or Pleroma, Misskey, etc.) search bar, search for the channel handle:
+   ```text
+   @<channel_token>@dc.gluek.info
+   ```
+   *(For example: `@twniAE9eNajd@dc.gluek.info`)*
+
+2. Click **Follow**. The bot will automatically accept your follow request.
+3. When new messages and media (images, videos, files) are posted to the Delta Chat channel, they will automatically appear in your Mastodon home feed as rich posts.
+
+### Supported Endpoints
+
+- **WebFinger:** `/.well-known/webfinger?resource=acct:<token>@<domain>` (RFC 7033)
+- **Actor Profile:** `/c/{token}` (Content Negotiation with `Accept: application/activity+json`)
+- **Actor Inbox:** `/c/{token}/inbox` (Receives `Follow`, `Undo`, and `Delete` activities)
+- **Actor Outbox:** `/c/{token}/outbox` (Returns `OrderedCollection` with recent channel notes)
+- **Actor Followers:** `/c/{token}/followers` (Returns follower count)
+- **Single Note:** `/c/{token}/posts/{msg_id}` (Direct post representation)
+- **NodeInfo:** `/.well-known/nodeinfo` and `/nodeinfo/2.0` (Instance metadata for Fediverse crawlers)
+
+All outgoing federation deliveries are cryptographically signed using **HTTP Signatures** (`draft-cavage-http-signatures`) with individual RSA-2048 actor keypairs.
 
 ## Support & Development
 

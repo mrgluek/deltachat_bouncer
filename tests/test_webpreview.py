@@ -485,7 +485,9 @@ class TestWebPreview(unittest.TestCase):
         self.assertEqual(resp.status, 200)
         self.assertIn("User-agent: *", resp.text)
         self.assertIn("Disallow: /", resp.text)
-        self.assertNotIn("Allow: /", resp.text)
+        self.assertIn("User-agent: GPTBot", resp.text)
+        self.assertIn("Allow: /c/", resp.text)
+        self.assertIn("Allow: /media/", resp.text)
 
     def test_handle_background(self):
         import asyncio

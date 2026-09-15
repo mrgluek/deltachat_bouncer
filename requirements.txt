@@ -4,3 +4,4 @@ aiohttp
 qrcode
 pillow
 cmping @ git+https://github.com/mrgluek/cmping.git
+cryptography>=42.0

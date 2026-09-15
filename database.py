@@ -217,6 +217,30 @@ def init_db():
         ''')
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_posts_chat_time ON catalog_channel_posts(chat_id, timestamp DESC)")
 
+        # ActivityPub: RSA keypairs for channel actors
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS ap_actor_keys (
+                token TEXT PRIMARY KEY,
+                private_key_pem TEXT NOT NULL,
+                public_key_pem TEXT NOT NULL,
+                created_at REAL NOT NULL
+            )
+        ''')
+
+        # ActivityPub: remote Fediverse followers
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS ap_followers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_token TEXT NOT NULL,
+                follower_actor_id TEXT NOT NULL,
+                follower_inbox TEXT NOT NULL,
+                follower_shared_inbox TEXT,
+                created_at REAL NOT NULL,
+                UNIQUE(actor_token, follower_actor_id)
+            )
+        ''')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ap_followers_token ON ap_followers(actor_token)")
+
         # Pending join requests table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS pending_requests (
@@ -1563,9 +1587,127 @@ def delete_cmping_result(src: str, dst: str):
             "DELETE FROM cmping_results WHERE src = ? AND dst = ?",
             (src.strip().lower(), dst.strip().lower())
         )
+
+# ── ActivityPub Key Management ──
+
+def get_ap_actor_keys(token: str) -> dict | None:
+    """Get RSA keypair for an ActivityPub actor by channel token."""
+    conn = _connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM ap_actor_keys WHERE token = ?", (token,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def save_ap_actor_keys(token: str, private_key_pem: str, public_key_pem: str):
+    """Save RSA keypair for an ActivityPub actor."""
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO ap_actor_keys (token, private_key_pem, public_key_pem, created_at) VALUES (?, ?, ?, ?)",
+            (token, private_key_pem, public_key_pem, time.time())
+        )
+
+
+# ── ActivityPub Followers ──
+
+def add_ap_follower(actor_token: str, follower_actor_id: str,
+                    follower_inbox: str, follower_shared_inbox: str = None):
+    """Add a remote Fediverse follower for a channel."""
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO ap_followers (actor_token, follower_actor_id, follower_inbox, follower_shared_inbox, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(actor_token, follower_actor_id) DO UPDATE SET
+                follower_inbox=excluded.follower_inbox,
+                follower_shared_inbox=excluded.follower_shared_inbox
+        ''', (actor_token, follower_actor_id, follower_inbox, follower_shared_inbox, time.time()))
+
+
+def remove_ap_follower(actor_token: str, follower_actor_id: str) -> bool:
+    """Remove a specific follower from a channel."""
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM ap_followers WHERE actor_token = ? AND follower_actor_id = ?",
+            (actor_token, follower_actor_id)
+        )
+        return cursor.rowcount > 0
+
+
+def remove_ap_followers_by_actor(follower_actor_id: str) -> int:
+    """Remove a follower from ALL channels (for Delete(Actor) handling)."""
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM ap_followers WHERE follower_actor_id = ?",
+            (follower_actor_id,)
+        )
+        return cursor.rowcount
+
+
+def get_ap_followers(actor_token: str) -> list[dict]:
+    """Get all followers for a channel."""
+    conn = _connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM ap_followers WHERE actor_token = ? ORDER BY created_at ASC",
+            (actor_token,)
+        )
+        return [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_ap_follower_inboxes(actor_token: str) -> list[dict]:
+    """Get deduplicated inbox URLs for delivery. Returns list of {follower_inbox, follower_shared_inbox}."""
+    conn = _connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT DISTINCT follower_inbox, follower_shared_inbox FROM ap_followers WHERE actor_token = ?",
+            (actor_token,)
+        )
+        return [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_ap_followers_count(actor_token: str) -> int:
+    """Get the number of ActivityPub followers for a channel."""
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) FROM ap_followers WHERE actor_token = ?",
+            (actor_token,)
+        )
+        return cursor.fetchone()[0]
+    finally:
+        conn.close()
+
+
+def delete_ap_actor_keys(token: str) -> bool:
+    """Delete RSA keypair for a channel (e.g. on channel removal)."""
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM ap_actor_keys WHERE token = ?", (token,))
+        return cursor.rowcount > 0
+
+
+def delete_ap_followers_for_channel(actor_token: str) -> int:
+    """Delete all followers for a channel (e.g. on channel removal)."""
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM ap_followers WHERE actor_token = ?", (actor_token,))
+        return cursor.rowcount
+
 init_db()
-
-
-
-
-
