@@ -262,6 +262,8 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn(f"/c/{token}/rss.xml", preview_html)
         self.assertIn("15 subscribers", preview_html)
         self.assertIn('href="/"', preview_html)
+        self.assertIn("https://git.gluek.info/gluek/deltachat_bouncer", preview_html)
+        self.assertIn("Forgejo Mirror", preview_html)
 
         # Channel preview with 1 member (shows Channel badge)
         channel_single = dict(channel)
@@ -373,6 +375,9 @@ class TestWebPreview(unittest.TestCase):
 
         self.assertIn("News Channel", sent_text)
         self.assertIn(f"🌐 Preview: https://bouncer.example.org/c/{token}", sent_text)
+        ch_id = database.get_catalog_channel_by_token(token)['id']
+        expected_block = f"/dchannel{ch_id} **News Channel**\nDaily headlines\n🌐 Preview: https://bouncer.example.org/c/{token}"
+        self.assertIn(expected_block, sent_text)
 
     def test_format_markdown_html(self):
         # 1. Bold

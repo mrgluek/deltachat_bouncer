@@ -37,7 +37,7 @@ import database
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
 
-VERSION = "2.11.1"
+VERSION = "2.11.2"
 
 
 def log_version_info(bot):
@@ -3396,17 +3396,20 @@ def dchannels_command(bot, accid, event):
         return
 
     base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
-    lines = []
+    entries = []
     for ch in catalog_channels:
-        desc = ch['description'] or ""
-        if len(desc) > 100:
-            desc = desc[:100] + "..."
-        desc_str = f" {desc}" if desc else ""
+        entry_parts = [f"/dchannel{ch['id']} **{ch['name']}**"]
+        desc = (ch.get('description') or "").strip()
+        if desc:
+            if len(desc) > 200:
+                desc = desc[:200] + "..."
+            entry_parts.append(desc)
         token = ch.get('token')
-        preview_str = f"\n  🌐 Preview: {base_url.rstrip('/')}/c/{token}" if (base_url and token) else ""
-        lines.append(f"/dchannel{ch['id']} **{ch['name']}**{desc_str}{preview_str}")
+        if base_url and token:
+            entry_parts.append(f"🌐 Preview: {base_url.rstrip('/')}/c/{token}")
+        entries.append("\n".join(entry_parts))
 
-    reply = "\n".join(lines)
+    reply = "\n\n".join(entries)
     _send(bot, accid, msg.chat_id, reply)
 
 @dc_cli.on(events.NewMessage(command="/chatadd"))
@@ -6991,7 +6994,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
     </div>
 
     <footer>
-        <p>Powered by <a href="https://github.com/mrgluek/deltachat_bouncer" target="_blank">Delta Chat Bouncer Bot</a></p>
+        <p>Powered by <a href="https://github.com/mrgluek/deltachat_bouncer" target="_blank">Delta Chat Bouncer Bot</a> (v{VERSION}) · <a href="https://git.gluek.info/gluek/deltachat_bouncer" target="_blank">Forgejo Mirror</a></p>
     </footer>
 </body>
 </html>
