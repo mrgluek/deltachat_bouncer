@@ -266,6 +266,8 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn("https://delta.chat", preview_html)
         self.assertIn("photo.jpg", preview_html)
         self.assertIn(f"/c/{token}/rss.xml", preview_html)
+        self.assertIn(f"@{token}@channels.example.com", preview_html)
+        self.assertIn("fedi-tag-btn", preview_html)
         self.assertIn("15 subscribers", preview_html)
         self.assertIn('href="/"', preview_html)
         self.assertIn("https://git.gluek.info/gluek/deltachat_bouncer", preview_html)

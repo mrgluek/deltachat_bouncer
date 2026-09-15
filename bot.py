@@ -37,7 +37,7 @@ import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.12.1"
+VERSION = "2.12.2"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -6859,6 +6859,16 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
     rss_url = f"{base_url.rstrip('/')}/c/{token}/rss.xml" if has_full_base else f"{base_path}/c/{token}/rss.xml"
     home_url = f"{base_path}/" if base_path else "/"
 
+    fedi_domain = ""
+    if has_full_base:
+        try:
+            fedi_domain = urllib.parse.urlparse(base_url).netloc
+        except Exception:
+            pass
+    if not fedi_domain:
+        fedi_domain = "dc.gluek.info"
+    fedi_handle = f"@{token}@{fedi_domain}"
+
     # Build posts HTML
     posts_html_parts = []
     if not posts:
@@ -6972,6 +6982,51 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
             transition: color 0.15s;
         }}
         .top-nav a:hover {{ color: var(--text-main); }}
+        .fedi-tag-btn {{
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid var(--border-subtle);
+            color: var(--text-secondary);
+            padding: 0.3rem 0.65rem;
+            border-radius: 9999px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            font-family: inherit;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }}
+        .fedi-tag-btn:hover {{
+            background: rgba(255, 255, 255, 0.12);
+            color: var(--text-main);
+            border-color: rgba(255, 255, 255, 0.18);
+        }}
+        .fedi-tag-btn:active {{
+            transform: scale(0.97);
+        }}
+        .fedi-tag-btn.copied {{
+            background: rgba(0, 168, 132, 0.2);
+            border-color: var(--color-success);
+            color: #25d366;
+        }}
+        .fedi-handle {{
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 0.82rem;
+            letter-spacing: -0.01em;
+        }}
+        .fedi-copy-icon {{
+            font-size: 0.75rem;
+            opacity: 0.75;
+        }}
+        @media (max-width: 480px) {{
+            .fedi-handle {{
+                max-width: 170px;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }}
+        }}
         main {{
             flex-grow: 1;
             max-width: 680px;
@@ -7285,7 +7340,11 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
             <a href="{home_url}">← Home</a>
         </div>
         <div class="top-nav">
-            <a href="{rss_url}">📡 RSS Feed</a>
+            <button class="fedi-tag-btn" onclick="copyFediHandle(this, '{fedi_handle}')" title="Click to copy Fediverse handle for Mastodon/Fediverse">
+                <span class="fedi-icon">🪐</span>
+                <span class="fedi-handle">{fedi_handle}</span>
+                <span class="fedi-copy-icon">📋</span>
+            </button>
         </div>
     </header>
 
@@ -7325,6 +7384,42 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
     <footer>
         <p>Powered by <a href="https://github.com/mrgluek/deltachat_bouncer" target="_blank">Delta Chat Bouncer Bot</a> (v{VERSION}) · <a href="https://git.gluek.info/gluek/deltachat_bouncer" target="_blank">Forgejo Mirror</a></p>
     </footer>
+
+    <script>
+    function copyFediHandle(btn, text) {{
+        if (navigator.clipboard && navigator.clipboard.writeText) {{
+            navigator.clipboard.writeText(text).then(function() {{
+                showFediCopied(btn);
+            }}).catch(function() {{
+                fallbackFediCopy(btn, text);
+            }});
+        }} else {{
+            fallbackFediCopy(btn, text);
+        }}
+    }}
+    function fallbackFediCopy(btn, text) {{
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try {{
+            document.execCommand('copy');
+            showFediCopied(btn);
+        }} catch (e) {{}}
+        document.body.removeChild(ta);
+    }}
+    function showFediCopied(btn) {{
+        var orig = btn.innerHTML;
+        btn.classList.add('copied');
+        btn.innerHTML = '<span>✓</span> Copied!';
+        setTimeout(function() {{
+            btn.classList.remove('copied');
+            btn.innerHTML = orig;
+        }}, 2000);
+    }}
+    </script>
 </body>
 </html>
 """
