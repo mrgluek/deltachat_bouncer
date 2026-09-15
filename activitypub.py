@@ -238,6 +238,11 @@ def build_actor_json(channel: dict, base_url: str, public_key_pem: str) -> dict:
             "mediaType": "image/png",
             "url": f"{actor_url}/avatar.png"
         },
+        "image": {
+            "type": "Image",
+            "mediaType": "image/jpeg",
+            "url": f"{base_url}/background.jpg"
+        },
         "publicKey": {
             "id": f"{actor_url}#main-key",
             "owner": actor_url,
@@ -259,6 +264,7 @@ def build_note(channel: dict, post: dict, base_url: str) -> dict:
     content_html = format_post_html(post.get('text', ''))
     
     note = {
+        "@context": "https://www.w3.org/ns/activitystreams",
         "id": post_url,
         "type": "Note",
         "attributedTo": actor_url,
@@ -445,6 +451,35 @@ async def deliver_to_inbox(inbox_url: str, body: bytes, private_key_pem: str, ke
                 logger.info(f"AP delivered to {inbox_url}: {resp.status}")
     except Exception as e:
         logger.warning(f"AP POST {inbox_url} exception: {e}")
+
+async def deliver_backfill_posts(token: str, target_inbox: str, base_url: str, limit: int = 10):
+    """Deliver recent channel posts to a new follower's inbox in chronological order."""
+    channel = database.get_catalog_channel_by_token(token)
+    if not channel or channel.get('is_deleted'):
+        return
+
+    chat_id = channel.get('chat_id')
+    if not chat_id:
+        return
+
+    posts = database.get_channel_posts(chat_id, limit=limit)
+    if not posts:
+        return
+
+    base_url = (base_url or "").strip().rstrip('/')
+    actor_url = f"{base_url}/c/{token}"
+    key_id = f"{actor_url}#main-key"
+    priv_pem, _ = get_or_create_actor_keys(token)
+
+    # Deliver oldest to newest so they appear in correct chronological order
+    for post in reversed(posts):
+        try:
+            note = build_note(channel, post, base_url)
+            create_act = build_create_activity(actor_url, note)
+            body = json.dumps(create_act, ensure_ascii=False).encode('utf-8')
+            await deliver_to_inbox(target_inbox, body, priv_pem, key_id)
+        except Exception as e:
+            logger.warning(f"Failed to deliver backfilled post to {target_inbox}: {e}")
 
 def queue_post_delivery(token: str, post_data: dict, base_url: str):
     """Thread-safe: queue a post for AP delivery. Called from _ingest_channel_post (sync context)."""

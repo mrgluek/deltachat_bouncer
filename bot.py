@@ -37,7 +37,7 @@ import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.12.4"
+VERSION = "2.12.5"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -8111,12 +8111,19 @@ async def handle_ap_inbox(request):
                 if inbox or shared_inbox:
                     database.add_ap_follower(token, follower_id, inbox or shared_inbox, shared_inbox)
                     logger.info(f"New AP follower for channel {token}: {follower_id}")
-                    # Build and send Accept activity
+                    # Build and send Accept activity, followed by backfilling recent posts
                     accept_act = activitypub.build_accept_follow(actor_url, activity)
                     accept_body = json.dumps(accept_act, ensure_ascii=False).encode("utf-8")
                     priv_pem, _ = activitypub.get_or_create_actor_keys(token)
                     target_inbox = inbox or shared_inbox
-                    asyncio.create_task(activitypub.deliver_to_inbox(target_inbox, accept_body, priv_pem, f"{actor_url}#main-key"))
+
+                    async def _accept_and_backfill(t_inbox, a_body, p_pem, k_id, t_token, b_url):
+                        await activitypub.deliver_to_inbox(t_inbox, a_body, p_pem, k_id)
+                        await activitypub.deliver_backfill_posts(t_token, t_inbox, b_url, limit=10)
+
+                    asyncio.create_task(_accept_and_backfill(
+                        target_inbox, accept_body, priv_pem, f"{actor_url}#main-key", token, base_url
+                    ))
                 else:
                     logger.warning(f"Follower {follower_id} has no inbox or sharedInbox")
             else:
@@ -8351,6 +8358,47 @@ async def handle_nodeinfo(request):
     )
 
 
+async def handle_api_v1_instance(request):
+    """GET /api/v1/instance -> Mastodon-compatible v1 instance metadata."""
+    base_url = _get_base_url(request)
+    parsed = urllib.parse.urlparse(base_url)
+    domain = parsed.netloc or "dc.gluek.info"
+    channels = database.get_all_catalog_channels(include_deleted=False)
+    posts_count = database.get_total_channel_posts_count()
+    admin_email = database.get_config("admin_email") or ""
+
+    data = {
+        "uri": domain,
+        "title": "Delta Chat Bouncer Channel Relay",
+        "short_description": "Delta Chat channel broadcast to the Fediverse (ActivityPub)",
+        "description": f"Delta Chat channel broadcast to the Fediverse (ActivityPub). Follow channels as @<token>@{domain}",
+        "email": admin_email,
+        "version": f"{VERSION} (compatible; DeltaChatBouncer)",
+        "urls": {
+            "streaming_api": ""
+        },
+        "stats": {
+            "user_count": len(channels),
+            "status_count": posts_count,
+            "domain_count": 0
+        },
+        "thumbnail": f"{base_url}/background.jpg",
+        "languages": ["en"],
+        "registrations": False,
+        "approval_required": False,
+        "invites_enabled": False,
+        "configuration": {
+            "statuses": {
+                "max_characters": 5000,
+                "max_media_attachments": 4
+            }
+        },
+        "contact_account": None,
+        "rules": []
+    }
+    return web.json_response(data, headers={"Cache-Control": "public, max-age=300"})
+
+
 async def _run_web_server():
     app = web.Application()
     app.router.add_get('/icon.png', handle_icon)
@@ -8374,6 +8422,8 @@ async def _run_web_server():
     app.router.add_get('/.well-known/webfinger', handle_webfinger)
     app.router.add_get('/.well-known/nodeinfo', handle_nodeinfo_discovery)
     app.router.add_get('/nodeinfo/2.0', handle_nodeinfo)
+    app.router.add_get('/api/v1/instance', handle_api_v1_instance)
+    app.router.add_get(r'/{slash:/*}api/v1/instance', handle_api_v1_instance)
     app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}/actor', handle_ap_actor)
     app.router.add_post(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}/inbox', handle_ap_inbox)
     app.router.add_post(r'/{slash:/*}inbox', handle_ap_inbox)

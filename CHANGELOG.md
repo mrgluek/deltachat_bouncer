@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.12.5] - 2026-09-16
+
+### Fediverse / ActivityPub Improvements
+- **Recent Posts Backfill on Follow**:
+  - Automatically delivers up to 10 recent channel posts in chronological order (oldest to newest) to a new follower's inbox immediately after sending `Accept(Follow)`.
+  - Ensures new followers on GoToSocial, Mastodon, and other Fediverse instances immediately see recent content in their timeline and profile view instead of an empty "Nothing to show" state.
+- **Delta Chat Wallpaper as Profile Header Banner**:
+  - Added `"image"` field to Actor JSON pointing to `/background.jpg` (`mediaType: "image/jpeg"`).
+  - GoToSocial and Mastodon now display the Delta Chat wallpaper as the profile cover/banner image instead of a default solid gray box.
+- **Standalone Note `@context`**:
+  - Added `"@context": "https://www.w3.org/ns/activitystreams"` to ActivityStreams `Note` objects in `build_note()`.
+  - Fixes direct note dereferencing (`GET /c/{token}/posts/{msg_id}`) and search bar lookups in GoToSocial which require valid JSON-LD context on standalone objects.
+- **Mastodon-Compatible Instance Endpoint (`GET /api/v1/instance`)**:
+  - Added `GET /api/v1/instance` (and `/{slash:/*}api/v1/instance`) returning Mastodon v1 instance metadata (domain URI, title, description, version, admin contact, thumbnail, channel count, total status count).
+  - Allows GoToSocial's admin panel Instances Search to recognize and register `dc.gluek.info` with full metadata and stats.
+
 ## [2.12.4] - 2026-09-16
 
 ### Fediverse / ActivityPub Fixes

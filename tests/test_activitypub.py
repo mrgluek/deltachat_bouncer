@@ -737,6 +737,71 @@ class TestActivityPub(unittest.TestCase):
         req.headers = {}
         self.assertEqual(bot._get_base_url(req), "https://dc.gluek.info")
 
+    def test_actor_header_banner_image(self):
+        token = "bannertok123"
+        database.add_catalog_channel(chat_id=110, name="Banner Chan", description="", member_count=1, invite_link="", token=token)
+        _, pub = activitypub.get_or_create_actor_keys(token)
+        actor = activitypub.build_actor_json({"token": token, "name": "Banner Chan"}, "https://dc.gluek.info", pub)
+        self.assertIn("image", actor)
+        self.assertEqual(actor["image"]["type"], "Image")
+        self.assertEqual(actor["image"]["mediaType"], "image/jpeg")
+        self.assertEqual(actor["image"]["url"], "https://dc.gluek.info/background.jpg")
+
+    def test_build_note_context(self):
+        token = "contexttok12"
+        channel = {"token": token}
+        post = {"id": 456, "text": "Testing context"}
+        note = activitypub.build_note(channel, post, "https://dc.gluek.info")
+        self.assertIn("@context", note)
+        self.assertEqual(note["@context"], "https://www.w3.org/ns/activitystreams")
+        self.assertEqual(note["type"], "Note")
+
+    def test_deliver_backfill_posts(self):
+        token = "backfilltok1"
+        chat_id = 111
+        database.add_catalog_channel(chat_id=chat_id, name="Backfill Chan", description="", member_count=1, invite_link="", token=token)
+        database.save_channel_post(chat_id=chat_id, msg_id=1, text="Post 1", timestamp=100)
+        database.save_channel_post(chat_id=chat_id, msg_id=2, text="Post 2", timestamp=200)
+        database.save_channel_post(chat_id=chat_id, msg_id=3, text="Post 3", timestamp=300)
+
+        delivered = []
+        async def fake_deliver(inbox_url, body, priv_pem, key_id):
+            delivered.append(json.loads(body.decode("utf-8")))
+
+        with patch("activitypub.deliver_to_inbox", side_effect=fake_deliver):
+            asyncio.run(activitypub.deliver_backfill_posts(token, "https://remote.social/inbox", "https://dc.gluek.info", limit=10))
+
+        self.assertEqual(len(delivered), 3)
+        # Verify oldest to newest order
+        self.assertEqual(delivered[0]["object"]["content"], "<p>Post 1</p>")
+        self.assertEqual(delivered[1]["object"]["content"], "<p>Post 2</p>")
+        self.assertEqual(delivered[2]["object"]["content"], "<p>Post 3</p>")
+
+    def test_get_total_channel_posts_count(self):
+        chat_id = 112
+        count_before = database.get_total_channel_posts_count()
+        database.save_channel_post(chat_id=chat_id, msg_id=10, text="P1", timestamp=100)
+        database.save_channel_post(chat_id=chat_id, msg_id=11, text="P2", timestamp=200)
+        count_after = database.get_total_channel_posts_count()
+        self.assertEqual(count_after, count_before + 2)
+
+    def test_api_v1_instance_endpoint(self):
+        database.set_config("base_url", "https://dc.gluek.info")
+        req = MagicMock()
+        req.headers = {}
+        resp = asyncio.run(bot.handle_api_v1_instance(req))
+        self.assertEqual(resp.status, 200)
+        data = json.loads(resp.text)
+        self.assertEqual(data["uri"], "dc.gluek.info")
+        self.assertIn("title", data)
+        self.assertIn("version", data)
+        self.assertIn("DeltaChatBouncer", data["version"])
+        self.assertIn("stats", data)
+        self.assertIn("user_count", data["stats"])
+        self.assertIn("status_count", data["stats"])
+        self.assertEqual(data["thumbnail"], "https://dc.gluek.info/background.jpg")
+
 
 if __name__ == "__main__":
     unittest.main()
+

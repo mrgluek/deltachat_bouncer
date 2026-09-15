@@ -1032,7 +1032,20 @@ def update_catalog_chat_description(catalog_id: int, description: str):
     with _writer_transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("UPDATE catalog_chats SET description = ? WHERE id = ?", (description, catalog_id))
+
+
+def get_total_channel_posts_count() -> int:
+    """Get total count of all posts stored in the catalog_channel_posts table."""
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM catalog_channel_posts")
+        row = cursor.fetchone()
+        return row[0] if row else 0
+    finally:
+        conn.close()
 # --- CMPing monitoring functions ---
+
 
 
 def add_cmping_monitor(domain: str):

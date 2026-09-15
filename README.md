@@ -162,12 +162,12 @@ Every channel registered in the Bouncer Bot automatically federates with the Fed
 ### Supported Endpoints
 
 - **WebFinger:** `/.well-known/webfinger?resource=acct:<token>@<domain>` (RFC 7033)
-- **Actor Profile:** `/c/{token}` (Content Negotiation with `Accept: application/activity+json`)
-- **Actor Inbox:** `/c/{token}/inbox` (Receives `Follow`, `Undo`, and `Delete` activities)
-- **Actor Outbox:** `/c/{token}/outbox` (Returns `OrderedCollection` with recent channel notes)
-- **Actor Followers:** `/c/{token}/followers` (Returns follower count)
-- **Single Note:** `/c/{token}/posts/{msg_id}` (Direct post representation)
-- **NodeInfo:** `/.well-known/nodeinfo` and `/nodeinfo/2.0` (Instance metadata for Fediverse crawlers)
+- **Actor Profile:** `/c/{token}` (Content Negotiation with `Accept: application/activity+json`, includes avatar icon and background wallpaper header banner)
+- **Actor Inbox & Shared Inbox:** `/c/{token}/inbox` and `/inbox` (Receives `Follow`, `Undo`, and `Delete` activities; sends `Accept` and backfills up to 10 recent channel posts to the new follower's inbox)
+- **Actor Outbox:** `/c/{token}/outbox` (Returns `OrderedCollection` / `OrderedCollectionPage` with recent channel notes)
+- **Actor Followers & Following:** `/c/{token}/followers` (Returns follower count) and `/c/{token}/following`
+- **Single Note:** `/c/{token}/posts/{msg_id}` (Direct post representation with ActivityStreams `@context`)
+- **NodeInfo & Instance API:** `/.well-known/nodeinfo`, `/nodeinfo/2.0`, and `/api/v1/instance` (Instance metadata and stats for GoToSocial, Mastodon, and crawlers)
 
 All outgoing federation deliveries are cryptographically signed using **HTTP Signatures** (`draft-cavage-http-signatures`) with individual RSA-2048 actor keypairs.
 
