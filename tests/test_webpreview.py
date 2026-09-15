@@ -487,16 +487,14 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn("Disallow: /", resp.text)
         self.assertNotIn("Allow: /", resp.text)
 
-    def test_dc_fallback_stripping_and_forward_headers(self):
-        # 1. Stripping DC attachment fallback strings
+    def test_dc_fallback_stripping_and_text_preservation(self):
+        # 1. Stripping DC attachment fallback strings while keeping author text
         raw_with_img = "what if you just fuck off???\n\n>> 🧑‍💼 Debuging Memes Channel << [Image – 304.26 KiB]"
         res = bot.format_markdown_html(raw_with_img)
         self.assertNotIn("[Image – 304.26 KiB]", res)
         self.assertNotIn("[Image", res)
         self.assertIn("what if you just fuck off???", res)
-        self.assertIn('class="forward-header"', res)
-        self.assertIn("Debuging Memes Channel", res)
-        self.assertIn("↪", res)
+        self.assertIn("&gt;&gt; 🧑‍💼 Debuging Memes Channel &lt;&lt;", res)
 
         # 2. Only fallback tag -> empty string
         only_fallback = "[Image – 500 KiB]"

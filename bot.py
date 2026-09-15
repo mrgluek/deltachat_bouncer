@@ -6132,14 +6132,7 @@ def format_markdown_html(text: str) -> str:
     # 3. HTML escape remaining text
     text = html.escape(text)
 
-    # 4. Forward headers: >> Name << or &gt;&gt; Name &lt;&lt;
-    text = re.sub(
-        r'(?:&gt;){2}\s*(.*?)\s*(?:&lt;){2}',
-        r'<div class="forward-header"><span class="forward-icon">↪</span> \1</div>',
-        text
-    )
-
-    # 5. Spoilers: ||spoiler||
+    # 4. Spoilers: ||spoiler||
     text = re.sub(r'\|\|(.+?)\|\|', r'<span class="spoiler" onclick="this.classList.toggle(\'revealed\')">\1</span>', text)
 
     # 5. Bold: **text** or __text__
@@ -6932,22 +6925,6 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
             background: rgba(255, 255, 255, 0.08);
             color: inherit;
             user-select: text;
-        }}
-        .forward-header {{
-            display: inline-flex;
-            align-items: center;
-            gap: 0.35rem;
-            font-size: 0.82rem;
-            color: var(--text-muted);
-            background: rgba(255, 255, 255, 0.05);
-            border-left: 2px solid var(--color-primary);
-            padding: 0.2rem 0.55rem;
-            border-radius: 0 4px 4px 0;
-            margin: 0.25rem 0 0.4rem 0;
-        }}
-        .forward-icon {{
-            color: var(--color-primary);
-            font-size: 0.9em;
         }}
         .post-media {{
             margin-top: 0.5rem;
