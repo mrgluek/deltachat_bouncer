@@ -634,6 +634,190 @@ class TestWebPreview(unittest.TestCase):
         # Member count updated (contacts excluding 1 -> 2 contacts)
         self.assertEqual(ch["member_count"], 2)
 
+    def test_unlisted_channel_and_public_toggle(self):
+        # 1. Added as unlisted
+        token = database.add_catalog_channel(
+            chat_id=9501,
+            name="Unlisted Channel",
+            description="Hidden chat",
+            member_count=5,
+            invite_link="https://i.delta.chat/#unlisted",
+            is_public=0
+        )
+        ch = database.get_catalog_channel_by_token(token)
+        self.assertIsNotNone(ch)
+        self.assertEqual(ch["is_public"], 0)
+
+        # 2. Filtering by public_only
+        public_channels = database.get_all_catalog_channels(public_only=True)
+        self.assertEqual(len(public_channels), 0)
+        all_channels = database.get_all_catalog_channels(public_only=False)
+        self.assertEqual(len(all_channels), 1)
+
+        # 3. Toggle to public
+        success = database.set_catalog_channel_public(ch["id"], 1)
+        self.assertTrue(success)
+        ch_pub = database.get_catalog_channel_by_id(ch["id"])
+        self.assertEqual(ch_pub["is_public"], 1)
+        public_channels = database.get_all_catalog_channels(public_only=True)
+        self.assertEqual(len(public_channels), 1)
+
+        # 4. Toggle back to unlisted by chat_id
+        success2 = database.set_catalog_channel_public_by_chat_id(ch["chat_id"], 0)
+        self.assertTrue(success2)
+        ch_unlisted = database.get_catalog_channel_by_id(ch["id"])
+        self.assertEqual(ch_unlisted["is_public"], 0)
+        public_channels = database.get_all_catalog_channels(public_only=True)
+        self.assertEqual(len(public_channels), 0)
+
+    @patch('bot._is_dc_admin')
+    def test_dchannels_admin_dm_vs_non_admin(self, mock_is_admin):
+        # Setup 1 public and 1 unlisted channel
+        tok_pub = database.add_catalog_channel(
+            chat_id=9601,
+            name="Public DC",
+            description="Public updates",
+            member_count=20,
+            invite_link="https://i.delta.chat/#pub",
+            is_public=1
+        )
+        tok_unlisted = database.add_catalog_channel(
+            chat_id=9602,
+            name="Secret DC",
+            description="Internal tests",
+            member_count=3,
+            invite_link="https://i.delta.chat/#sec",
+            is_public=0
+        )
+        ch_unlisted = database.get_catalog_channel_by_token(tok_unlisted)
+
+        mock_bot = MagicMock()
+        mock_event = MagicMock()
+        mock_msg = MagicMock()
+        mock_msg.chat_id = 123
+        mock_msg.from_id = 456
+        mock_event.msg = mock_msg
+
+        # 1. Non-admin calls /dchannels
+        mock_is_admin.return_value = False
+        mock_bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Single"}
+        bot.dchannels_command(mock_bot, 1, mock_event)
+        non_admin_reply = mock_bot.rpc.send_msg.call_args[0][2].text
+        self.assertIn("Public DC", non_admin_reply)
+        self.assertNotIn("Secret DC", non_admin_reply)
+        self.assertNotIn("Publish: /dchannelpub", non_admin_reply)
+
+        # 2. Admin calls /dchannels in a Group chat -> only public channels shown
+        mock_is_admin.return_value = True
+        mock_bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Group"}
+        bot.dchannels_command(mock_bot, 1, mock_event)
+        group_admin_reply = mock_bot.rpc.send_msg.call_args[0][2].text
+        self.assertIn("Public DC", group_admin_reply)
+        self.assertNotIn("Secret DC", group_admin_reply)
+
+        # 3. Admin calls /dchannels in private DM (Single) -> all channels shown with unlisted badge & publish hint
+        mock_bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Single"}
+        bot.dchannels_command(mock_bot, 1, mock_event)
+        admin_dm_reply = mock_bot.rpc.send_msg.call_args[0][2].text
+        self.assertIn("Public DC", admin_dm_reply)
+        self.assertIn("Secret DC", admin_dm_reply)
+        self.assertIn("🔒 **Secret DC** [Unlisted]", admin_dm_reply)
+        self.assertIn(f"Publish: /dchannelpub{ch_unlisted['id']}on", admin_dm_reply)
+
+    @patch('bot._is_dc_admin')
+    def test_dchannelpub_command_and_channel_id_access(self, mock_is_admin):
+        tok = database.add_catalog_channel(
+            chat_id=9701,
+            name="Alpha Release",
+            description="Alpha testing",
+            member_count=8,
+            invite_link="https://i.delta.chat/#alpha",
+            is_public=0
+        )
+        ch = database.get_catalog_channel_by_token(tok)
+        cid = ch["id"]
+
+        mock_bot = MagicMock()
+        mock_event = MagicMock()
+        mock_msg = MagicMock()
+        mock_msg.chat_id = 999
+        mock_msg.from_id = 111
+        mock_event.msg = mock_msg
+
+        # 1. Non-admin queries /dchannel<ID> for unlisted channel -> not found
+        mock_is_admin.return_value = False
+        mock_msg.text = f"/dchannel{cid}"
+        bot.handle_all_messages(mock_bot, 1, mock_event)
+        reply1 = mock_bot.rpc.send_msg.call_args[0][2].text
+        self.assertIn("not found", reply1)
+
+        # 2. Non-admin attempts /dchannelpub<ID>on -> unauthorized
+        mock_msg.text = f"/dchannelpub{cid}on"
+        bot.handle_all_messages(mock_bot, 1, mock_event)
+        reply2 = mock_bot.rpc.send_msg.call_args[0][2].text
+        self.assertIn("administrator", reply2)
+
+        # 3. Admin calls /dchannelpub<ID>on -> channel becomes public
+        mock_is_admin.return_value = True
+        mock_msg.text = f"/dchannelpub{cid}on"
+        bot.handle_all_messages(mock_bot, 1, mock_event)
+        reply3 = mock_bot.rpc.send_msg.call_args[0][2].text
+        self.assertIn("is now **public**", reply3)
+        self.assertEqual(database.get_catalog_channel_by_id(cid)["is_public"], 1)
+
+        # 4. Now non-admin queries /dchannel<ID> -> accessible
+        mock_is_admin.return_value = False
+        mock_msg.text = f"/dchannel{cid}"
+        bot.handle_all_messages(mock_bot, 1, mock_event)
+        reply4 = mock_bot.rpc.send_msg.call_args[0][2].text
+        self.assertIn("Alpha Release", reply4)
+        self.assertNotIn("[Unlisted]", reply4)
+
+        # 5. Admin calls /dchannelpub<ID>off -> channel becomes unlisted
+        mock_is_admin.return_value = True
+        mock_msg.text = f"/dchannelpub{cid}off"
+        bot.handle_all_messages(mock_bot, 1, mock_event)
+        reply5 = mock_bot.rpc.send_msg.call_args[0][2].text
+        self.assertIn("is now **unlisted**", reply5)
+        self.assertEqual(database.get_catalog_channel_by_id(cid)["is_public"], 0)
+
+        # 6. Admin queries /dchannel<ID> for unlisted channel -> can view with [Unlisted] badge and toggle hint
+        mock_msg.text = f"/dchannel{cid}"
+        bot.handle_all_messages(mock_bot, 1, mock_event)
+        reply6 = mock_bot.rpc.send_msg.call_args[0][2].text
+        self.assertIn("Alpha Release", reply6)
+        self.assertIn("[Unlisted]", reply6)
+        self.assertIn(f"Publish: /dchannelpub{cid}on", reply6)
+
+    def test_landing_page_unlisted_channel_excluded(self):
+        bot.index_page_html_cache = None
+        database.add_catalog_channel(
+            chat_id=9801,
+            name="Public Showcase",
+            description="Everyone sees this",
+            member_count=50,
+            invite_link="https://i.delta.chat/#public",
+            is_public=1
+        )
+        tok_unlisted = database.add_catalog_channel(
+            chat_id=9802,
+            name="Hidden Unlisted",
+            description="Nobody sees this on landing page",
+            member_count=5,
+            invite_link="https://i.delta.chat/#hidden",
+            is_public=0
+        )
+        landing_html = bot.get_landing_page_html()
+        self.assertIn("Public Showcase", landing_html)
+        self.assertNotIn("Hidden Unlisted", landing_html)
+
+        # Web preview and RSS for unlisted channel still function normally via direct token
+        ch_unlisted = database.get_catalog_channel_by_token(tok_unlisted)
+        self.assertIsNotNone(ch_unlisted)
+        preview_html = bot.get_channel_preview_html(ch_unlisted, [], "https://example.com")
+        self.assertIn("Hidden Unlisted", preview_html)
+
 
 if __name__ == "__main__":
     unittest.main()
+

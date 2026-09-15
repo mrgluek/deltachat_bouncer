@@ -176,7 +176,8 @@ def init_db():
                 invite_link TEXT,
                 token TEXT UNIQUE,
                 is_deleted INTEGER DEFAULT 0,
-                deleted_at REAL
+                deleted_at REAL,
+                is_public INTEGER DEFAULT 1
             )
         ''')
 
@@ -188,6 +189,8 @@ def init_db():
             cursor.execute("ALTER TABLE catalog_channels ADD COLUMN is_deleted INTEGER DEFAULT 0")
         if "deleted_at" not in channel_cols:
             cursor.execute("ALTER TABLE catalog_channels ADD COLUMN deleted_at REAL")
+        if "is_public" not in channel_cols:
+            cursor.execute("ALTER TABLE catalog_channels ADD COLUMN is_public INTEGER DEFAULT 1")
 
         # Backfill tokens for any channels without one
         cursor.execute("SELECT id FROM catalog_channels WHERE token IS NULL")
@@ -808,7 +811,7 @@ def get_or_create_channel_token(chat_id: int) -> str:
                 continue
 
 
-def add_catalog_channel(chat_id: int, name: str, description: str, member_count: int, invite_link: str, token: str = None) -> str:
+def add_catalog_channel(chat_id: int, name: str, description: str, member_count: int, invite_link: str, token: str = None, is_public: int = 1) -> str:
     with _writer_transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT token FROM catalog_channels WHERE chat_id = ?", (chat_id,))
@@ -824,8 +827,8 @@ def add_catalog_channel(chat_id: int, name: str, description: str, member_count:
                     break
 
         cursor.execute('''
-            INSERT INTO catalog_channels (chat_id, name, description, member_count, invite_link, token, is_deleted, deleted_at)
-            VALUES (?, ?, ?, ?, ?, ?, 0, NULL)
+            INSERT INTO catalog_channels (chat_id, name, description, member_count, invite_link, token, is_deleted, deleted_at, is_public)
+            VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?)
             ON CONFLICT(chat_id) DO UPDATE SET
                 name=excluded.name,
                 description=excluded.description,
@@ -833,9 +836,26 @@ def add_catalog_channel(chat_id: int, name: str, description: str, member_count:
                 invite_link=excluded.invite_link,
                 token=COALESCE(catalog_channels.token, excluded.token),
                 is_deleted=0,
-                deleted_at=NULL
-        ''', (chat_id, name, description, member_count, invite_link, token))
+                deleted_at=NULL,
+                is_public=COALESCE(catalog_channels.is_public, excluded.is_public)
+        ''', (chat_id, name, description, member_count, invite_link, token, 1 if is_public else 0))
         return token
+
+
+def set_catalog_channel_public(catalog_id: int, is_public: int) -> bool:
+    """Set whether a catalog channel is publicly visible in catalog and landing page."""
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE catalog_channels SET is_public = ? WHERE id = ? AND is_deleted = 0", (1 if is_public else 0, catalog_id))
+        return cursor.rowcount > 0
+
+
+def set_catalog_channel_public_by_chat_id(chat_id: int, is_public: int) -> bool:
+    """Set whether a catalog channel is publicly visible in catalog and landing page by chat_id."""
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE catalog_channels SET is_public = ? WHERE chat_id = ? AND is_deleted = 0", (1 if is_public else 0, chat_id))
+        return cursor.rowcount > 0
 
 
 def update_catalog_channel_member_count(chat_id: int, member_count: int) -> bool:
@@ -866,15 +886,21 @@ def hard_remove_catalog_channel(chat_id: int) -> bool:
         return cursor.rowcount > 0
 
 
-def get_all_catalog_channels(include_deleted: bool = False) -> list[dict]:
+def get_all_catalog_channels(include_deleted: bool = False, public_only: bool = False) -> list[dict]:
     conn = _connect()
     try:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         if include_deleted:
-            cursor.execute("SELECT * FROM catalog_channels ORDER BY id ASC")
+            if public_only:
+                cursor.execute("SELECT * FROM catalog_channels WHERE is_public = 1 ORDER BY id ASC")
+            else:
+                cursor.execute("SELECT * FROM catalog_channels ORDER BY id ASC")
         else:
-            cursor.execute("SELECT * FROM catalog_channels WHERE is_deleted = 0 ORDER BY id ASC")
+            if public_only:
+                cursor.execute("SELECT * FROM catalog_channels WHERE is_deleted = 0 AND is_public = 1 ORDER BY id ASC")
+            else:
+                cursor.execute("SELECT * FROM catalog_channels WHERE is_deleted = 0 ORDER BY id ASC")
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
     finally:

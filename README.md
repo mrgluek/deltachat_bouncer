@@ -81,9 +81,10 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/chatadd [description]` — Add the current group chat to the catalog (Admin only). Falls back to group description if not provided.
 - `/chatremove` — Remove the current group chat from the catalog (Admin only).
 - `/chatdesc<ID> <text>` — Update description of cataloged group chat (Admin only).
-- `/dchanneladd <URL>` — Join and add a channel to the catalog (Admin only).
+- `/dchanneladd <URL>` — Join and add a channel to the catalog as unlisted by default (Admin only).
 - `/dchannelremove [ID]` — Remove a channel from the catalog (Admin only). If the channel author removes the bot from the channel, it is also automatically removed from the catalog.
 - `/dchanneldesc<ID> <text>` — Update description of cataloged channel (Admin only).
+- `/dchannelpub<ID>on` / `/dchannelpub<ID>off` — Toggle channel public catalog visibility (Admin only). Unlisted channels are hidden from the public catalog and landing page, but maintain active web preview URLs and RSS feeds.
 - `/url [base_url]` — Show or set the base web URL used for public channel previews and RSS feeds (Admin only).
 - `/private <on/off>` — Toggle cataloged chat privacy status (Admin only).
 - `/welcome [on/off/on <text>]` — Configure welcome messages for new members (Admin only).

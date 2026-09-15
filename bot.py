@@ -36,7 +36,7 @@ import database
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.11.5"
+VERSION = "2.11.6"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -2927,6 +2927,7 @@ def help_command(bot, accid, event):
         help_text += "/dchanneladd <URL> — Join and add a channel to the catalog\n"
         help_text += "/dchannelremove [ID] — Remove channel from catalog\n"
         help_text += "/dchanneldesc<ID> <text> — Update channel description\n"
+        help_text += "/dchannelpub<ID>on / /dchannelpub<ID>off — Toggle channel public catalog visibility\n"
         help_text += "/url [base_url] — Set/view base web URL for channel previews\n"
         help_text += "/cmpingadd <server> — Add server to connectivity monitoring\n"
         help_text += "/cmpingdel <server> — Remove server from monitoring\n"
@@ -3394,7 +3395,20 @@ def chats_command(bot, accid, event):
 @dc_cli.on(events.NewMessage(command="/dchannels"))
 def dchannels_command(bot, accid, event):
     msg = event.msg
-    catalog_channels = database.get_all_catalog_channels()
+    try:
+        chat = bot.rpc.get_basic_chat_info(accid, msg.chat_id)
+        chat_type = chat.get('chat_type', 'Single') if isinstance(chat, dict) else getattr(chat, 'chat_type', 'Single')
+    except Exception:
+        chat_type = 'Single'
+    is_private_chat = (str(chat_type) == "Single")
+    is_admin = _is_dc_admin(bot, accid, msg.from_id)
+    is_admin_dm = (is_admin and is_private_chat)
+
+    if is_admin_dm:
+        catalog_channels = database.get_all_catalog_channels(include_deleted=False, public_only=False)
+    else:
+        catalog_channels = database.get_all_catalog_channels(include_deleted=False, public_only=True)
+
     if not catalog_channels:
         _send(bot, accid, msg.chat_id, "ℹ️ The channel catalog is empty.")
         return
@@ -3402,7 +3416,12 @@ def dchannels_command(bot, accid, event):
     base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
     entries = []
     for ch in catalog_channels:
-        entry_parts = [f"/dchannel{ch['id']} **{ch['name']}**"]
+        is_pub = bool(ch.get('is_public', 1))
+        if is_pub:
+            entry_parts = [f"/dchannel{ch['id']} **{ch['name']}**"]
+        else:
+            entry_parts = [f"/dchannel{ch['id']} 🔒 **{ch['name']}** [Unlisted]"]
+
         desc = (ch.get('description') or "").strip()
         if desc:
             if len(desc) > 200:
@@ -3411,6 +3430,10 @@ def dchannels_command(bot, accid, event):
         token = ch.get('token')
         if base_url and token:
             entry_parts.append(f"🌐 Preview: {base_url.rstrip('/')}/c/{token}")
+
+        if is_admin_dm and not is_pub:
+            entry_parts.append(f"Publish: /dchannelpub{ch['id']}on")
+
         entries.append("\n".join(entry_parts))
 
     reply = "\n\n".join(entries)
@@ -3555,7 +3578,7 @@ def bg_channel_join_worker(bot, accid, admin_chat_id, url, chat_name, qr_info=No
                 except Exception:
                     pass
                 
-            token = database.add_catalog_channel(joined_chat_id, c_name, description, 0, url)
+            token = database.add_catalog_channel(joined_chat_id, c_name, description, 0, url, is_public=0)
             
             # Backfill initial messages delivered by core (up to 10 messages from handshake)
             try:
@@ -3571,9 +3594,23 @@ def bg_channel_join_worker(bot, accid, admin_chat_id, url, chat_name, qr_info=No
             except Exception as e:
                 logger.warning(f"Failed to backfill messages for channel {joined_chat_id}: {e}")
 
+            ch = database.get_catalog_channel_by_chat_id(joined_chat_id)
+            ch_id = ch['id'] if ch else ""
             base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
             preview_url = f"{base_url.rstrip('/')}/c/{token}" if base_url else f"/c/{token}"
-            _send(bot, accid, admin_chat_id, f"✅ Channel **{c_name}** has been joined and added to the catalog.\n\n🌐 Web preview: {preview_url}\n🔗 Invite link: {url}")
+            rss_url = f"{preview_url}/rss.xml"
+            _send(
+                bot,
+                accid,
+                admin_chat_id,
+                f"✅ Channel **{c_name}** has been joined and added as **unlisted** (ID: {ch_id}).\n\n"
+                f"🌐 Web preview: {preview_url}\n"
+                f"📡 RSS feed: {rss_url}\n"
+                f"🔗 Invite link: {url}\n\n"
+                f"ℹ️ This channel is currently unlisted (hidden from the public /dchannels catalog and web landing page).\n"
+                f"To make it publicly visible in the catalog, send:\n"
+                f"/dchannelpub{ch_id}on"
+            )
         else:
             _send(bot, accid, admin_chat_id, f"❌ Failed to join channel **{chat_name or 'Channel'}**. The securejoin handshake timed out. Please check that the link is correct and try again.")
             
@@ -5842,8 +5879,46 @@ def handle_all_messages(bot, accid, event):
             _send(bot, accid, msg.chat_id, f"✅ Description for channel **{channel['name']}** has been updated.")
             return
 
-    # Handle /dchannel<ID> command (but NOT /dchannels)
-    elif text.startswith("/dchannel") and not (text == "/dchannels" or text.startswith("/dchannels ")):
+    # Handle /dchannelpub<ID>on and /dchannelpub<ID>off command
+    elif text.startswith("/dchannelpub"):
+        m = re.match(r'^/dchannelpub\s*(\d+)\s*(on|off)$', text, re.IGNORECASE)
+        if m:
+            if not _is_dc_admin(bot, accid, msg.from_id):
+                _send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use this command.")
+                return
+            catalog_id = int(m.group(1))
+            action = m.group(2).lower()
+            channel = database.get_catalog_channel_by_id(catalog_id, include_deleted=False)
+            if not channel:
+                _send(bot, accid, msg.chat_id, "❌ Channel with this number was not found in the catalog.")
+                return
+
+            new_status = 1 if action == "on" else 0
+            database.set_catalog_channel_public(catalog_id, new_status)
+            invalidate_channel_cache(chat_id=channel['chat_id'], token=channel.get('token'))
+
+            if new_status == 1:
+                _send(
+                    bot, accid, msg.chat_id,
+                    f"✅ Channel **{channel['name']}** (ID: {catalog_id}) is now **public**.\n"
+                    f"It is visible in /dchannels and on the web landing page."
+                )
+            else:
+                _send(
+                    bot, accid, msg.chat_id,
+                    f"🔒 Channel **{channel['name']}** (ID: {catalog_id}) is now **unlisted**.\n"
+                    f"It is hidden from the public /dchannels list and landing page, but its web preview and RSS feed remain active."
+                )
+            return
+        else:
+            if not _is_dc_admin(bot, accid, msg.from_id):
+                _send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use this command.")
+                return
+            _send(bot, accid, msg.chat_id, "Usage: `/dchannelpub<ID>on` or `/dchannelpub<ID>off` (e.g. `/dchannelpub42on`).")
+            return
+
+    # Handle /dchannel<ID> command (but NOT /dchannels or /dchannelpub)
+    elif text.startswith("/dchannel") and not (text == "/dchannels" or text.startswith("/dchannels ") or text.startswith("/dchannelpub")):
         m = re.match(r'^/dchannel(\d+)', text, re.IGNORECASE)
         if m:
             catalog_id = int(m.group(1))
@@ -5854,6 +5929,12 @@ def handle_all_messages(bot, accid, event):
             if channel.get('is_deleted'):
                 _send(bot, accid, msg.chat_id, f"ℹ️ Channel **{channel['name']}** was removed from the public catalog.")
                 return
+
+            is_pub = bool(channel.get('is_public', 1))
+            is_admin = _is_dc_admin(bot, accid, msg.from_id)
+            if not is_pub and not is_admin:
+                _send(bot, accid, msg.chat_id, "❌ Channel with this number was not found in the catalog.")
+                return
                 
             invite_link = channel.get('invite_link')
             token = channel.get('token')
@@ -5862,7 +5943,8 @@ def handle_all_messages(bot, accid, event):
             base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
             preview_url = f"{base_url.rstrip('/')}/c/{token}" if base_url else f"/c/{token}"
 
-            response_lines = [f"📢 **{channel['name']}**"]
+            header_str = f"📢 **{channel['name']}**" if is_pub else f"📢 **{channel['name']}** 🔒 [Unlisted]"
+            response_lines = [header_str]
             if channel.get('description'):
                 response_lines.append(f"{channel['description']}\n")
             if invite_link:
@@ -5876,6 +5958,8 @@ def handle_all_messages(bot, accid, event):
                     join_link = invite_link
                 response_lines.append(f"🔗 Invite link: {join_link}")
             response_lines.append(f"🌐 Web preview: {preview_url}")
+            if not is_pub and is_admin:
+                response_lines.append(f"Publish: /dchannelpub{catalog_id}on")
 
             _send(bot, accid, msg.chat_id, "\n".join(response_lines))
             return
@@ -6268,7 +6352,7 @@ def get_landing_page_html(ingress_path: str = "") -> str:
     base_path = ingress_path.rstrip("/")
     bg_url = f"{base_path}/background.jpg"
     home_url = f"{base_path}/" if base_path else "/"
-    channels = database.get_all_catalog_channels()
+    channels = database.get_all_catalog_channels(public_only=True)
 
     channel_items = []
     for ch in channels:
