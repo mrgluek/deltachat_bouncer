@@ -57,7 +57,13 @@ except ImportError:
             self.status = status
             self.content_type = content_type
             self.headers = headers or {}
+    class MockFileResponse:
+        def __init__(self, path, headers=None, status=200):
+            self.path = path
+            self.headers = headers or {}
+            self.status = status
     mock_web.Response = MockResponse
+    mock_web.FileResponse = MockFileResponse
     mock_aiohttp.web = mock_web
     sys.modules['aiohttp'] = mock_aiohttp
     sys.modules['aiohttp.web'] = mock_web
@@ -480,6 +486,62 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn("User-agent: *", resp.text)
         self.assertIn("Disallow: /", resp.text)
         self.assertNotIn("Allow: /", resp.text)
+
+    def test_dc_fallback_stripping_and_forward_headers(self):
+        # 1. Stripping DC attachment fallback strings
+        raw_with_img = "what if you just fuck off???\n\n>> 🧑‍💼 Debuging Memes Channel << [Image – 304.26 KiB]"
+        res = bot.format_markdown_html(raw_with_img)
+        self.assertNotIn("[Image – 304.26 KiB]", res)
+        self.assertNotIn("[Image", res)
+        self.assertIn("what if you just fuck off???", res)
+        self.assertIn('class="forward-header"', res)
+        self.assertIn("Debuging Memes Channel", res)
+        self.assertIn("↪", res)
+
+        # 2. Only fallback tag -> empty string
+        only_fallback = "[Image – 500 KiB]"
+        self.assertEqual(bot.format_markdown_html(only_fallback), "")
+
+        only_doc = "  [Document - report.pdf]  "
+        self.assertEqual(bot.format_markdown_html(only_doc), "")
+
+    def test_image_optimization_and_webp_fallback(self):
+        import asyncio
+        token = database.add_catalog_channel(
+            chat_id=8001,
+            name="Media Channel",
+            description="Images & WebP",
+            member_count=12,
+            invite_link="https://i.delta.chat/#media"
+        )
+        ch_dir = os.path.join(bot.CHANNEL_MEDIA_DIR, token)
+        os.makedirs(ch_dir, exist_ok=True)
+
+        # 1. Existing .webp file served when .webp requested
+        webp_path = os.path.join(ch_dir, "100_photo.webp")
+        with open(webp_path, "wb") as f:
+            f.write(b"RIFFdummyWEBP")
+
+        req_webp = MagicMock()
+        req_webp.match_info = {"token": token, "msg_id": "100", "filename": "photo.webp"}
+        resp = asyncio.run(bot.handle_media_file(req_webp))
+        self.assertEqual(resp.status, 200)
+
+        # 2. When .jpg requested, falls back to .webp if .webp exists
+        req_jpg = MagicMock()
+        req_jpg.match_info = {"token": token, "msg_id": "100", "filename": "photo.jpg"}
+        resp_fallback = asyncio.run(bot.handle_media_file(req_jpg))
+        self.assertEqual(resp_fallback.status, 200)
+
+        # 3. Original file served when no .webp exists
+        png_path = os.path.join(ch_dir, "101_graphic.png")
+        with open(png_path, "wb") as f:
+            f.write(b"\x89PNGdummy")
+
+        req_png = MagicMock()
+        req_png.match_info = {"token": token, "msg_id": "101", "filename": "graphic.png"}
+        resp_png = asyncio.run(bot.handle_media_file(req_png))
+        self.assertEqual(resp_png.status, 200)
 
 
 if __name__ == "__main__":

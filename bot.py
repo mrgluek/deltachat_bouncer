@@ -36,8 +36,12 @@ import database
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
+VERSION = "2.11.3"
 
-VERSION = "2.11.2"
+DC_FALLBACK_PATTERN = re.compile(
+    r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
+    re.IGNORECASE
+)
 
 
 def log_version_info(bot):
@@ -4793,15 +4797,38 @@ def _ingest_channel_post(bot, accid, msg, catalog_channel: dict, token: str):
 
             dest_dir = os.path.join(CHANNEL_MEDIA_DIR, token)
             os.makedirs(dest_dir, exist_ok=True)
-            dest_file = f"{msg_id}_{safe_filename}"
-            dest_path = os.path.join(dest_dir, dest_file)
-            try:
-                if not os.path.exists(dest_path):
-                    shutil.copy2(src_path, dest_path)
-                media_path = dest_path
-                media_filename = safe_filename
-            except Exception as e:
-                logger.warning(f"Failed to copy media for channel post {msg_id}: {e}")
+
+            if media_type == 'image' and ext not in ('.gif', '.svg'):
+                stem = os.path.splitext(safe_filename)[0]
+                webp_filename = f"{stem}.webp"
+                webp_dest_file = f"{msg_id}_{webp_filename}"
+                webp_dest_path = os.path.join(dest_dir, webp_dest_file)
+                if os.path.exists(webp_dest_path) or _optimize_image_to_webp(src_path, webp_dest_path):
+                    media_path = webp_dest_path
+                    media_filename = webp_filename
+                else:
+                    dest_file = f"{msg_id}_{safe_filename}"
+                    dest_path = os.path.join(dest_dir, dest_file)
+                    try:
+                        if not os.path.exists(dest_path):
+                            shutil.copy2(src_path, dest_path)
+                        media_path = dest_path
+                        media_filename = safe_filename
+                    except Exception as e:
+                        logger.warning(f"Failed to copy media for channel post {msg_id}: {e}")
+            else:
+                dest_file = f"{msg_id}_{safe_filename}"
+                dest_path = os.path.join(dest_dir, dest_file)
+                try:
+                    if not os.path.exists(dest_path):
+                        shutil.copy2(src_path, dest_path)
+                    media_path = dest_path
+                    media_filename = safe_filename
+                except Exception as e:
+                    logger.warning(f"Failed to copy media for channel post {msg_id}: {e}")
+
+        if media_path or file_info:
+            text = DC_FALLBACK_PATTERN.sub('', text).strip()
 
         if text or media_path:
             database.save_channel_post(
@@ -6039,8 +6066,42 @@ def _generate_qr_bytes(link: str, fmt: str = "png", box_size: int = 6) -> tuple[
     return res
 
 
+def _optimize_image_to_webp(src_path: str, dest_path: str, max_dim: int = 1600, quality: int = 80) -> bool:
+    """Optimize image to WebP with dimension scaling. Returns True on success, False on failure."""
+    try:
+        from PIL import Image, ImageOps
+        with Image.open(src_path) as img:
+            try:
+                img = ImageOps.exif_transpose(img)
+            except Exception:
+                pass
+
+            if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in getattr(img, "info", {})):
+                if img.mode != "RGBA":
+                    img = img.convert("RGBA")
+            elif img.mode != "RGB":
+                img = img.convert("RGB")
+
+            w, h = img.size
+            if max(w, h) > max_dim:
+                scale = max_dim / max(w, h)
+                new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+
+            img.save(dest_path, format="WEBP", quality=quality, method=3)
+            return True
+    except Exception as e:
+        logger.warning(f"Failed to convert image {src_path} to webp: {e}")
+        return False
+
+
 def format_markdown_html(text: str) -> str:
     """Safely escape HTML and render CommonMark/Delta Chat markdown formatting."""
+    if not text:
+        return ""
+
+    # Strip Delta Chat attachment fallback tags (e.g. [Image – 304.26 KiB])
+    text = DC_FALLBACK_PATTERN.sub('', text).strip()
     if not text:
         return ""
 
@@ -6071,7 +6132,14 @@ def format_markdown_html(text: str) -> str:
     # 3. HTML escape remaining text
     text = html.escape(text)
 
-    # 4. Spoilers: ||spoiler||
+    # 4. Forward headers: >> Name << or &gt;&gt; Name &lt;&lt;
+    text = re.sub(
+        r'(?:&gt;){2}\s*(.*?)\s*(?:&lt;){2}',
+        r'<div class="forward-header"><span class="forward-icon">↪</span> \1</div>',
+        text
+    )
+
+    # 5. Spoilers: ||spoiler||
     text = re.sub(r'\|\|(.+?)\|\|', r'<span class="spoiler" onclick="this.classList.toggle(\'revealed\')">\1</span>', text)
 
     # 5. Bold: **text** or __text__
@@ -6865,6 +6933,22 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
             color: inherit;
             user-select: text;
         }}
+        .forward-header {{
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            font-size: 0.82rem;
+            color: var(--text-muted);
+            background: rgba(255, 255, 255, 0.05);
+            border-left: 2px solid var(--color-primary);
+            padding: 0.2rem 0.55rem;
+            border-radius: 0 4px 4px 0;
+            margin: 0.25rem 0 0.4rem 0;
+        }}
+        .forward-icon {{
+            color: var(--color-primary);
+            font-size: 0.9em;
+        }}
         .post-media {{
             margin-top: 0.5rem;
             border-radius: 0.75rem;
@@ -7187,8 +7271,9 @@ def get_channel_rss_xml(channel: dict, posts: list[dict], base_url: str) -> str:
         if media_fn and msg_id:
             media_url = f"{base_url.rstrip('/')}/media/{token}/{msg_id}/{media_fn}"
             if media_type == "image":
+                mime_type = "image/webp" if (media_fn and media_fn.lower().endswith(".webp")) else "image/jpeg"
                 desc_parts.append(f'<p><img src="{media_url}" alt="image" /></p>')
-                enclosure_tag = f'<enclosure url="{media_url}" length="0" type="image/jpeg" />'
+                enclosure_tag = f'<enclosure url="{media_url}" length="0" type="{mime_type}" />'
             elif media_type == "video":
                 desc_parts.append(f'<p><video src="{media_url}" controls></video></p>')
                 enclosure_tag = f'<enclosure url="{media_url}" length="0" type="video/mp4" />'
@@ -7458,11 +7543,16 @@ async def handle_media_file(request):
         return web.Response(status=403, text="Forbidden")
 
     if not os.path.exists(target_path):
-        alt_path = os.path.abspath(os.path.join(expected_dir, filename))
-        if alt_path.startswith(expected_dir) and os.path.exists(alt_path):
-            target_path = alt_path
+        stem, _ = os.path.splitext(filename)
+        webp_target = os.path.abspath(os.path.join(expected_dir, f"{msg_id}_{stem}.webp"))
+        if webp_target.startswith(expected_dir) and os.path.exists(webp_target):
+            target_path = webp_target
         else:
-            return web.Response(status=404, text="Media not found")
+            alt_path = os.path.abspath(os.path.join(expected_dir, filename))
+            if alt_path.startswith(expected_dir) and os.path.exists(alt_path):
+                target_path = alt_path
+            else:
+                return web.Response(status=404, text="Media not found")
 
     return web.FileResponse(target_path, headers={'Cache-Control': 'public, max-age=86400'})
 
