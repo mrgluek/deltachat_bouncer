@@ -1945,6 +1945,9 @@ def on_start(bot, args):
     t_web = threading.Thread(target=start_web_server_thread, daemon=True)
     t_web.start()
 
+    t_backfill = threading.Thread(target=_backfill_existing_catalog_channels, args=(bot, accid), daemon=True)
+    t_backfill.start()
+
 
 @dc_cli.on(events.NewMessage(command="/initadmin"))
 def initadmin_command(bot, accid, event):
@@ -3651,7 +3654,8 @@ def url_command(bot, accid, event):
 
     payload = event.payload.strip() if event.payload else ""
     if not payload:
-        current_url = database.get_config("base_url") or os.getenv("BASE_URL") or "Not set"
+        raw_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
+        current_url = raw_url.rstrip("/") if raw_url else "Not set"
         _send(bot, accid, msg.chat_id, f"🌐 Current base web URL: `{current_url}`\n\nTo set a new base URL, use:\n`/url https://channels.yourdomain.com`")
         return
 
@@ -4807,6 +4811,36 @@ def _ingest_channel_post(bot, accid, msg, catalog_channel: dict, token: str):
             database.prune_channel_posts(chat_id, 100)
     except Exception as e:
         logger.error(f"Error ingesting channel post: {e}")
+
+
+def _backfill_existing_catalog_channels(bot, accid):
+    """Backfill recent messages from core for existing catalog channels with empty cache."""
+    try:
+        time.sleep(3)
+        channels = database.get_all_catalog_channels()
+        for ch in channels:
+            chat_id = ch.get("chat_id")
+            token = ch.get("token")
+            if not chat_id or not token:
+                continue
+            existing = database.get_channel_posts(chat_id, limit=1)
+            if not existing:
+                try:
+                    chat_msgs = bot.rpc.get_chat_msgs(accid, chat_id)
+                    if chat_msgs:
+                        logger.info(f"Backfilling {len(chat_msgs[-10:])} messages for existing channel '{ch.get('name')}' (chat {chat_id})")
+                        for mid in chat_msgs[-10:]:
+                            if isinstance(mid, int) and mid > 0:
+                                try:
+                                    m = bot.rpc.get_message(accid, mid)
+                                    if m and not getattr(m, "is_info", False):
+                                        _ingest_channel_post(bot, accid, m, ch, token)
+                                except Exception as me:
+                                    logger.warning(f"Failed to backfill msg {mid} for channel {chat_id}: {me}")
+                except Exception as ce:
+                    logger.warning(f"Failed to get messages for channel {chat_id}: {ce}")
+    except Exception as e:
+        logger.warning(f"Error in _backfill_existing_catalog_channels: {e}")
 
 
 def _format_file_size(size_bytes: int) -> str:
