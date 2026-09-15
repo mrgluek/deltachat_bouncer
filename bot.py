@@ -3552,7 +3552,7 @@ def bg_channel_join_worker(bot, accid, admin_chat_id, url, chat_name, qr_info=No
             
             # Backfill initial messages delivered by core (up to 10 messages from handshake)
             try:
-                chat_msgs = bot.rpc.get_chat_msgs(accid, joined_chat_id)
+                chat_msgs = bot.rpc.get_message_ids(accid, joined_chat_id, False, False)
                 for mid in chat_msgs[-10:]:
                     if isinstance(mid, int) and mid > 0:
                         try:
@@ -4826,7 +4826,7 @@ def _backfill_existing_catalog_channels(bot, accid):
             existing = database.get_channel_posts(chat_id, limit=1)
             if not existing:
                 try:
-                    chat_msgs = bot.rpc.get_chat_msgs(accid, chat_id)
+                    chat_msgs = bot.rpc.get_message_ids(accid, chat_id, False, False)
                     if chat_msgs:
                         logger.info(f"Backfilling {len(chat_msgs[-10:])} messages for existing channel '{ch.get('name')}' (chat {chat_id})")
                         for mid in chat_msgs[-10:]:
@@ -6363,6 +6363,10 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str) ->
     ch_name = channel.get("name") or "Channel"
     ch_desc = channel.get("description") or ""
     member_count = channel.get("member_count") or 0
+    if member_count > 1:
+        subscribers_pill = f'<div class="subscribers-pill">👥 {member_count} subscribers</div>'
+    else:
+        subscribers_pill = '<div class="subscribers-pill">📢 Channel</div>'
     invite_link = channel.get("invite_link") or ""
 
     join_link = invite_link
@@ -6720,7 +6724,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str) ->
 <body>
     <header>
         <div class="top-nav">
-            <a href="/">← Bouncer Home</a>
+            <a href="/">← Home</a>
         </div>
         <div class="top-nav">
             <a href="{rss_url}">📡 RSS Feed</a>
@@ -6732,7 +6736,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str) ->
             <img src="/c/{token}/avatar.png" alt="{ch_name_esc} Avatar" class="channel-avatar" onerror="this.src='/icon.png'" />
             <div class="channel-info">
                 <h1>{ch_name_esc}</h1>
-                <div class="subscribers-pill">👥 {member_count} subscribers</div>
+                {subscribers_pill}
                 {f'<p class="channel-desc">{_autolink(ch_desc)}</p>' if ch_desc else ''}
             </div>
             <div class="actions-row">
@@ -6761,7 +6765,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str) ->
     </div>
 
     <footer>
-        <p>Powered by <a href="https://github.com/mrgluek/deltachat_bouncer" target="_blank">Delta Chat Bouncer Bot</a> · <a href="/">All Channels</a></p>
+        <p>Powered by <a href="https://github.com/mrgluek/deltachat_bouncer" target="_blank">Delta Chat Bouncer Bot</a></p>
     </footer>
 </body>
 </html>
@@ -7182,9 +7186,12 @@ async def handle_channel_rss(request):
         host = request.headers.get("X-Forwarded-Host", request.host)
         base_url = f"{scheme}://{host}"
 
-    posts = database.get_channel_posts(channel['chat_id'], limit=50)
-    rss_xml = get_channel_rss_xml(channel, posts, base_url)
-    return web.Response(text=rss_xml, content_type="application/rss+xml; charset=utf-8", headers={"Cache-Control": "public, max-age=300"})
+    try:
+        rss_xml = get_channel_rss_xml(channel, posts, base_url)
+        return web.Response(text=rss_xml, content_type="application/rss+xml", charset="utf-8", headers={"Cache-Control": "public, max-age=300"})
+    except Exception as e:
+        logger.exception(f"Error generating RSS XML for channel {token}: {e}")
+        return web.Response(status=500, text="Internal Server Error generating RSS feed")
 
 
 async def handle_channel_rss_redirect(request):
@@ -7233,7 +7240,8 @@ async def _run_web_server():
     app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/rss', handle_channel_rss_redirect)
     app.router.add_get('/media/{token:[a-zA-Z0-9]{12}}/{msg_id:[0-9]+}/{filename}', handle_media_file)
 
-    runner = web.AppRunner(app)
+    access_log_format = '%{X-Forwarded-For}i %t "%r" %s %b "%{Referer}i" "%{User-Agent}i"'
+    runner = web.AppRunner(app, access_log_format=access_log_format)
     await runner.setup()
 
     port = int(os.getenv("PORT", "8080"))
