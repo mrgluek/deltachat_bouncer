@@ -37,7 +37,7 @@ import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.12.0"
+VERSION = "2.12.1"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',

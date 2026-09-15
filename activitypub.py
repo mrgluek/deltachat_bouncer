@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import base64
 import hashlib
@@ -333,9 +335,9 @@ def format_post_html(text: str) -> str:
 # 5. Delivery Worker
 # ==============================================================================
 
-_delivery_queue: asyncio.Queue | None = None
-_http_session: '_aiohttp.ClientSession' | None = None
-_web_loop: asyncio.AbstractEventLoop | None = None
+_delivery_queue = None
+_http_session = None
+_web_loop = None
 
 async def init_delivery_worker(loop: asyncio.AbstractEventLoop):
     """Initialize delivery queue and HTTP session. Called from _run_web_server."""

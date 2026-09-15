@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.12.1] - 2026-09-15
+
+### Bug Fixes
+- **Python 3.11 Module-Level Type Annotation Fix**:
+  - Added `from __future__ import annotations` to `activitypub.py`.
+  - Removed evaluated string-union annotations on private module globals (`_http_session`, `_delivery_queue`, `_web_loop`) to resolve `TypeError: unsupported operand type(s) for |: 'str' and 'NoneType'` when starting the bot in Docker (Python 3.11).
+
 ## [2.12.0] - 2026-09-15
 
 ### Fediverse / ActivityPub Federation
