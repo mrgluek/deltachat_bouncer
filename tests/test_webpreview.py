@@ -45,15 +45,54 @@ except ImportError:
     sys.modules['deltabot_cli'] = mock_deltabot_cli
 
 try:
+    import aiohttp
+    from aiohttp import web
+except ImportError:
+    mock_aiohttp = MagicMock()
+    mock_web = MagicMock()
+    class MockResponse:
+        def __init__(self, text="", body=None, status=200, content_type="text/plain", headers=None):
+            self.text = text
+            self.body = body or (text.encode('utf-8') if text else b"")
+            self.status = status
+            self.content_type = content_type
+            self.headers = headers or {}
+    mock_web.Response = MockResponse
+    mock_aiohttp.web = mock_web
+    sys.modules['aiohttp'] = mock_aiohttp
+    sys.modules['aiohttp.web'] = mock_web
+
+try:
     import qrcode
 except ImportError:
-    sys.modules['qrcode'] = MagicMock()
+    mock_qrcode = MagicMock()
+    def fake_save(buf, *args, **kwargs):
+        buf.write(b"fake_qr_data")
+    mock_img = MagicMock()
+    mock_img.save.side_effect = fake_save
+    mock_qr_instance = MagicMock()
+    mock_qr_instance.make_image.return_value = mock_img
+    mock_qrcode.QRCode.return_value = mock_qr_instance
+    sys.modules['qrcode'] = mock_qrcode
 
 # Add parent directory to sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import database
 import bot
+
+if bot.web is None:
+    bot.web = sys.modules.get('aiohttp.web', MagicMock())
+
+# Ensure bot.qrcode mock writes bytes when save is called
+if hasattr(bot, "qrcode") and isinstance(bot.qrcode, MagicMock):
+    def _fake_save(buf, *args, **kwargs):
+        buf.write(b"fake_qr_data")
+    _mock_img = MagicMock()
+    _mock_img.save.side_effect = _fake_save
+    _mock_qr_instance = MagicMock()
+    _mock_qr_instance.make_image.return_value = _mock_img
+    bot.qrcode.QRCode.return_value = _mock_qr_instance
 
 
 class TestWebPreview(unittest.TestCase):
@@ -334,6 +373,108 @@ class TestWebPreview(unittest.TestCase):
 
         self.assertIn("News Channel", sent_text)
         self.assertIn(f"🌐 Preview: https://bouncer.example.org/c/{token}", sent_text)
+
+    def test_format_markdown_html(self):
+        # 1. Bold
+        html_bold1 = bot.format_markdown_html("This is **bold** text")
+        self.assertIn("<strong>bold</strong>", html_bold1)
+        html_bold2 = bot.format_markdown_html("This is __bold__ text")
+        self.assertIn("<strong>bold</strong>", html_bold2)
+
+        # 2. Italic
+        html_italic1 = bot.format_markdown_html("This is *italic* text")
+        self.assertIn("<em>italic</em>", html_italic1)
+        html_italic2 = bot.format_markdown_html("This is _italic_ text")
+        self.assertIn("<em>italic</em>", html_italic2)
+
+        # 3. Strikethrough
+        html_strike = bot.format_markdown_html("This is ~~strike~~ text")
+        self.assertIn("<del>strike</del>", html_strike)
+
+        # 4. Inline code
+        html_code = bot.format_markdown_html("Use `print('hello')` function")
+        self.assertIn("<code>print(&#x27;hello&#x27;)</code>", html_code)
+
+        # 5. Code block
+        block_input = "```python\ndef greet():\n    return 'hi' < 'hello'\n```"
+        html_block = bot.format_markdown_html(block_input)
+        self.assertIn('<pre><code class="language-python">def greet():\n    return &#x27;hi&#x27; &lt; &#x27;hello&#x27;</code></pre>', html_block)
+
+        # 6. Spoilers
+        html_spoiler = bot.format_markdown_html("The killer is ||John Doe||!")
+        self.assertIn('<span class="spoiler"', html_spoiler)
+        self.assertIn("John Doe</span>", html_spoiler)
+
+        # 7. Blockquotes
+        html_quote = bot.format_markdown_html("> First quote line\n> Second quote line")
+        self.assertIn("<blockquote>First quote line<br>Second quote line</blockquote>", html_quote)
+
+        # 8. Markdown links
+        html_link = bot.format_markdown_html("Visit [Delta Chat](https://delta.chat) today")
+        self.assertIn('<a href="https://delta.chat" target="_blank" rel="noopener noreferrer">Delta Chat</a>', html_link)
+
+        # 9. Autolinking raw URLs
+        html_autolink = bot.format_markdown_html("Check out https://gluek.info/blog for updates")
+        self.assertIn('<a href="https://gluek.info/blog" target="_blank" rel="noopener noreferrer">https://gluek.info/blog</a>', html_autolink)
+
+        # 10. Security / XSS Immunity
+        xss_input = "<script>alert('pwned')</script> and <img src=x onerror=alert(1)> and [xss](javascript:alert(1))"
+        html_safe = bot.format_markdown_html(xss_input)
+        self.assertNotIn("<script>", html_safe)
+        self.assertNotIn("<img", html_safe)
+        self.assertNotIn('href="javascript:', html_safe)
+        self.assertIn("&lt;script&gt;", html_safe)
+
+    def test_cache_and_invalidation(self):
+        token = database.add_catalog_channel(
+            chat_id=6001,
+            name="Cache Channel",
+            description="Testing cache",
+            member_count=5,
+            invite_link="https://i.delta.chat/#cache"
+        )
+        # Populate caches manually
+        bot._channel_preview_cache[f"{token}:"] = (time.time() + 60, "etag1", "<html>test</html>")
+        bot._channel_rss_cache[f"{token}:https://example.com"] = (time.time() + 120, "etag2", "<xml>test</xml>")
+
+        self.assertIn(f"{token}:", bot._channel_preview_cache)
+        self.assertIn(f"{token}:https://example.com", bot._channel_rss_cache)
+
+        # Invalidate specific channel by token
+        bot.invalidate_channel_cache(token=token)
+        self.assertNotIn(f"{token}:", bot._channel_preview_cache)
+        self.assertNotIn(f"{token}:https://example.com", bot._channel_rss_cache)
+
+        # Populate again and invalidate by chat_id
+        bot._channel_preview_cache[f"{token}:"] = (time.time() + 60, "etag1", "<html>test</html>")
+        bot.invalidate_channel_cache(chat_id=6001)
+        self.assertNotIn(f"{token}:", bot._channel_preview_cache)
+
+        # Global invalidate
+        bot._channel_preview_cache["other:"] = (time.time() + 60, "etag1", "<html>test</html>")
+        bot.invalidate_channel_cache()
+        self.assertEqual(len(bot._channel_preview_cache), 0)
+
+    def test_qr_code_caching(self):
+        bot._qr_cache.clear()
+        link = "https://i.delta.chat/#testqr"
+        b1, mime1 = bot._generate_qr_bytes(link, fmt="png", box_size=6)
+        self.assertEqual(mime1, "image/png")
+        self.assertTrue(len(b1) > 0)
+        self.assertIn(f"{link}:png:6", bot._qr_cache)
+
+        # Second call returns from cache
+        b2, mime2 = bot._generate_qr_bytes(link, fmt="png", box_size=6)
+        self.assertEqual(b1, b2)
+
+    def test_robots_txt_disallow_all(self):
+        import asyncio
+        req = MagicMock()
+        resp = asyncio.run(bot.handle_robots_txt(req))
+        self.assertEqual(resp.status, 200)
+        self.assertIn("User-agent: *", resp.text)
+        self.assertIn("Disallow: /", resp.text)
+        self.assertNotIn("Allow: /", resp.text)
 
 
 if __name__ == "__main__":

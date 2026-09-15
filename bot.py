@@ -37,7 +37,7 @@ import database
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
 
-VERSION = "2.11.0"
+VERSION = "2.11.1"
 
 
 def log_version_info(bot):
@@ -3629,6 +3629,7 @@ def dchannelremove_command(bot, accid, event):
             channel = database.get_catalog_channel_by_id(catalog_id)
             if channel:
                 database.remove_catalog_channel(channel['chat_id'])
+                invalidate_channel_cache(chat_id=channel['chat_id'], token=channel.get('token'))
                 _send(bot, accid, msg.chat_id, f"✅ Channel **{channel['name']}** has been removed from the catalog.")
                 return
             else:
@@ -3640,6 +3641,7 @@ def dchannelremove_command(bot, accid, event):
     channel = database.get_catalog_channel_by_chat_id(msg.chat_id)
     if channel:
         database.remove_catalog_channel(msg.chat_id)
+        invalidate_channel_cache(chat_id=msg.chat_id, token=channel.get('token'))
         _send(bot, accid, msg.chat_id, f"✅ Channel **{channel['name']}** has been removed from the catalog (web preview disabled).")
     else:
         _send(bot, accid, msg.chat_id, "❌ This chat is not registered as a channel in the catalog. Use `/dchannelremove <ID>` to remove by ID.")
@@ -3666,6 +3668,7 @@ def url_command(bot, accid, event):
 
     url = url.rstrip("/")
     database.set_config("base_url", url)
+    invalidate_channel_cache()
     _send(bot, accid, msg.chat_id, f"✅ Base web URL has been set to `{url}`.")
 
 @dc_cli.on(events.NewMessage(command="/welcome"))
@@ -4809,6 +4812,7 @@ def _ingest_channel_post(bot, accid, msg, catalog_channel: dict, token: str):
                 timestamp=msg_ts
             )
             database.prune_channel_posts(chat_id, 100)
+            invalidate_channel_cache(chat_id=chat_id, token=token)
     except Exception as e:
         logger.error(f"Error ingesting channel post: {e}")
 
@@ -5965,13 +5969,181 @@ def handle_all_messages(bot, accid, event):
 # Channel Web Preview & Embedded Web Server
 # ═══════════════════════════════════════════════════════════════════
 
-def _autolink(text: str) -> str:
-    """Safely escape HTML and turn URLs into clickable links."""
+index_page_html_cache = None
+_channel_preview_cache: dict[str, tuple[float, str, str]] = {}  # key -> (expires_at, etag, html)
+_channel_rss_cache: dict[str, tuple[float, str, str]] = {}  # key -> (expires_at, etag, rss_xml)
+_qr_cache: dict[str, tuple[bytes, str]] = {}  # key -> (bytes, content_type)
+
+
+def invalidate_channel_cache(chat_id: int = None, token: str = None) -> None:
+    """Invalidate in-memory preview and RSS caches for a specific channel or all channels."""
+    global index_page_html_cache, _channel_preview_cache, _channel_rss_cache
+    if chat_id is None and token is None:
+        index_page_html_cache = None
+        _channel_preview_cache.clear()
+        _channel_rss_cache.clear()
+        return
+
+    target_tokens = []
+    if token:
+        target_tokens.append(token)
+    elif chat_id:
+        try:
+            ch = database.get_catalog_channel_by_chat_id(chat_id)
+            if ch and ch.get("token"):
+                target_tokens.append(ch["token"])
+        except Exception:
+            pass
+
+    for t in target_tokens:
+        prefix = f"{t}:"
+        for k in list(_channel_preview_cache.keys()):
+            if k.startswith(prefix):
+                _channel_preview_cache.pop(k, None)
+        for k in list(_channel_rss_cache.keys()):
+            if k.startswith(prefix):
+                _channel_rss_cache.pop(k, None)
+
+
+def _generate_qr_bytes(link: str, fmt: str = "png", box_size: int = 6) -> tuple[bytes, str]:
+    """Generate and cache QR code image bytes in memory."""
+    cache_key = f"{link}:{fmt}:{box_size}"
+    if cache_key in _qr_cache:
+        return _qr_cache[cache_key]
+
+    buf = io.BytesIO()
+    if fmt == "svg":
+        try:
+            import qrcode.image.svg as qrcode_svg
+            svg_factory = qrcode_svg.SvgPathImage
+        except (ImportError, AttributeError):
+            svg_factory = None
+        qr = qrcode.QRCode(image_factory=svg_factory, border=2)
+        qr.add_data(link)
+        qr.make(fit=True)
+        img = qr.make_image()
+        img.save(buf)
+        res = (buf.getvalue(), "image/svg+xml")
+    else:
+        qr = qrcode.QRCode(box_size=box_size, border=2)
+        qr.add_data(link)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        img.save(buf, format="PNG")
+        res = (buf.getvalue(), "image/png")
+
+    _qr_cache[cache_key] = res
+    return res
+
+
+def format_markdown_html(text: str) -> str:
+    """Safely escape HTML and render CommonMark/Delta Chat markdown formatting."""
     if not text:
         return ""
-    escaped = html.escape(text)
-    url_pattern = re.compile(r'(https?://[^\s<>"]+)')
-    return url_pattern.sub(r'<a href="\1" target="_blank" rel="noopener noreferrer">\1</a>', escaped).replace('\n', '<br>')
+
+    code_blocks = []
+    inline_codes = []
+
+    # 1. Extract fenced code blocks
+    def save_code_block(match):
+        lang = match.group(1) or ""
+        code = match.group(2)
+        code_escaped = html.escape(code.strip("\r\n"))
+        lang_class = f' class="language-{html.escape(lang)}"' if lang else ""
+        placeholder = f"\x00CB_{len(code_blocks)}\x00"
+        code_blocks.append(f'<pre><code{lang_class}>{code_escaped}</code></pre>')
+        return placeholder
+
+    text = re.sub(r'```([a-zA-Z0-9_-]*)\r?\n?(.*?)\r?\n?```', save_code_block, text, flags=re.DOTALL)
+
+    # 2. Extract inline code
+    def save_inline_code(match):
+        code = match.group(1)
+        placeholder = f"\x00IC_{len(inline_codes)}\x00"
+        inline_codes.append(f'<code>{html.escape(code)}</code>')
+        return placeholder
+
+    text = re.sub(r'`([^`\r\n]+)`', save_inline_code, text)
+
+    # 3. HTML escape remaining text
+    text = html.escape(text)
+
+    # 4. Spoilers: ||spoiler||
+    text = re.sub(r'\|\|(.+?)\|\|', r'<span class="spoiler" onclick="this.classList.toggle(\'revealed\')">\1</span>', text)
+
+    # 5. Bold: **text** or __text__
+    text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+    text = re.sub(r'__(.+?)__', r'<strong>\1</strong>', text)
+
+    # 6. Strikethrough: ~~text~~
+    text = re.sub(r'~~(.+?)~~', r'<del>\1</del>', text)
+
+    # 7. Italic: *text* or _text_
+    text = re.sub(r'(?<![a-zA-Z0-9])\*([^*\r\n]+?)\*(?![a-zA-Z0-9])', r'<em>\1</em>', text)
+    text = re.sub(r'(?<![a-zA-Z0-9])_([^_\r\n]+?)_(?![a-zA-Z0-9])', r'<em>\1</em>', text)
+
+    # 8. Markdown links: [label](url)
+    def replace_md_link(match):
+        label = match.group(1)
+        url = html.unescape(match.group(2)).strip()
+        if re.match(r'^(https?://|mailto:)', url, re.IGNORECASE):
+            safe_url = html.escape(url, quote=True)
+            return f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">{label}</a>'
+        return match.group(0)
+
+    text = re.sub(r'\[([^\]]+)\]\(((?:https?://|mailto:)[^\s\)]+)\)', replace_md_link, text)
+
+    # 9. Autolink bare URLs
+    def autolink_url(match):
+        raw_url = html.unescape(match.group(1)).strip()
+        safe_url = html.escape(raw_url, quote=True)
+        return f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">{match.group(1)}</a>'
+
+    parts = re.split(r'(<a\s+[^>]*>.*?</a>)', text, flags=re.DOTALL)
+    for i in range(0, len(parts), 2):
+        parts[i] = re.sub(r'(?<!href=")(?<!href=\')(?<!">)(https?://[^\s<>"\'\)]+)', autolink_url, parts[i])
+    text = "".join(parts)
+
+    # 10. Blockquotes
+    lines = text.split("\n")
+    new_lines = []
+    in_quote = False
+    quote_lines = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("&gt; ") or stripped == "&gt;":
+            q_content = line[line.find("&gt;") + 4:].lstrip()
+            quote_lines.append(q_content)
+            in_quote = True
+        else:
+            if in_quote:
+                new_lines.append(f'<blockquote>{"<br>".join(quote_lines)}</blockquote>')
+                quote_lines = []
+                in_quote = False
+            new_lines.append(line)
+    if in_quote:
+        new_lines.append(f'<blockquote>{"<br>".join(quote_lines)}</blockquote>')
+
+    text = "<br>".join(new_lines)
+
+    # 11. Restore placeholders
+    for idx, cb in enumerate(code_blocks):
+        text = text.replace(f"<br>\x00CB_{idx}\x00<br>", f"\n{cb}\n")
+        text = text.replace(f"<br>\x00CB_{idx}\x00", f"\n{cb}")
+        text = text.replace(f"\x00CB_{idx}\x00<br>", f"{cb}\n")
+        text = text.replace(f"\x00CB_{idx}\x00", cb)
+
+    for idx, ic in enumerate(inline_codes):
+        text = text.replace(f"\x00IC_{idx}\x00", ic)
+
+    text = re.sub(r'(<br>){3,}', '<br><br>', text)
+    return text.strip()
+
+
+def _autolink(text: str) -> str:
+    """Backward-compatible alias for format_markdown_html."""
+    return format_markdown_html(text)
 
 
 def _format_post_time(ts: float) -> str:
@@ -6397,7 +6569,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
             p_ts = p.get("timestamp") or time.time()
             time_str = _format_post_time(p_ts)
             from_name = html.escape(p.get("from_name") or ch_name)
-            p_text = _autolink(p.get("text") or "")
+            p_text = format_markdown_html(p.get("text") or "")
 
             media_type = p.get("media_type")
             media_fn = p.get("media_filename")
@@ -6641,6 +6813,55 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
         }}
         .post-body a {{ color: var(--color-primary); text-decoration: none; }}
         .post-body a:hover {{ text-decoration: underline; }}
+        .post-body blockquote {{
+            border-left: 3px solid var(--color-primary);
+            padding: 0.4rem 0.8rem;
+            margin: 0.5rem 0;
+            color: var(--text-muted);
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 0 0.5rem 0.5rem 0;
+        }}
+        .post-body code {{
+            font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+            font-size: 0.88em;
+            background: rgba(255, 255, 255, 0.08);
+            padding: 0.15em 0.4em;
+            border-radius: 4px;
+            color: #93c5fd;
+        }}
+        .post-body pre {{
+            background: #0d1322;
+            border: 1px solid var(--border-color);
+            border-radius: 0.75rem;
+            padding: 0.9rem;
+            overflow-x: auto;
+            margin: 0.6rem 0;
+        }}
+        .post-body pre code {{
+            background: none;
+            padding: 0;
+            color: #e2e8f0;
+            font-size: 0.88rem;
+            display: block;
+        }}
+        .post-body del {{
+            opacity: 0.7;
+            text-decoration: line-through;
+        }}
+        .spoiler {{
+            background: rgba(255, 255, 255, 0.18);
+            color: transparent;
+            border-radius: 4px;
+            padding: 0.1em 0.35em;
+            cursor: pointer;
+            user-select: none;
+            transition: background 0.2s, color 0.2s;
+        }}
+        .spoiler:hover, .spoiler.revealed {{
+            background: rgba(255, 255, 255, 0.08);
+            color: inherit;
+            user-select: text;
+        }}
         .post-media {{
             margin-top: 0.5rem;
             border-radius: 0.75rem;
@@ -6954,7 +7175,7 @@ def get_channel_rss_xml(channel: dict, posts: list[dict], base_url: str) -> str:
 
         desc_parts = []
         if post_text:
-            desc_parts.append(html.escape(post_text).replace("\n", "<br/>"))
+            desc_parts.append(format_markdown_html(post_text))
 
         media_type = p.get("media_type")
         media_fn = p.get("media_filename")
@@ -7016,7 +7237,7 @@ async def handle_icon(request):
 
 async def handle_robots_txt(request):
     headers = {"Cache-Control": "public, max-age=86400"}
-    content = "User-agent: *\nAllow: /\n"
+    content = "User-agent: *\nDisallow: /\n"
     return web.Response(text=content, content_type="text/plain", headers=headers)
 
 
@@ -7032,42 +7253,43 @@ async def handle_index(request):
 
 async def handle_qr_svg(request):
     link = get_bot_invite_link()
-    if link:
-        try:
-            import qrcode.image.svg
-            qr = qrcode.QRCode(image_factory=qrcode.image.svg.SvgPathImage, border=2)
-            qr.add_data(link)
-            qr.make(fit=True)
-            img = qr.make_image()
-            buf = io.BytesIO()
-            img.save(buf)
-            headers = {"Cache-Control": "public, max-age=3600", "Content-Type": "image/svg+xml"}
-            return web.Response(body=buf.getvalue(), headers=headers)
-        except Exception as e:
-            logger.error(f"Error generating qr.svg: {e}")
-    return web.Response(status=404)
+    if not link:
+        return web.Response(status=404)
+    try:
+        body, content_type = _generate_qr_bytes(link, fmt="svg")
+        headers = {"Cache-Control": "public, max-age=86400, immutable", "Content-Type": content_type}
+        return web.Response(body=body, headers=headers)
+    except Exception as e:
+        logger.error(f"Error generating qr.svg: {e}")
+        return web.Response(status=500)
 
 
 async def handle_qr_png(request):
     link = get_bot_invite_link()
-    if link:
-        try:
-            qr = qrcode.QRCode(box_size=6, border=2)
-            qr.add_data(link)
-            qr.make(fit=True)
-            img = qr.make_image(fill_color="black", back_color="white")
-            buf = io.BytesIO()
-            img.save(buf, format="PNG")
-            headers = {"Cache-Control": "public, max-age=3600", "Content-Type": "image/png"}
-            return web.Response(body=buf.getvalue(), headers=headers)
-        except Exception as e:
-            logger.error(f"Error generating qr.png: {e}")
-    return web.Response(status=404)
+    if not link:
+        return web.Response(status=404)
+    try:
+        body, content_type = _generate_qr_bytes(link, fmt="png", box_size=6)
+        headers = {"Cache-Control": "public, max-age=86400, immutable", "Content-Type": content_type}
+        return web.Response(body=body, headers=headers)
+    except Exception as e:
+        logger.error(f"Error generating qr.png: {e}")
+        return web.Response(status=500)
 
 
 async def handle_channel_preview(request):
     ingress_path = request.headers.get("X-Ingress-Path", "")
     token = request.match_info.get('token')
+
+    cache_key = f"{token}:{ingress_path}"
+    cached = _channel_preview_cache.get(cache_key)
+    now = time.time()
+    if cached and now < cached[0]:
+        _, etag, html_content = cached
+        if request.headers.get("If-None-Match") == etag:
+            return web.Response(status=304, headers={"ETag": etag, "Cache-Control": "public, max-age=60"})
+        return web.Response(text=html_content, content_type="text/html", headers={"ETag": etag, "Cache-Control": "public, max-age=60"})
+
     channel = database.get_catalog_channel_by_token(token)
     if not channel:
         return web.Response(text=get_404_html(ingress_path=ingress_path), status=404, content_type="text/html")
@@ -7083,7 +7305,13 @@ async def handle_channel_preview(request):
 
     posts = database.get_channel_posts(channel['chat_id'], limit=50)
     html_content = get_channel_preview_html(channel, posts, base_url, ingress_path=ingress_path)
-    return web.Response(text=html_content, content_type="text/html", headers={"Cache-Control": "public, max-age=60"})
+    etag = f'"{hashlib.md5(html_content.encode("utf-8")).hexdigest()}"'
+    _channel_preview_cache[cache_key] = (now + 60.0, etag, html_content)
+
+    if request.headers.get("If-None-Match") == etag:
+        return web.Response(status=304, headers={"ETag": etag, "Cache-Control": "public, max-age=60"})
+
+    return web.Response(text=html_content, content_type="text/html", headers={"ETag": etag, "Cache-Control": "public, max-age=60"})
 
 
 async def handle_channel_qr_png(request):
@@ -7103,17 +7331,9 @@ async def handle_channel_qr_png(request):
         link = raw_link
 
     try:
-        qr = qrcode.QRCode(box_size=6, border=2)
-        qr.add_data(link)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white")
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        headers = {
-            "Cache-Control": "public, max-age=3600",
-            "Content-Type": "image/png"
-        }
-        return web.Response(body=buf.getvalue(), headers=headers)
+        body, content_type = _generate_qr_bytes(link, fmt="png", box_size=6)
+        headers = {"Cache-Control": "public, max-age=86400, immutable", "Content-Type": content_type}
+        return web.Response(body=body, headers=headers)
     except Exception as e:
         logger.error(f"Error generating channel qr.png: {e}")
         return web.Response(status=500)
@@ -7136,18 +7356,9 @@ async def handle_channel_qr_svg(request):
         link = raw_link
 
     try:
-        import qrcode.image.svg
-        qr = qrcode.QRCode(image_factory=qrcode.image.svg.SvgPathImage, border=2)
-        qr.add_data(link)
-        qr.make(fit=True)
-        img = qr.make_image()
-        buf = io.BytesIO()
-        img.save(buf)
-        headers = {
-            "Cache-Control": "public, max-age=3600",
-            "Content-Type": "image/svg+xml"
-        }
-        return web.Response(body=buf.getvalue(), headers=headers)
+        body, content_type = _generate_qr_bytes(link, fmt="svg")
+        headers = {"Cache-Control": "public, max-age=86400, immutable", "Content-Type": content_type}
+        return web.Response(body=body, headers=headers)
     except Exception as e:
         logger.error(f"Error generating channel qr.svg: {e}")
         return web.Response(status=500)
@@ -7187,9 +7398,6 @@ async def handle_channel_avatar(request):
 
 async def handle_channel_rss(request):
     token = request.match_info.get('token')
-    channel = database.get_catalog_channel_by_token(token)
-    if not channel or channel.get('is_deleted'):
-        return web.Response(status=404, text="Channel not found")
 
     base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
     if not base_url:
@@ -7197,10 +7405,29 @@ async def handle_channel_rss(request):
         host = request.headers.get("X-Forwarded-Host", request.host)
         base_url = f"{scheme}://{host}"
 
+    cache_key = f"{token}:{base_url}"
+    cached = _channel_rss_cache.get(cache_key)
+    now = time.time()
+    if cached and now < cached[0]:
+        _, etag, rss_xml = cached
+        if request.headers.get("If-None-Match") == etag:
+            return web.Response(status=304, headers={"ETag": etag, "Cache-Control": "public, max-age=120"})
+        return web.Response(text=rss_xml, content_type="application/rss+xml", charset="utf-8", headers={"ETag": etag, "Cache-Control": "public, max-age=120"})
+
+    channel = database.get_catalog_channel_by_token(token)
+    if not channel or channel.get('is_deleted'):
+        return web.Response(status=404, text="Channel not found")
+
     try:
         posts = database.get_channel_posts(channel['chat_id'], limit=50)
         rss_xml = get_channel_rss_xml(channel, posts, base_url)
-        return web.Response(text=rss_xml, content_type="application/rss+xml", charset="utf-8", headers={"Cache-Control": "public, max-age=300"})
+        etag = f'"{hashlib.md5(rss_xml.encode("utf-8")).hexdigest()}"'
+        _channel_rss_cache[cache_key] = (now + 120.0, etag, rss_xml)
+
+        if request.headers.get("If-None-Match") == etag:
+            return web.Response(status=304, headers={"ETag": etag, "Cache-Control": "public, max-age=120"})
+
+        return web.Response(text=rss_xml, content_type="application/rss+xml", charset="utf-8", headers={"ETag": etag, "Cache-Control": "public, max-age=120"})
     except Exception as e:
         logger.exception(f"Error generating RSS XML for channel {token}: {e}")
         return web.Response(status=500, text="Internal Server Error generating RSS feed")
