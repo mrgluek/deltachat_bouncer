@@ -1,0 +1,5 @@
+# Reverse proxy configuration for Channel Web Preview
+# Replace channels.example.com with your actual domain
+channels.example.com {
+    reverse_proxy 127.0.0.1:8080
+}

@@ -16,7 +16,16 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import uuid
+import html
 from datetime import datetime, timezone
+from email.utils import format_datetime
+
+try:
+    import aiohttp
+    from aiohttp import web
+except ImportError:
+    aiohttp = None
+    web = None
 
 from deltachat2 import events, MsgData, SystemMessageType
 from deltabot_cli import BotCli
@@ -28,7 +37,7 @@ import database
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
 
-VERSION = "2.10.1"
+VERSION = "2.11.0"
 
 
 def log_version_info(bot):
@@ -84,6 +93,25 @@ _domain_locks: dict[str, threading.Lock] = {}
 _domain_locks_lock = threading.Lock()
 _cmping_global_lock = threading.Lock()
 resilient_lock = threading.Lock()
+
+CHANNEL_MEDIA_DIR = os.path.join(os.getenv("DC_DB_DIR", "data"), "channel_media")
+os.makedirs(CHANNEL_MEDIA_DIR, exist_ok=True)
+bot_invite_link_cache = {}
+index_page_html_cache = None
+
+def get_bot_invite_link() -> str:
+    global dc_bot_instance, dc_accid, bot_invite_link_cache
+    if "link" in bot_invite_link_cache:
+        return bot_invite_link_cache["link"]
+    if dc_bot_instance and dc_accid:
+        try:
+            link = dc_bot_instance.rpc.get_chat_securejoin_qr_code(dc_accid, None)
+            if link:
+                bot_invite_link_cache["link"] = link
+                return link
+        except Exception as e:
+            logger.warning(f"Could not get securejoin link: {e}")
+    return ""
 
 # Helper to read .env file into os.environ if not already present
 def _load_env_file():
@@ -1914,6 +1942,9 @@ def on_start(bot, args):
     t2 = threading.Thread(target=_cmping_monitor_loop, args=(bot, accid), daemon=True)
     t2.start()
 
+    t_web = threading.Thread(target=start_web_server_thread, daemon=True)
+    t_web.start()
+
 
 @dc_cli.on(events.NewMessage(command="/initadmin"))
 def initadmin_command(bot, accid, event):
@@ -2889,6 +2920,7 @@ def help_command(bot, accid, event):
         help_text += "/dchanneladd <URL> — Join and add a channel to the catalog\n"
         help_text += "/dchannelremove [ID] — Remove channel from catalog\n"
         help_text += "/dchanneldesc<ID> <text> — Update channel description\n"
+        help_text += "/url [base_url] — Set/view base web URL for channel previews\n"
         help_text += "/cmpingadd <server> — Add server to connectivity monitoring\n"
         help_text += "/cmpingdel <server> — Remove server from monitoring\n"
         help_text += "/cmreport <on/off> — Toggle monitoring alerts in this chat"
@@ -3360,13 +3392,16 @@ def dchannels_command(bot, accid, event):
         _send(bot, accid, msg.chat_id, "ℹ️ The channel catalog is empty.")
         return
 
+    base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
     lines = []
     for ch in catalog_channels:
         desc = ch['description'] or ""
         if len(desc) > 100:
             desc = desc[:100] + "..."
         desc_str = f" {desc}" if desc else ""
-        lines.append(f"/dchannel{ch['id']} **{ch['name']}**{desc_str}")
+        token = ch.get('token')
+        preview_str = f"\n  🌐 Preview: {base_url.rstrip('/')}/c/{token}" if (base_url and token) else ""
+        lines.append(f"/dchannel{ch['id']} **{ch['name']}**{desc_str}{preview_str}")
 
     reply = "\n".join(lines)
     _send(bot, accid, msg.chat_id, reply)
@@ -3510,8 +3545,25 @@ def bg_channel_join_worker(bot, accid, admin_chat_id, url, chat_name, qr_info=No
                 except Exception:
                     pass
                 
-            database.add_catalog_channel(joined_chat_id, c_name, description, 0, url)
-            _send(bot, accid, admin_chat_id, f"✅ Channel **{c_name}** has been joined and added to the catalog.")
+            token = database.add_catalog_channel(joined_chat_id, c_name, description, 0, url)
+            
+            # Backfill initial messages delivered by core (up to 10 messages from handshake)
+            try:
+                chat_msgs = bot.rpc.get_chat_msgs(accid, joined_chat_id)
+                for mid in chat_msgs[-10:]:
+                    if isinstance(mid, int) and mid > 0:
+                        try:
+                            m = bot.rpc.get_message(accid, mid)
+                            if m and not getattr(m, "is_info", False):
+                                _ingest_channel_post(bot, accid, m, {"chat_id": joined_chat_id, "token": token}, token)
+                        except Exception as e:
+                            logger.warning(f"Failed to backfill msg {mid}: {e}")
+            except Exception as e:
+                logger.warning(f"Failed to backfill messages for channel {joined_chat_id}: {e}")
+
+            base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
+            preview_url = f"{base_url.rstrip('/')}/c/{token}" if base_url else f"/c/{token}"
+            _send(bot, accid, admin_chat_id, f"✅ Channel **{c_name}** has been joined and added to the catalog.\n\n🌐 Web preview: {preview_url}\n🔗 Invite link: {url}")
         else:
             _send(bot, accid, admin_chat_id, f"❌ Failed to join channel **{chat_name or 'Channel'}**. The securejoin handshake timed out. Please check that the link is correct and try again.")
             
@@ -3585,9 +3637,32 @@ def dchannelremove_command(bot, accid, event):
     channel = database.get_catalog_channel_by_chat_id(msg.chat_id)
     if channel:
         database.remove_catalog_channel(msg.chat_id)
-        _send(bot, accid, msg.chat_id, f"✅ Channel **{channel['name']}** has been removed from the catalog.")
+        _send(bot, accid, msg.chat_id, f"✅ Channel **{channel['name']}** has been removed from the catalog (web preview disabled).")
     else:
         _send(bot, accid, msg.chat_id, "❌ This chat is not registered as a channel in the catalog. Use `/dchannelremove <ID>` to remove by ID.")
+
+@dc_cli.on(events.NewMessage(command="/url"))
+def url_command(bot, accid, event):
+    """Set or view the base web preview URL. Admin only."""
+    msg = event.msg
+    if not _is_dc_admin(bot, accid, msg.from_id):
+        _send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use /url.")
+        return
+
+    payload = event.payload.strip() if event.payload else ""
+    if not payload:
+        current_url = database.get_config("base_url") or os.getenv("BASE_URL") or "Not set"
+        _send(bot, accid, msg.chat_id, f"🌐 Current base web URL: `{current_url}`\n\nTo set a new base URL, use:\n`/url https://channels.yourdomain.com`")
+        return
+
+    url = payload
+    if not (url.startswith("http://") or url.startswith("https://")):
+        _send(bot, accid, msg.chat_id, "❌ Invalid URL format. Please start with `http://` or `https://`.")
+        return
+
+    url = url.rstrip("/")
+    database.set_config("base_url", url)
+    _send(bot, accid, msg.chat_id, f"✅ Base web URL has been set to `{url}`.")
 
 @dc_cli.on(events.NewMessage(command="/welcome"))
 def welcome_command(bot, accid, event):
@@ -4649,6 +4724,91 @@ def _get_msg_file_info(bot, accid, msg) -> dict | None:
     return None
 
 
+def _ingest_channel_post(bot, accid, msg, catalog_channel: dict, token: str):
+    """Save a channel post and its media attachment into the catalog cache for web preview."""
+    try:
+        raw_id = getattr(msg, "id", None) if not isinstance(msg, dict) else msg.get("id")
+        msg_id = raw_id if isinstance(raw_id, int) else None
+        if not msg_id:
+            return
+
+        is_info = getattr(msg, "is_info", False) if not isinstance(msg, dict) else msg.get("is_info", False)
+        if is_info:
+            return
+
+        chat_id = catalog_channel.get("chat_id")
+        if not chat_id:
+            return
+
+        text = getattr(msg, "text", None) if not isinstance(msg, dict) else msg.get("text")
+        text = (text or "").strip()
+
+        raw_ts = getattr(msg, "timestamp", None) if not isinstance(msg, dict) else msg.get("timestamp")
+        if isinstance(raw_ts, (int, float)) and raw_ts > 0:
+            msg_ts = raw_ts / 1000.0 if raw_ts > 1e11 else float(raw_ts)
+        else:
+            msg_ts = time.time()
+
+        from_name = ""
+        from_id = getattr(msg, "from_id", None) if not isinstance(msg, dict) else msg.get("from_id")
+        if from_id and from_id != 1 and bot and hasattr(bot, "rpc"):
+            try:
+                c = bot.rpc.get_contact(accid, from_id)
+                from_name = getattr(c, "name", None) or getattr(c, "display_name", None) or ""
+            except Exception:
+                pass
+
+        media_type = None
+        media_filename = None
+        media_path = None
+
+        file_info = _get_msg_file_info(bot, accid, msg)
+        if file_info and file_info.get("path") and os.path.exists(file_info["path"]):
+            src_path = file_info["path"]
+            orig_filename = file_info.get("filename") or os.path.basename(src_path)
+            safe_filename = re.sub(r'[^a-zA-Z0-9_.-]', '_', orig_filename)
+
+            raw_vt = (getattr(msg, "view_type", "") or "")
+            raw_vt_str = str(raw_vt).lower()
+            ext = os.path.splitext(safe_filename)[1].lower()
+
+            if ext in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg') or 'image' in raw_vt_str:
+                media_type = 'image'
+            elif ext in ('.mp4', '.mkv', '.webm', '.mov', '.avi') or 'video' in raw_vt_str:
+                media_type = 'video'
+            elif ext in ('.mp3', '.ogg', '.opus', '.m4a', '.wav', '.flac', '.aac') or any(k in raw_vt_str for k in ('audio', 'voice')):
+                media_type = 'audio'
+            else:
+                media_type = 'file'
+
+            dest_dir = os.path.join(CHANNEL_MEDIA_DIR, token)
+            os.makedirs(dest_dir, exist_ok=True)
+            dest_file = f"{msg_id}_{safe_filename}"
+            dest_path = os.path.join(dest_dir, dest_file)
+            try:
+                if not os.path.exists(dest_path):
+                    shutil.copy2(src_path, dest_path)
+                media_path = dest_path
+                media_filename = safe_filename
+            except Exception as e:
+                logger.warning(f"Failed to copy media for channel post {msg_id}: {e}")
+
+        if text or media_path:
+            database.save_channel_post(
+                chat_id=chat_id,
+                msg_id=msg_id,
+                from_name=from_name,
+                text=text,
+                media_type=media_type,
+                media_filename=media_filename,
+                media_path=media_path,
+                timestamp=msg_ts
+            )
+            database.prune_channel_posts(chat_id, 100)
+    except Exception as e:
+        logger.error(f"Error ingesting channel post: {e}")
+
+
 def _format_file_size(size_bytes: int) -> str:
     """Format byte count into human-readable representation."""
     if size_bytes < 1024:
@@ -5381,6 +5541,17 @@ def handle_all_messages(bot, accid, event):
             database.increment_transport_received(addr)
     except Exception:
         pass
+
+    # ── Public Channel Post Ingestion ──
+    try:
+        catalog_channel = database.get_catalog_channel_by_chat_id(msg.chat_id)
+        if catalog_channel and not getattr(msg, "is_info", False):
+            token = catalog_channel.get("token")
+            if not token:
+                token = database.get_or_create_channel_token(msg.chat_id)
+            _ingest_channel_post(bot, accid, msg, catalog_channel, token)
+    except Exception as e:
+        logger.error(f"Error ingesting channel post for chat {msg.chat_id}: {e}")
         
     text = (msg.text or "").strip()
     
@@ -5572,23 +5743,37 @@ def handle_all_messages(bot, accid, event):
         m = re.match(r'^/dchannel(\d+)', text, re.IGNORECASE)
         if m:
             catalog_id = int(m.group(1))
-            channel = database.get_catalog_channel_by_id(catalog_id)
+            channel = database.get_catalog_channel_by_id(catalog_id, include_deleted=True)
             if not channel:
                 _send(bot, accid, msg.chat_id, "❌ Channel with this number was not found in the catalog.")
                 return
+            if channel.get('is_deleted'):
+                _send(bot, accid, msg.chat_id, f"ℹ️ Channel **{channel['name']}** was removed from the public catalog.")
+                return
                 
             invite_link = channel.get('invite_link')
+            token = channel.get('token')
+            if not token:
+                token = database.get_or_create_channel_token(channel['chat_id'])
+            base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
+            preview_url = f"{base_url.rstrip('/')}/c/{token}" if base_url else f"/c/{token}"
+
+            response_lines = [f"📢 **{channel['name']}**"]
+            if channel.get('description'):
+                response_lines.append(f"{channel['description']}\n")
             if invite_link:
                 if invite_link.startswith("OPEN-CHAT:"):
-                    invite_link = "https://i.delta.chat/#" + invite_link[10:]
+                    join_link = "https://i.delta.chat/#" + invite_link[10:]
                 elif invite_link.startswith("OPEN:"):
-                    invite_link = "https://i.delta.chat/#" + invite_link[5:]
+                    join_link = "https://i.delta.chat/#" + invite_link[5:]
                 elif invite_link.startswith("dcqr://"):
-                    invite_link = "https://i.delta.chat/#" + invite_link[7:]
-                
-                _send(bot, accid, msg.chat_id, f"🔗 Invite link to channel **{channel['name']}**:\n{invite_link}")
-            else:
-                _send(bot, accid, msg.chat_id, "❌ No invite link registered for this channel.")
+                    join_link = "https://i.delta.chat/#" + invite_link[7:]
+                else:
+                    join_link = invite_link
+                response_lines.append(f"🔗 Invite link: {join_link}")
+            response_lines.append(f"🌐 Web preview: {preview_url}")
+
+            _send(bot, accid, msg.chat_id, "\n".join(response_lines))
             return
  
     # 2. Handle /approve<ID> command
@@ -5740,6 +5925,1300 @@ def handle_all_messages(bot, accid, event):
                     logger.error(f"Error in contact security check: {e}")
         except Exception as e:
             logger.error(f"Error parsing contact ID: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Channel Web Preview & Embedded Web Server
+# ═══════════════════════════════════════════════════════════════════
+
+def _autolink(text: str) -> str:
+    """Safely escape HTML and turn URLs into clickable links."""
+    if not text:
+        return ""
+    escaped = html.escape(text)
+    url_pattern = re.compile(r'(https?://[^\s<>"]+)')
+    return url_pattern.sub(r'<a href="\1" target="_blank" rel="noopener noreferrer">\1</a>', escaped).replace('\n', '<br>')
+
+
+def _format_post_time(ts: float) -> str:
+    """Format post timestamp in a human-friendly format."""
+    try:
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+        return dt.strftime("%d %b %Y, %H:%M UTC")
+    except Exception:
+        return ""
+
+
+def get_landing_page_html() -> str:
+    global index_page_html_cache
+    if index_page_html_cache is not None:
+        return index_page_html_cache
+
+    invite_link = get_bot_invite_link()
+    deep_link = invite_link
+    if invite_link.startswith("OPEN-CHAT:"):
+        deep_link = "https://i.delta.chat/#" + invite_link[10:]
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Delta Chat Bouncer Bot</title>
+    <link rel="icon" type="image/png" href="/icon.png" />
+    <link rel="shortcut icon" href="/favicon.ico" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {{
+            --bg-color: #0b0f19;
+            --card-bg: rgba(20, 26, 42, 0.7);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+            --color-up: #10b981;
+            --color-primary: #3b82f6;
+            --glow-primary: rgba(59, 130, 246, 0.4);
+        }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(59, 130, 246, 0.07) 0%, transparent 40%),
+                radial-gradient(circle at 90% 80%, rgba(16, 185, 129, 0.05) 0%, transparent 40%);
+        }}
+        header {{
+            padding: 2rem 1.5rem;
+            max-width: 900px;
+            width: 100%;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }}
+        .logo-container {{ display: flex; align-items: center; gap: 0.75rem; text-decoration: none; }}
+        .logo-img {{ width: 36px; height: 36px; border-radius: 8px; object-fit: cover; }}
+        .logo-title {{
+            font-size: 1.5rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #3b82f6, #10b981);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }}
+        .header-links a {{
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 0.95rem;
+            transition: color 0.2s;
+        }}
+        .header-links a:hover {{ color: var(--text-main); }}
+        main {{
+            flex-grow: 1;
+            max-width: 900px;
+            width: 100%;
+            margin: 0 auto;
+            padding: 0 1.5rem 3rem;
+            display: flex;
+            flex-direction: column;
+            gap: 2.5rem;
+        }}
+        .hero {{
+            text-align: center;
+            padding: 2rem 0 1rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 1.25rem;
+        }}
+        .hero-badge {{
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: rgba(59, 130, 246, 0.1);
+            border: 1px solid rgba(59, 130, 246, 0.25);
+            padding: 0.35rem 0.85rem;
+            border-radius: 9999px;
+            font-size: 0.85rem;
+            color: #60a5fa;
+            font-weight: 500;
+        }}
+        .hero h1 {{
+            font-size: 2.5rem;
+            font-weight: 700;
+            line-height: 1.2;
+            background: linear-gradient(135deg, #ffffff, #9ca3af);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }}
+        .hero p {{
+            font-size: 1.15rem;
+            color: var(--text-muted);
+            max-width: 680px;
+            line-height: 1.6;
+        }}
+        .cta-btn {{
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: linear-gradient(135deg, #3b82f6, #2563eb);
+            color: white;
+            padding: 0.85rem 1.75rem;
+            border-radius: 0.75rem;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 1rem;
+            box-shadow: 0 4px 15px var(--glow-primary);
+            transition: transform 0.2s, box-shadow 0.2s;
+            cursor: pointer;
+            border: none;
+        }}
+        .cta-btn:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(59, 130, 246, 0.6);
+        }}
+        .card {{
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 1rem;
+            padding: 2rem;
+            backdrop-filter: blur(12px);
+            position: relative;
+            overflow: hidden;
+        }}
+        .card::before {{
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, #3b82f6, #10b981);
+        }}
+        .card h2 {{
+            font-size: 1.4rem;
+            font-weight: 600;
+            margin-bottom: 1.25rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }}
+        .features-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 1.5rem;
+        }}
+        .feature-item {{
+            display: flex;
+            gap: 0.85rem;
+        }}
+        .feature-icon {{ font-size: 1.5rem; flex-shrink: 0; line-height: 1; }}
+        .feature-text h3 {{ font-size: 1.05rem; font-weight: 600; margin-bottom: 0.35rem; }}
+        .feature-text p {{ font-size: 0.9rem; color: var(--text-muted); line-height: 1.45; }}
+        .commands-table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 0.5rem;
+        }}
+        .commands-table th, .commands-table td {{
+            text-align: left;
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border-color);
+        }}
+        .commands-table th {{
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }}
+        .commands-table code {{
+            background: rgba(255, 255, 255, 0.06);
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            color: #60a5fa;
+            font-family: monospace;
+            font-size: 0.9rem;
+        }}
+        footer {{
+            border-top: 1px solid var(--border-color);
+            padding: 2rem 1.5rem;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }}
+        footer a {{ color: var(--color-primary); text-decoration: none; }}
+        footer a:hover {{ text-decoration: underline; }}
+        .modal {{
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.75);
+            backdrop-filter: blur(8px);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }}
+        .modal-content {{
+            background: #141a2a;
+            border: 1px solid var(--border-color);
+            border-radius: 1rem;
+            padding: 2rem;
+            text-align: center;
+            max-width: 400px;
+            width: 90%;
+            display: flex;
+            flex-direction: column;
+            gap: 1.25rem;
+        }}
+        .modal-content img {{ width: 220px; height: 220px; margin: 0 auto; border-radius: 8px; }}
+        .close-btn {{
+            background: rgba(255, 255, 255, 0.1);
+            color: var(--text-main);
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            cursor: pointer;
+            font-family: inherit;
+        }}
+    </style>
+</head>
+<body>
+    <header>
+        <div class="logo-container">
+            <img src="/icon.png" alt="Bouncer Bot Logo" class="logo-img" onerror="this.style.display='none'" />
+            <span class="logo-title">Bouncer Bot</span>
+        </div>
+        <div class="header-links">
+            <a href="https://github.com/mrgluek/deltachat_bouncer" target="_blank">GitHub</a>
+        </div>
+    </header>
+
+    <main>
+        <section class="hero">
+            <div class="hero-badge">⚡ Delta Chat Gateway & IRC-style Bouncer</div>
+            <h1>Always-On Presence & Public Channel Gateway</h1>
+            <p>Bouncer keeps your contact presence reachable 24/7, moderates group chats, monitors server reachability via CMPing, scans attachments with VirusTotal, and hosts clean web previews for public channels.</p>
+            <button class="cta-btn" onclick="document.getElementById('qr-modal').style.display='flex'">
+                <span>📱</span> Add Bot to Delta Chat
+            </button>
+        </section>
+
+        <section class="card">
+            <h2>✨ Core Capabilities</h2>
+            <div class="features-grid">
+                <div class="feature-item">
+                    <span class="feature-icon">🛡️</span>
+                    <div class="feature-text">
+                        <h3>Always-On Bouncer</h3>
+                        <p>Maintains your 24/7 online presence, manages away notices with intelligent mention debouncing, and distributes contact cards.</p>
+                    </div>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">📢</span>
+                    <div class="feature-text">
+                        <h3>Public Channel Previews</h3>
+                        <p>Web previews for Delta Chat broadcast channels with live feeds, media attachments, QR join codes, and standard RSS feeds.</p>
+                    </div>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">⚡</span>
+                    <div class="feature-text">
+                        <h3>Automated Moderation</h3>
+                        <p>Automatic inactive member warnings and kicks with custom grace periods, admin overrides, and cryptographic fingerprint ignore rules.</p>
+                    </div>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">🌐</span>
+                    <div class="feature-text">
+                        <h3>CMPing Connectivity Monitor</h3>
+                        <p>Continuous network health checks across mail relays and Delta Chat servers, with real-time downtime incident reporting.</p>
+                    </div>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">🔍</span>
+                    <div class="feature-text">
+                        <h3>VirusTotal File Scanning</h3>
+                        <p>Instant file, attachment, and URL safety verification against 70+ antivirus scanners with real-time progress reactions.</p>
+                    </div>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">🔄</span>
+                    <div class="feature-text">
+                        <h3>Resilient Multi-Relay Transport</h3>
+                        <p>Automatic failover and simultaneous multi-transport transmission to prevent deliverability bottlenecks.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="card">
+            <h2>⌨️ Popular Commands</h2>
+            <table class="commands-table">
+                <thead>
+                    <tr>
+                        <th>Command</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>/dchannels</code></td>
+                        <td>Browse the catalog of public Delta Chat channels with web preview links</td>
+                    </tr>
+                    <tr>
+                        <td><code>/bounce</code></td>
+                        <td>Check your activity status or list group members near the inactivity threshold</td>
+                    </tr>
+                    <tr>
+                        <td><code>/top</code></td>
+                        <td>Display the most active group members over the last 24 hours</td>
+                    </tr>
+                    <tr>
+                        <td><code>/away [text]</code></td>
+                        <td>Set your away status; auto-notifies users who mention or quote you</td>
+                    </tr>
+                    <tr>
+                        <td><code>/back</code></td>
+                        <td>Clear away status and restore normal presence</td>
+                    </tr>
+                    <tr>
+                        <td><code>/virus &lt;url/file&gt;</code></td>
+                        <td>Scan an attachment or link with VirusTotal</td>
+                    </tr>
+                    <tr>
+                        <td><code>/cmpingstatus</code></td>
+                        <td>View connectivity test results and monitored servers</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+    </main>
+
+    <div id="qr-modal" class="modal" onclick="if(event.target === this) this.style.display='none'">
+        <div class="modal-content">
+            <h3>Add Bouncer Bot</h3>
+            <p style="font-size: 0.9rem; color: var(--text-muted);">Scan this QR code with your Delta Chat mobile app or click the link below.</p>
+            <img src="/qr.png" alt="Bot QR Code" />
+            <div style="display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap;">
+                <a href="{deep_link}" class="cta-btn" style="padding: 0.5rem 1rem; font-size: 0.9rem;">Open in Delta Chat</a>
+                <button class="close-btn" onclick="document.getElementById('qr-modal').style.display='none'">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <p>Powered by <a href="https://github.com/mrgluek/deltachat_bouncer" target="_blank">Delta Chat Bouncer Bot</a> (v{VERSION}) · <a href="https://git.gluek.info/gluek/deltachat_bouncer" target="_blank">Forgejo Mirror</a></p>
+    </footer>
+</body>
+</html>
+"""
+    index_page_html_cache = html_content
+    return html_content
+
+
+def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str) -> str:
+    token = channel.get("token", "")
+    ch_name = channel.get("name") or "Channel"
+    ch_desc = channel.get("description") or ""
+    member_count = channel.get("member_count") or 0
+    invite_link = channel.get("invite_link") or ""
+
+    join_link = invite_link
+    if invite_link.startswith("OPEN-CHAT:"):
+        join_link = "https://i.delta.chat/#" + invite_link[10:]
+    elif invite_link.startswith("OPEN:"):
+        join_link = "https://i.delta.chat/#" + invite_link[5:]
+    elif invite_link.startswith("dcqr://"):
+        join_link = "https://i.delta.chat/#" + invite_link[7:]
+
+    ch_name_esc = html.escape(ch_name)
+    ch_desc_summary = html.escape(ch_desc[:160]) if ch_desc else f"Preview posts from {ch_name_esc} on Delta Chat."
+    ch_url = f"{base_url.rstrip('/')}/c/{token}"
+    avatar_url = f"{ch_url}/avatar.png"
+    rss_url = f"{ch_url}/rss.xml"
+
+    # Build posts HTML
+    posts_html_parts = []
+    if not posts:
+        posts_html_parts.append('<div class="empty-feed">ℹ️ No messages posted in this channel yet. New broadcasts will appear here.</div>')
+    else:
+        for p in posts:
+            p_ts = p.get("timestamp") or time.time()
+            time_str = _format_post_time(p_ts)
+            from_name = html.escape(p.get("from_name") or ch_name)
+            p_text = _autolink(p.get("text") or "")
+
+            media_type = p.get("media_type")
+            media_fn = p.get("media_filename")
+            msg_id = p.get("msg_id")
+
+            media_html = ""
+            if media_fn and msg_id:
+                media_url = f"/media/{token}/{msg_id}/{media_fn}"
+                if media_type == "image":
+                    media_html = f'<div class="post-media"><a href="{media_url}" target="_blank"><img src="{media_url}" alt="Post image" class="post-media-img" loading="lazy" /></a></div>'
+                elif media_type == "video":
+                    media_html = f'<div class="post-media"><video controls preload="metadata" class="post-media-video"><source src="{media_url}"></video></div>'
+                elif media_type == "audio":
+                    media_html = f'<div class="post-media"><audio controls class="post-media-audio"><source src="{media_url}"></audio></div>'
+                elif media_type == "file":
+                    media_html = f'<div class="post-media"><a href="{media_url}" download class="post-media-file">📎 Download {html.escape(media_fn)}</a></div>'
+
+            post_card = f"""
+            <article class="post-card">
+                <div class="post-header">
+                    <span class="post-author">{from_name}</span>
+                    <span class="post-date">{time_str}</span>
+                </div>
+                {f'<div class="post-body">{p_text}</div>' if p_text else ''}
+                {media_html}
+            </article>
+            """
+            posts_html_parts.append(post_card)
+
+    feed_html = "\n".join(posts_html_parts)
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{ch_name_esc} — Delta Chat Channel</title>
+    <meta name="description" content="{ch_desc_summary}">
+    <link rel="icon" type="image/png" href="/c/{token}/avatar.png" />
+    <link rel="alternate" type="application/rss+xml" title="{ch_name_esc} RSS Feed" href="{rss_url}">
+
+    <!-- Open Graph / Social Sharing Cards -->
+    <meta property="og:title" content="{ch_name_esc}">
+    <meta property="og:description" content="{ch_desc_summary}">
+    <meta property="og:image" content="{avatar_url}">
+    <meta property="og:url" content="{ch_url}">
+    <meta property="og:type" content="website">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="{ch_name_esc}">
+    <meta name="twitter:description" content="{ch_desc_summary}">
+    <meta name="twitter:image" content="{avatar_url}">
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {{
+            --bg-color: #0b0f19;
+            --card-bg: rgba(20, 26, 42, 0.7);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+            --color-primary: #3b82f6;
+            --color-up: #10b981;
+            --glow-primary: rgba(59, 130, 246, 0.4);
+        }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(59, 130, 246, 0.06) 0%, transparent 40%),
+                radial-gradient(circle at 90% 80%, rgba(16, 185, 129, 0.04) 0%, transparent 40%);
+        }}
+        header {{
+            padding: 1.5rem;
+            max-width: 760px;
+            width: 100%;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }}
+        .top-nav a {{
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }}
+        .top-nav a:hover {{ color: var(--text-main); }}
+        main {{
+            flex-grow: 1;
+            max-width: 760px;
+            width: 100%;
+            margin: 0 auto;
+            padding: 0 1.25rem 3rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.75rem;
+        }}
+        .channel-card {{
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 1.25rem;
+            padding: 2rem;
+            backdrop-filter: blur(12px);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            gap: 1.25rem;
+            position: relative;
+            overflow: hidden;
+        }}
+        .channel-card::before {{
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, #3b82f6, #10b981);
+        }}
+        .channel-avatar {{
+            width: 96px;
+            height: 96px;
+            border-radius: 50%;
+            object-fit: cover;
+            border: 3px solid rgba(59, 130, 246, 0.4);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+        }}
+        .channel-info h1 {{
+            font-size: 1.85rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+        }}
+        .subscribers-pill {{
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            background: rgba(16, 185, 129, 0.1);
+            color: #34d399;
+            border: 1px solid rgba(16, 185, 129, 0.25);
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            margin-bottom: 0.75rem;
+        }}
+        .channel-desc {{
+            font-size: 1rem;
+            color: var(--text-muted);
+            line-height: 1.55;
+            max-width: 600px;
+            word-break: break-word;
+        }}
+        .actions-row {{
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            justify-content: center;
+            margin-top: 0.5rem;
+        }}
+        .btn {{
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.75rem 1.4rem;
+            border-radius: 0.75rem;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 0.95rem;
+            cursor: pointer;
+            border: none;
+            transition: transform 0.2s, background 0.2s, box-shadow 0.2s;
+            font-family: inherit;
+        }}
+        .btn-primary {{
+            background: linear-gradient(135deg, #3b82f6, #2563eb);
+            color: white;
+            box-shadow: 0 4px 15px var(--glow-primary);
+        }}
+        .btn-primary:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(59, 130, 246, 0.6);
+        }}
+        .btn-secondary {{
+            background: rgba(255, 255, 255, 0.08);
+            color: var(--text-main);
+            border: 1px solid var(--border-color);
+        }}
+        .btn-secondary:hover {{
+            background: rgba(255, 255, 255, 0.14);
+            transform: translateY(-2px);
+        }}
+        .feed-section h2 {{
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }}
+        .post-card {{
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 1rem;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+            backdrop-filter: blur(8px);
+            display: flex;
+            flex-direction: column;
+            gap: 0.85rem;
+        }}
+        .post-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 1rem;
+        }}
+        .post-author {{
+            font-weight: 600;
+            font-size: 0.95rem;
+            color: #60a5fa;
+        }}
+        .post-date {{
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            white-space: nowrap;
+        }}
+        .post-body {{
+            font-size: 0.98rem;
+            line-height: 1.6;
+            word-break: break-word;
+        }}
+        .post-body a {{ color: var(--color-primary); text-decoration: none; }}
+        .post-body a:hover {{ text-decoration: underline; }}
+        .post-media {{
+            margin-top: 0.5rem;
+            border-radius: 0.75rem;
+            overflow: hidden;
+        }}
+        .post-media-img {{
+            max-width: 100%;
+            max-height: 480px;
+            object-fit: contain;
+            border-radius: 0.75rem;
+            display: block;
+        }}
+        .post-media-video {{
+            max-width: 100%;
+            border-radius: 0.75rem;
+            background: #000;
+        }}
+        .post-media-audio {{
+            width: 100%;
+            margin-top: 0.25rem;
+        }}
+        .post-media-file {{
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid var(--border-color);
+            padding: 0.6rem 1rem;
+            border-radius: 0.5rem;
+            color: var(--text-main);
+            text-decoration: none;
+            font-size: 0.9rem;
+        }}
+        .post-media-file:hover {{ background: rgba(255, 255, 255, 0.12); }}
+        .empty-feed {{
+            text-align: center;
+            padding: 3rem 1rem;
+            color: var(--text-muted);
+            font-size: 1rem;
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 1rem;
+        }}
+        footer {{
+            border-top: 1px solid var(--border-color);
+            padding: 2rem 1.5rem;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }}
+        footer a {{ color: var(--color-primary); text-decoration: none; }}
+        .modal {{
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.75);
+            backdrop-filter: blur(8px);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }}
+        .modal-content {{
+            background: #141a2a;
+            border: 1px solid var(--border-color);
+            border-radius: 1rem;
+            padding: 2rem;
+            text-align: center;
+            max-width: 400px;
+            width: 90%;
+            display: flex;
+            flex-direction: column;
+            gap: 1.25rem;
+        }}
+        .modal-content img {{ width: 220px; height: 220px; margin: 0 auto; border-radius: 8px; }}
+        .close-btn {{
+            background: rgba(255, 255, 255, 0.1);
+            color: var(--text-main);
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            cursor: pointer;
+            font-family: inherit;
+        }}
+    </style>
+</head>
+<body>
+    <header>
+        <div class="top-nav">
+            <a href="/">← Bouncer Home</a>
+        </div>
+        <div class="top-nav">
+            <a href="{rss_url}">📡 RSS Feed</a>
+        </div>
+    </header>
+
+    <main>
+        <section class="channel-card">
+            <img src="/c/{token}/avatar.png" alt="{ch_name_esc} Avatar" class="channel-avatar" onerror="this.src='/icon.png'" />
+            <div class="channel-info">
+                <h1>{ch_name_esc}</h1>
+                <div class="subscribers-pill">👥 {member_count} subscribers</div>
+                {f'<p class="channel-desc">{_autolink(ch_desc)}</p>' if ch_desc else ''}
+            </div>
+            <div class="actions-row">
+                <a href="{join_link}" class="btn btn-primary"><span>✈️</span> Open in Delta Chat</a>
+                <button onclick="document.getElementById('qr-modal').style.display='flex'" class="btn btn-secondary"><span>📱</span> Show QR Code</button>
+                <a href="{rss_url}" class="btn btn-secondary"><span>📡</span> RSS Feed</a>
+            </div>
+        </section>
+
+        <section class="feed-section">
+            <h2>📜 Recent Posts</h2>
+            {feed_html}
+        </section>
+    </main>
+
+    <div id="qr-modal" class="modal" onclick="if(event.target === this) this.style.display='none'">
+        <div class="modal-content">
+            <h3>Scan with Delta Chat</h3>
+            <p style="font-size: 0.9rem; color: var(--text-muted);">Scan this QR code with the Delta Chat camera to join <strong>{ch_name_esc}</strong>.</p>
+            <img src="/c/{token}/qr.png" alt="Channel Join QR Code" />
+            <div style="display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap;">
+                <button class="close-btn" onclick="navigator.clipboard.writeText('{join_link}').then(() => alert('Link copied to clipboard!'))">Copy Link</button>
+                <button class="close-btn" onclick="document.getElementById('qr-modal').style.display='none'">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <p>Powered by <a href="https://github.com/mrgluek/deltachat_bouncer" target="_blank">Delta Chat Bouncer Bot</a> · <a href="/">All Channels</a></p>
+    </footer>
+</body>
+</html>
+"""
+
+
+def get_tombstone_html(channel_name: str) -> str:
+    ch_esc = html.escape(channel_name)
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Channel Removed — Delta Chat</title>
+    <link rel="icon" type="image/png" href="/icon.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {{
+            --bg-color: #0b0f19;
+            --card-bg: rgba(20, 26, 42, 0.7);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+            --color-primary: #3b82f6;
+        }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 1.5rem;
+            text-align: center;
+        }}
+        .card {{
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 1.25rem;
+            padding: 3rem 2rem;
+            max-width: 520px;
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 1.25rem;
+        }}
+        .icon {{ font-size: 3rem; }}
+        h1 {{ font-size: 1.75rem; font-weight: 700; }}
+        p {{ color: var(--text-muted); font-size: 1rem; line-height: 1.5; }}
+        .btn {{
+            display: inline-block;
+            background: var(--color-primary);
+            color: white;
+            text-decoration: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 0.75rem;
+            font-weight: 600;
+            margin-top: 0.5rem;
+        }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">🔒</div>
+        <h1>Channel No Longer Available</h1>
+        <p>The channel <strong>{ch_esc}</strong> has been removed from the public catalog and is no longer available for preview.</p>
+        <a href="/" class="btn">← Return to Home</a>
+    </div>
+</body>
+</html>
+"""
+
+
+def get_404_html() -> str:
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Channel Not Found — Delta Chat</title>
+    <link rel="icon" type="image/png" href="/icon.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --card-bg: rgba(20, 26, 42, 0.7);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+            --color-primary: #3b82f6;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 1.5rem;
+            text-align: center;
+        }
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 1.25rem;
+            padding: 3rem 2rem;
+            max-width: 520px;
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 1.25rem;
+        }
+        .icon { font-size: 3rem; }
+        h1 { font-size: 1.75rem; font-weight: 700; }
+        p { color: var(--text-muted); font-size: 1rem; line-height: 1.5; }
+        .btn {
+            display: inline-block;
+            background: var(--color-primary);
+            color: white;
+            text-decoration: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 0.75rem;
+            font-weight: 600;
+            margin-top: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">🔍</div>
+        <h1>Channel Not Found</h1>
+        <p>The requested channel preview could not be found. Please check that the URL is correct.</p>
+        <a href="/" class="btn">← Return to Home</a>
+    </div>
+</body>
+</html>
+"""
+
+
+def get_channel_rss_xml(channel: dict, posts: list[dict], base_url: str) -> str:
+    token = channel.get("token", "")
+    ch_name = channel.get("name") or "Channel"
+    ch_desc = channel.get("description") or "Delta Chat Channel"
+    channel_url = f"{base_url.rstrip('/')}/c/{token}"
+    rss_url = f"{channel_url}/rss.xml"
+
+    last_build = format_datetime(datetime.now(timezone.utc))
+    if posts and posts[0].get("timestamp"):
+        try:
+            last_build = format_datetime(datetime.fromtimestamp(posts[0]["timestamp"], tz=timezone.utc))
+        except Exception:
+            pass
+
+    items_xml = []
+    for p in posts:
+        post_ts = p.get("timestamp") or time.time()
+        try:
+            pub_date = format_datetime(datetime.fromtimestamp(post_ts, tz=timezone.utc))
+        except Exception:
+            pub_date = format_datetime(datetime.now(timezone.utc))
+
+        guid = f"{token}-{p.get('id', p.get('msg_id', int(post_ts)))}"
+        post_text = p.get("text") or ""
+        post_title = (post_text.split("\n")[0][:80] if post_text else f"Post {p.get('id')}")
+
+        desc_parts = []
+        if post_text:
+            desc_parts.append(html.escape(post_text).replace("\n", "<br/>"))
+
+        media_type = p.get("media_type")
+        media_fn = p.get("media_filename")
+        msg_id = p.get("msg_id")
+        enclosure_tag = ""
+        if media_fn and msg_id:
+            media_url = f"{base_url.rstrip('/')}/media/{token}/{msg_id}/{media_fn}"
+            if media_type == "image":
+                desc_parts.append(f'<p><img src="{media_url}" alt="image" /></p>')
+                enclosure_tag = f'<enclosure url="{media_url}" length="0" type="image/jpeg" />'
+            elif media_type == "video":
+                desc_parts.append(f'<p><video src="{media_url}" controls></video></p>')
+                enclosure_tag = f'<enclosure url="{media_url}" length="0" type="video/mp4" />'
+            elif media_type == "audio":
+                desc_parts.append(f'<p><audio src="{media_url}" controls></audio></p>')
+                enclosure_tag = f'<enclosure url="{media_url}" length="0" type="audio/mpeg" />'
+            else:
+                desc_parts.append(f'<p><a href="{media_url}">📎 Download {html.escape(media_fn)}</a></p>')
+                enclosure_tag = f'<enclosure url="{media_url}" length="0" type="application/octet-stream" />'
+
+        full_desc = "\n".join(desc_parts)
+
+        item = f"""    <item>
+      <title><![CDATA[{post_title}]]></title>
+      <description><![CDATA[{full_desc}]]></description>
+      <link>{channel_url}</link>
+      <guid isPermaLink="false">{guid}</guid>
+      <pubDate>{pub_date}</pubDate>
+      {enclosure_tag}
+    </item>"""
+        items_xml.append(item)
+
+    items_str = "\n".join(items_xml)
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title><![CDATA[{ch_name}]]></title>
+    <link>{channel_url}</link>
+    <description><![CDATA[{ch_desc}]]></description>
+    <atom:link href="{rss_url}" rel="self" type="application/rss+xml" />
+    <language>en</language>
+    <lastBuildDate>{last_build}</lastBuildDate>
+{items_str}
+  </channel>
+</rss>"""
+
+
+# ── Web Request Handlers ──
+
+async def handle_icon(request):
+    filename = request.path.lstrip('/')
+    if filename == 'favicon.ico':
+        filename = 'icon.png'
+    if os.path.exists(filename):
+        headers = {'Cache-Control': 'public, max-age=31536000, immutable'}
+        return web.FileResponse(filename, headers=headers)
+    return web.Response(status=404)
+
+
+async def handle_robots_txt(request):
+    headers = {"Cache-Control": "public, max-age=86400"}
+    content = "User-agent: *\nAllow: /\n"
+    return web.Response(text=content, content_type="text/plain", headers=headers)
+
+
+async def handle_health(request):
+    return web.json_response({"status": "ok", "service": "bouncer_bot", "version": VERSION})
+
+
+async def handle_index(request):
+    content = get_landing_page_html()
+    return web.Response(text=content, content_type="text/html", headers={"Cache-Control": "public, max-age=300"})
+
+
+async def handle_qr_svg(request):
+    link = get_bot_invite_link()
+    if link:
+        try:
+            import qrcode.image.svg
+            qr = qrcode.QRCode(image_factory=qrcode.image.svg.SvgPathImage, border=2)
+            qr.add_data(link)
+            qr.make(fit=True)
+            img = qr.make_image()
+            buf = io.BytesIO()
+            img.save(buf)
+            headers = {"Cache-Control": "public, max-age=3600", "Content-Type": "image/svg+xml"}
+            return web.Response(body=buf.getvalue(), headers=headers)
+        except Exception as e:
+            logger.error(f"Error generating qr.svg: {e}")
+    return web.Response(status=404)
+
+
+async def handle_qr_png(request):
+    link = get_bot_invite_link()
+    if link:
+        try:
+            qr = qrcode.QRCode(box_size=6, border=2)
+            qr.add_data(link)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            headers = {"Cache-Control": "public, max-age=3600", "Content-Type": "image/png"}
+            return web.Response(body=buf.getvalue(), headers=headers)
+        except Exception as e:
+            logger.error(f"Error generating qr.png: {e}")
+    return web.Response(status=404)
+
+
+async def handle_channel_preview(request):
+    token = request.match_info.get('token')
+    channel = database.get_catalog_channel_by_token(token)
+    if not channel:
+        return web.Response(text=get_404_html(), status=404, content_type="text/html")
+
+    if channel.get('is_deleted'):
+        return web.Response(text=get_tombstone_html(channel.get("name") or "Channel"), status=200, content_type="text/html")
+
+    base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
+    if not base_url:
+        scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
+        host = request.headers.get("X-Forwarded-Host", request.host)
+        base_url = f"{scheme}://{host}"
+
+    posts = database.get_channel_posts(channel['chat_id'], limit=50)
+    html_content = get_channel_preview_html(channel, posts, base_url)
+    return web.Response(text=html_content, content_type="text/html", headers={"Cache-Control": "public, max-age=60"})
+
+
+async def handle_channel_qr_png(request):
+    token = request.match_info.get('token')
+    channel = database.get_catalog_channel_by_token(token)
+    if not channel or not channel.get('invite_link'):
+        return web.Response(status=404)
+
+    raw_link = channel.get('invite_link')
+    if raw_link.startswith("OPEN-CHAT:"):
+        link = "https://i.delta.chat/#" + raw_link[10:]
+    elif raw_link.startswith("OPEN:"):
+        link = "https://i.delta.chat/#" + raw_link[5:]
+    elif raw_link.startswith("dcqr://"):
+        link = "https://i.delta.chat/#" + raw_link[7:]
+    else:
+        link = raw_link
+
+    try:
+        qr = qrcode.QRCode(box_size=6, border=2)
+        qr.add_data(link)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        headers = {
+            "Cache-Control": "public, max-age=3600",
+            "Content-Type": "image/png"
+        }
+        return web.Response(body=buf.getvalue(), headers=headers)
+    except Exception as e:
+        logger.error(f"Error generating channel qr.png: {e}")
+        return web.Response(status=500)
+
+
+async def handle_channel_qr_svg(request):
+    token = request.match_info.get('token')
+    channel = database.get_catalog_channel_by_token(token)
+    if not channel or not channel.get('invite_link'):
+        return web.Response(status=404)
+
+    raw_link = channel.get('invite_link')
+    if raw_link.startswith("OPEN-CHAT:"):
+        link = "https://i.delta.chat/#" + raw_link[10:]
+    elif raw_link.startswith("OPEN:"):
+        link = "https://i.delta.chat/#" + raw_link[5:]
+    elif raw_link.startswith("dcqr://"):
+        link = "https://i.delta.chat/#" + raw_link[7:]
+    else:
+        link = raw_link
+
+    try:
+        import qrcode.image.svg
+        qr = qrcode.QRCode(image_factory=qrcode.image.svg.SvgPathImage, border=2)
+        qr.add_data(link)
+        qr.make(fit=True)
+        img = qr.make_image()
+        buf = io.BytesIO()
+        img.save(buf)
+        headers = {
+            "Cache-Control": "public, max-age=3600",
+            "Content-Type": "image/svg+xml"
+        }
+        return web.Response(body=buf.getvalue(), headers=headers)
+    except Exception as e:
+        logger.error(f"Error generating channel qr.svg: {e}")
+        return web.Response(status=500)
+
+
+async def handle_channel_avatar(request):
+    token = request.match_info.get('token')
+    channel = database.get_catalog_channel_by_token(token)
+    if not channel:
+        return web.Response(status=404)
+
+    avatar_cache_path = os.path.join(CHANNEL_MEDIA_DIR, token, "avatar.png")
+    if os.path.exists(avatar_cache_path):
+        return web.FileResponse(avatar_cache_path, headers={'Cache-Control': 'public, max-age=3600'})
+
+    if dc_bot_instance and dc_accid:
+        try:
+            chat_info = dc_bot_instance.rpc.get_basic_chat_info(dc_accid, channel['chat_id'])
+            prof_img = chat_info.get("profile_image") if isinstance(chat_info, dict) else getattr(chat_info, "profile_image", None)
+            if not prof_img:
+                contacts = dc_bot_instance.rpc.get_chat_contacts(dc_accid, channel['chat_id'])
+                other_contacts = [c for c in contacts if c != 1]
+                if other_contacts:
+                    contact = dc_bot_instance.rpc.get_contact(dc_accid, other_contacts[0])
+                    prof_img = contact.get("profile_image") if isinstance(contact, dict) else getattr(contact, "profile_image", None)
+            if prof_img and os.path.exists(prof_img):
+                os.makedirs(os.path.join(CHANNEL_MEDIA_DIR, token), exist_ok=True)
+                shutil.copy2(prof_img, avatar_cache_path)
+                return web.FileResponse(avatar_cache_path, headers={'Cache-Control': 'public, max-age=3600'})
+        except Exception as e:
+            logger.debug(f"Failed to fetch avatar for channel {token}: {e}")
+
+    if os.path.exists("icon.png"):
+        return web.FileResponse("icon.png", headers={'Cache-Control': 'public, max-age=3600'})
+    return web.Response(status=404)
+
+
+async def handle_channel_rss(request):
+    token = request.match_info.get('token')
+    channel = database.get_catalog_channel_by_token(token)
+    if not channel or channel.get('is_deleted'):
+        return web.Response(status=404, text="Channel not found")
+
+    base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
+    if not base_url:
+        scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
+        host = request.headers.get("X-Forwarded-Host", request.host)
+        base_url = f"{scheme}://{host}"
+
+    posts = database.get_channel_posts(channel['chat_id'], limit=50)
+    rss_xml = get_channel_rss_xml(channel, posts, base_url)
+    return web.Response(text=rss_xml, content_type="application/rss+xml; charset=utf-8", headers={"Cache-Control": "public, max-age=300"})
+
+
+async def handle_channel_rss_redirect(request):
+    token = request.match_info.get('token')
+    raise web.HTTPFound(f"/c/{token}/rss.xml")
+
+
+async def handle_media_file(request):
+    token = request.match_info.get('token')
+    msg_id = request.match_info.get('msg_id')
+    filename = request.match_info.get('filename')
+
+    channel = database.get_catalog_channel_by_token(token)
+    if not channel:
+        return web.Response(status=404, text="Channel not found")
+
+    expected_dir = os.path.abspath(os.path.join(CHANNEL_MEDIA_DIR, token))
+    target_path = os.path.abspath(os.path.join(expected_dir, f"{msg_id}_{filename}"))
+    if not target_path.startswith(expected_dir):
+        return web.Response(status=403, text="Forbidden")
+
+    if not os.path.exists(target_path):
+        alt_path = os.path.abspath(os.path.join(expected_dir, filename))
+        if alt_path.startswith(expected_dir) and os.path.exists(alt_path):
+            target_path = alt_path
+        else:
+            return web.Response(status=404, text="Media not found")
+
+    return web.FileResponse(target_path, headers={'Cache-Control': 'public, max-age=86400'})
+
+
+async def _run_web_server():
+    app = web.Application()
+    app.router.add_get('/icon.png', handle_icon)
+    app.router.add_get('/favicon.ico', handle_icon)
+    app.router.add_get('/robots.txt', handle_robots_txt)
+    app.router.add_get('/health', handle_health)
+    app.router.add_get('/qr.svg', handle_qr_svg)
+    app.router.add_get('/qr.png', handle_qr_png)
+    app.router.add_get('/', handle_index)
+    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}', handle_channel_preview)
+    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/qr.png', handle_channel_qr_png)
+    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/qr.svg', handle_channel_qr_svg)
+    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/avatar.png', handle_channel_avatar)
+    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/rss.xml', handle_channel_rss)
+    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/rss', handle_channel_rss_redirect)
+    app.router.add_get('/media/{token:[a-zA-Z0-9]{12}}/{msg_id:[0-9]+}/{filename}', handle_media_file)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    port = int(os.getenv("PORT", "8080"))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    logger.info(f"Starting Bouncer channel preview web server on 0.0.0.0:{port}...")
+    await site.start()
+    logger.info("Channel preview web server is running.")
+
+    while True:
+        await asyncio.sleep(3600)
+
+
+def start_web_server_thread():
+    if web is None:
+        logger.warning("aiohttp is not installed, web server disabled.")
+        return
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(_run_web_server())
+    except Exception as e:
+        logger.error(f"Web server error: {e}")
+
 
 if __name__ == "__main__":
     import sys

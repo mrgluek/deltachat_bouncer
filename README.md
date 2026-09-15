@@ -10,6 +10,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - 👞 **Manual Member Kick (`/kick <userid>`):** Remove a specific member or multiple members from a group chat by contact ID (e.g. `/kick 123` or `/kick /contact123`), search query, or by replying to their message.
 - 📖 **Group Chat Catalog (`/chats`):** Users can browse all group chats cataloged by the bot, complete with name, description, and real-time membership count.
 - 📢 **Delta Chat Channels Catalog (`/dchannels`):** Users can browse all channels cataloged by the bot, complete with name and description.
+- 🌐 **Channel Web Preview & RSS Feeds (`/c/{token}`):** Public web previews for registered channels with live message history, attachments, QR code join modals, and standard RSS 2.0 feeds (`/c/{token}/rss.xml`). Soft-delete tombstone handling ensures graceful messaging when channels are removed from the catalog.
 - 🔐 **Join Approval Workflows:** Supports public and private groups. Requests to join public groups immediately receive an invite link, while private groups (`🔐`) require approvals from existing members in the group via dynamic `/approve<ID>` commands.
 - 👋🏻 **Custom Welcome Messages (`/welcome`):** Configure customizable welcoming greetings for new members joining the group, with stats (total chats in common) and custom rules text.
 - 🔗 **Invite Link (`/invite`):** Generate a SecureJoin invite link and QR code image for the current group chat. Available to all users with a 10-minute cooldown (admins are exempt). For private group chats, the generated link is single-use and will be automatically deleted from the chat once a new member joins.
@@ -64,8 +65,8 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/invite` — Generate an invite link and QR code for this group.
 - `/chats` — Show the catalog of registered group chats available to join.
 - `/chat<ID> [message]` — Request an invite link to the group (Private chat only).
-- `/dchannels` — Show the catalog of registered Delta Chat channels.
-- `/dchannel<ID>` — Request the invite link to a channel.
+- `/dchannels` — Show the catalog of registered Delta Chat channels with invite links and web preview URLs.
+- `/dchannel<ID>` — Request the invite link and web preview URL for a channel.
 - `/cmping <server1> ...` — Ping mail relays to/from specified target servers (15s cooldown, domain-validated).
 - `/virus <url>` — Scan a URL, or reply to a message containing a link or attached file with `/virus` to inspect with VirusTotal (15s global rate limit).
 - `/slap [username]` — Slap a user with a large trout (or reply to a message; 15s cooldown).
@@ -83,6 +84,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/dchanneladd <URL>` — Join and add a channel to the catalog (Admin only).
 - `/dchannelremove [ID]` — Remove a channel from the catalog (Admin only).
 - `/dchanneldesc<ID> <text>` — Update description of cataloged channel (Admin only).
+- `/url [base_url]` — Show or set the base web URL used for public channel previews and RSS feeds (Admin only).
 - `/private <on/off>` — Toggle cataloged chat privacy status (Admin only).
 - `/welcome [on/off/on <text>]` — Configure welcome messages for new members (Admin only).
 - `/transports` — Show configured mail relays & stats (Admin only).

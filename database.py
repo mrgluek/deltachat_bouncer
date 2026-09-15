@@ -1,6 +1,8 @@
 import contextlib
 import os
+import secrets
 import sqlite3
+import string
 import threading
 import time
 
@@ -62,6 +64,11 @@ def _connect(timeout: float = 10.0) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout = 5000;")
     conn.execute("PRAGMA synchronous = NORMAL;")
     return conn
+
+
+def generate_channel_token() -> str:
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(12))
 
 
 def init_db():
@@ -147,6 +154,10 @@ def init_db():
         # Upgrade existing table schema if necessary
         cursor.execute("PRAGMA table_info(catalog_chats)")
         columns = [info[1] for info in cursor.fetchall()]
+        if "member_count" not in columns:
+            cursor.execute("ALTER TABLE catalog_chats ADD COLUMN member_count INTEGER DEFAULT 0")
+        if "invite_link" not in columns:
+            cursor.execute("ALTER TABLE catalog_chats ADD COLUMN invite_link TEXT")
         if "invite_msg_id" not in columns:
             cursor.execute("ALTER TABLE catalog_chats ADD COLUMN invite_msg_id INTEGER")
         if "welcome_enabled" not in columns:
@@ -162,9 +173,46 @@ def init_db():
                 name TEXT,
                 description TEXT,
                 member_count INTEGER DEFAULT 0,
-                invite_link TEXT
+                invite_link TEXT,
+                token TEXT UNIQUE,
+                is_deleted INTEGER DEFAULT 0,
+                deleted_at REAL
             )
         ''')
+
+        cursor.execute("PRAGMA table_info(catalog_channels)")
+        channel_cols = [row[1] for row in cursor.fetchall()]
+        if "token" not in channel_cols:
+            cursor.execute("ALTER TABLE catalog_channels ADD COLUMN token TEXT")
+        if "is_deleted" not in channel_cols:
+            cursor.execute("ALTER TABLE catalog_channels ADD COLUMN is_deleted INTEGER DEFAULT 0")
+        if "deleted_at" not in channel_cols:
+            cursor.execute("ALTER TABLE catalog_channels ADD COLUMN deleted_at REAL")
+
+        # Backfill tokens for any channels without one
+        cursor.execute("SELECT id FROM catalog_channels WHERE token IS NULL")
+        for row in cursor.fetchall():
+            tok = generate_channel_token()
+            cursor.execute("UPDATE catalog_channels SET token = ? WHERE id = ?", (tok, row[0]))
+
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_catalog_channels_token ON catalog_channels(token)")
+
+        # Catalog channel posts table (cached feed for web preview and RSS)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS catalog_channel_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER,
+                msg_id INTEGER UNIQUE,
+                from_name TEXT,
+                text TEXT,
+                media_type TEXT,
+                media_filename TEXT,
+                media_path TEXT,
+                timestamp REAL,
+                created_at REAL
+            )
+        ''')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_posts_chat_time ON catalog_channel_posts(chat_id, timestamp DESC)")
 
         # Pending join requests table
         cursor.execute('''
@@ -744,64 +792,182 @@ def update_catalog_chat_welcome(chat_id: int, welcome_enabled: int, welcome_text
                        (welcome_enabled, welcome_text, chat_id))
 
 
-def add_catalog_channel(chat_id: int, name: str, description: str, member_count: int, invite_link: str):
+def get_or_create_channel_token(chat_id: int) -> str:
     with _writer_transaction() as conn:
         cursor = conn.cursor()
+        cursor.execute("SELECT token FROM catalog_channels WHERE chat_id = ?", (chat_id,))
+        row = cursor.fetchone()
+        if row and row[0]:
+            return row[0]
+        while True:
+            token = generate_channel_token()
+            try:
+                cursor.execute("UPDATE catalog_channels SET token = ? WHERE chat_id = ?", (token, chat_id))
+                return token
+            except sqlite3.IntegrityError:
+                continue
+
+
+def add_catalog_channel(chat_id: int, name: str, description: str, member_count: int, invite_link: str, token: str = None) -> str:
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT token FROM catalog_channels WHERE chat_id = ?", (chat_id,))
+        existing = cursor.fetchone()
+        if existing and existing[0]:
+            token = existing[0]
+        elif not token:
+            while True:
+                candidate = generate_channel_token()
+                cursor.execute("SELECT 1 FROM catalog_channels WHERE token = ?", (candidate,))
+                if not cursor.fetchone():
+                    token = candidate
+                    break
+
         cursor.execute('''
-            INSERT OR REPLACE INTO catalog_channels (chat_id, name, description, member_count, invite_link)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (chat_id, name, description, member_count, invite_link))
+            INSERT INTO catalog_channels (chat_id, name, description, member_count, invite_link, token, is_deleted, deleted_at)
+            VALUES (?, ?, ?, ?, ?, ?, 0, NULL)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                name=excluded.name,
+                description=excluded.description,
+                member_count=excluded.member_count,
+                invite_link=excluded.invite_link,
+                token=COALESCE(catalog_channels.token, excluded.token),
+                is_deleted=0,
+                deleted_at=NULL
+        ''', (chat_id, name, description, member_count, invite_link, token))
+        return token
 
 
-def remove_catalog_channel(chat_id: int):
+def remove_catalog_channel(chat_id: int) -> bool:
+    """Soft-delete channel so web preview shows a graceful removal notice."""
     with _writer_transaction() as conn:
         cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE catalog_channels SET is_deleted = 1, deleted_at = ? WHERE chat_id = ?",
+            (time.time(), chat_id)
+        )
+        return cursor.rowcount > 0
+
+
+def hard_remove_catalog_channel(chat_id: int) -> bool:
+    """Permanently delete channel and its cached posts."""
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM catalog_channel_posts WHERE chat_id = ?", (chat_id,))
         cursor.execute("DELETE FROM catalog_channels WHERE chat_id = ?", (chat_id,))
+        return cursor.rowcount > 0
 
 
-def get_all_catalog_channels() -> list[dict]:
+def get_all_catalog_channels(include_deleted: bool = False) -> list[dict]:
     conn = _connect()
     try:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM catalog_channels ORDER BY id ASC")
+        if include_deleted:
+            cursor.execute("SELECT * FROM catalog_channels ORDER BY id ASC")
+        else:
+            cursor.execute("SELECT * FROM catalog_channels WHERE is_deleted = 0 ORDER BY id ASC")
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
 
-def get_catalog_channel_by_chat_id(chat_id: int) -> dict:
+
+def get_catalog_channel_by_chat_id(chat_id: int, include_deleted: bool = False) -> dict | None:
     conn = _connect()
     try:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM catalog_channels WHERE chat_id = ?", (chat_id,))
+        if include_deleted:
+            cursor.execute("SELECT * FROM catalog_channels WHERE chat_id = ?", (chat_id,))
+        else:
+            cursor.execute("SELECT * FROM catalog_channels WHERE chat_id = ? AND is_deleted = 0", (chat_id,))
         row = cursor.fetchone()
         return dict(row) if row else None
     finally:
         conn.close()
 
-def get_catalog_channel_by_id(catalog_id: int) -> dict:
+
+def get_catalog_channel_by_id(catalog_id: int, include_deleted: bool = False) -> dict | None:
     conn = _connect()
     try:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM catalog_channels WHERE id = ?", (catalog_id,))
+        if include_deleted:
+            cursor.execute("SELECT * FROM catalog_channels WHERE id = ?", (catalog_id,))
+        else:
+            cursor.execute("SELECT * FROM catalog_channels WHERE id = ? AND is_deleted = 0", (catalog_id,))
         row = cursor.fetchone()
         return dict(row) if row else None
     finally:
         conn.close()
 
-def update_catalog_channel_member_count(chat_id: int, member_count: int):
-    with _writer_transaction() as conn:
+
+def get_catalog_channel_by_token(token: str) -> dict | None:
+    conn = _connect()
+    try:
+        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("UPDATE catalog_channels SET member_count = ? WHERE chat_id = ?", (member_count, chat_id))
+        cursor.execute("SELECT * FROM catalog_channels WHERE token = ?", (token,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
-def update_catalog_channel_description(catalog_id: int, description: str):
+def save_channel_post(chat_id: int, msg_id: int, from_name: str = "", text: str = "",
+                      media_type: str = None, media_filename: str = None,
+                      media_path: str = None, timestamp: float = None) -> bool:
+    if timestamp is None:
+        timestamp = time.time()
+    created_at = time.time()
     with _writer_transaction() as conn:
         cursor = conn.cursor()
-        cursor.execute("UPDATE catalog_channels SET description = ? WHERE id = ?", (description, catalog_id))
+        cursor.execute('''
+            INSERT INTO catalog_channel_posts 
+            (chat_id, msg_id, from_name, text, media_type, media_filename, media_path, timestamp, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(msg_id) DO UPDATE SET
+                from_name=excluded.from_name,
+                text=excluded.text,
+                media_type=COALESCE(excluded.media_type, catalog_channel_posts.media_type),
+                media_filename=COALESCE(excluded.media_filename, catalog_channel_posts.media_filename),
+                media_path=COALESCE(excluded.media_path, catalog_channel_posts.media_path),
+                timestamp=excluded.timestamp
+        ''', (chat_id, msg_id, from_name, text, media_type, media_filename, media_path, timestamp, created_at))
+        return True
+
+
+def get_channel_posts(chat_id: int, limit: int = 50, offset: int = 0) -> list[dict]:
+    conn = _connect()
+    try:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM catalog_channel_posts 
+            WHERE chat_id = ? 
+            ORDER BY timestamp DESC, id DESC 
+            LIMIT ? OFFSET ?
+        ''', (chat_id, limit, offset))
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def prune_channel_posts(chat_id: int, keep_count: int = 100):
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            DELETE FROM catalog_channel_posts
+            WHERE chat_id = ? AND id NOT IN (
+                SELECT id FROM catalog_channel_posts
+                WHERE chat_id = ?
+                ORDER BY timestamp DESC, id DESC
+                LIMIT ?
+            )
+        ''', (chat_id, chat_id, keep_count))
+        return cursor.rowcount
 
 
 def update_catalog_chat_description(catalog_id: int, description: str):
