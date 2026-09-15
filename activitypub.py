@@ -194,14 +194,16 @@ def verify_http_signature(method: str, path: str, headers: dict, body: bytes,
     try:
         signature_bytes = base64.b64decode(sig_dict['signature'])
         public_key = serialization.load_pem_public_key(public_key_pem.encode('utf-8'))
+        hash_algo = hashes.SHA512() if 'sha512' in sig_dict.get('algorithm', '').lower() else hashes.SHA256()
         public_key.verify(
             signature_bytes,
             signing_string,
             padding.PKCS1v15(),
-            hashes.SHA256()
+            hash_algo
         )
         return True
-    except Exception:
+    except Exception as e:
+        logger.debug(f"HTTP signature verification failed: {e}")
         return False
 
 # ==============================================================================
@@ -301,13 +303,17 @@ def build_create_activity(actor_url: str, note: dict) -> dict:
 
 def build_accept_follow(actor_url: str, follow_activity: dict) -> dict:
     """Build Accept activity in response to a Follow."""
-    return {
+    accept = {
         "@context": "https://www.w3.org/ns/activitystreams",
         "id": f"{actor_url}/activities/accept-{uuid.uuid4().hex[:12]}",
         "type": "Accept",
         "actor": actor_url,
         "object": follow_activity,
     }
+    recipient = follow_activity.get("actor")
+    if recipient:
+        accept["to"] = [recipient]
+    return accept
 
 def build_ordered_collection(collection_id: str, total_items: int) -> dict:
     """Build ActivityStreams OrderedCollection object."""
@@ -350,7 +356,7 @@ async def init_delivery_worker(loop: asyncio.AbstractEventLoop):
     _delivery_queue = asyncio.Queue()
     _http_session = _aiohttp.ClientSession(
         timeout=_aiohttp.ClientTimeout(total=15),
-        headers={"User-Agent": "BouncerBot/2.12.0 (+https://dc.gluek.info)"}
+        headers={"User-Agent": "BouncerBot/2.12.3 (+https://dc.gluek.info)"}
     )
     asyncio.create_task(_delivery_loop())
     logger.info("ActivityPub delivery worker started.")
@@ -432,22 +438,70 @@ def queue_post_delivery(token: str, post_data: dict, base_url: str):
 _remote_actor_cache: dict[str, tuple[float, dict]] = {}  # actor_id -> (expires_at, actor_json)
 REMOTE_ACTOR_CACHE_TTL = 3600  # 1 hour
 
-async def fetch_remote_actor(actor_id: str, use_cache: bool = True) -> dict | None:
-    """Fetch and cache a remote actor JSON for Follow verification and key retrieval."""
+def _get_default_signing_info() -> tuple[str, str] | None:
+    try:
+        channels = database.get_all_catalog_channels(include_deleted=False)
+        if not channels:
+            return None
+        token = channels[0]['token']
+        base_url = database.get_config("base_url") or os.getenv("BASE_URL") or "https://dc.gluek.info"
+        return token, base_url.rstrip('/')
+    except Exception:
+        return None
+
+async def fetch_remote_actor(actor_id: str, use_cache: bool = True,
+                             sign_as_token: str | None = None,
+                             base_url: str | None = None) -> dict | None:
+    """Fetch and cache a remote actor JSON for Follow verification and key retrieval.
+    Supports Authorized Fetch (HTTP Signatures on GET) for instances like GoToSocial/Akkoma."""
     if _http_session is None:
         return None
-        
+
     if use_cache:
         cached = _remote_actor_cache.get(actor_id)
         if cached and time.time() < cached[0]:
             return cached[1]
-    
+
+    headers = {
+        'Accept': 'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams"',
+        'User-Agent': 'BouncerBot/2.12.3 (+https://dc.gluek.info)',
+    }
+
+    if sign_as_token and base_url and serialization is not None:
+        try:
+            priv_pem, _ = get_or_create_actor_keys(sign_as_token)
+            key_id = f"{base_url.rstrip('/')}/c/{sign_as_token}#main-key"
+            headers.update(sign_headers('GET', actor_id, None, priv_pem, key_id))
+        except Exception as e:
+            logger.warning(f"Error signing GET request for {actor_id}: {e}")
+
     try:
-        headers = {
-            'Accept': 'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams"',
-            'User-Agent': 'BouncerBot/2.12.0 (+https://dc.gluek.info)',
-        }
         async with _http_session.get(actor_id, headers=headers, timeout=_aiohttp.ClientTimeout(total=10)) as resp:
+            # Handle Authorized Fetch (401/403) by retrying with signature from default channel if not signed yet
+            if resp.status in (401, 403) and not (sign_as_token and base_url):
+                signing = _get_default_signing_info()
+                if signing and serialization is not None:
+                    s_tok, s_base = signing
+                    try:
+                        priv_pem, _ = get_or_create_actor_keys(s_tok)
+                        key_id = f"{s_base}/c/{s_tok}#main-key"
+                        auth_headers = {
+                            'Accept': 'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams"',
+                            'User-Agent': 'BouncerBot/2.12.3 (+https://dc.gluek.info)',
+                        }
+                        auth_headers.update(sign_headers('GET', actor_id, None, priv_pem, key_id))
+                        async with _http_session.get(actor_id, headers=auth_headers, timeout=_aiohttp.ClientTimeout(total=10)) as resp2:
+                            if resp2.status == 200:
+                                actor_data = await resp2.json(content_type=None)
+                                _remote_actor_cache[actor_id] = (time.time() + REMOTE_ACTOR_CACHE_TTL, actor_data)
+                                return actor_data
+                            else:
+                                logger.warning(f"Signed GET for {actor_id} returned {resp2.status}")
+                                return None
+                    except Exception as e:
+                        logger.warning(f"Error retrying signed GET for {actor_id}: {e}")
+                        return None
+
             if resp.status != 200:
                 logger.warning(f"Failed to fetch actor {actor_id}: {resp.status}")
                 return None
@@ -457,3 +511,53 @@ async def fetch_remote_actor(actor_id: str, use_cache: bool = True) -> dict | No
     except Exception as e:
         logger.warning(f"Error fetching remote actor {actor_id}: {e}")
         return None
+
+
+async def resolve_public_key(key_id: str, sign_as_token: str | None = None,
+                             base_url: str | None = None) -> tuple[str | None, dict | None]:
+    """Resolve public key PEM from a keyId URL.
+    Returns (public_key_pem, actor_or_key_doc).
+    Handles:
+    - Key endpoints returning publicKeyPem directly (e.g. GoToSocial /main-key)
+    - Actor endpoints returning publicKey dict (e.g. Mastodon /users/alice#main-key)
+    - Remote servers enforcing Authorized Fetch
+    """
+    if not key_id:
+        return None, None
+
+    # Try fetching key_id directly (without fragment)
+    fetch_url = key_id.split('#')[0]
+    data = await fetch_remote_actor(fetch_url, sign_as_token=sign_as_token, base_url=base_url)
+    if not data and fetch_url != key_id:
+        data = await fetch_remote_actor(key_id, sign_as_token=sign_as_token, base_url=base_url)
+
+    if not data or not isinstance(data, dict):
+        return None, None
+
+    # Case 1: Standalone key object (GoToSocial, etc.)
+    if "publicKeyPem" in data and isinstance(data["publicKeyPem"], str):
+        return data["publicKeyPem"], data
+
+    # Case 2: Actor object with embedded publicKey dict
+    pk = data.get("publicKey")
+    if isinstance(pk, dict) and "publicKeyPem" in pk:
+        return pk["publicKeyPem"], data
+
+    # Case 3: Actor object with publicKey list
+    if isinstance(pk, list):
+        for item in pk:
+            if isinstance(item, dict) and item.get("publicKeyPem"):
+                if item.get("id") == key_id or len(pk) == 1:
+                    return item["publicKeyPem"], data
+
+    # Case 4: If key_id has a fragment and data didn't have the key, try fetching key_id directly if different
+    if fetch_url != key_id:
+        key_data = await fetch_remote_actor(key_id, sign_as_token=sign_as_token, base_url=base_url)
+        if isinstance(key_data, dict):
+            if "publicKeyPem" in key_data:
+                return key_data["publicKeyPem"], key_data
+            pk2 = key_data.get("publicKey")
+            if isinstance(pk2, dict) and "publicKeyPem" in pk2:
+                return pk2["publicKeyPem"], key_data
+
+    return None, data

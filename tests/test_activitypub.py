@@ -552,6 +552,144 @@ class TestActivityPub(unittest.TestCase):
         self.assertEqual(ni_data["version"], "2.0")
         self.assertIn("activitypub", ni_data["protocols"])
 
+    def test_handle_ap_following(self):
+        token = "followingtok"
+        database.add_catalog_channel(chat_id=107, name="Following Chan", description="", member_count=1, invite_link="", token=token)
+        database.set_config("base_url", "https://dc.gluek.info")
+
+        req = MagicMock()
+        req.match_info = {"token": token}
+        req.headers = {}
+        resp = asyncio.run(bot.handle_ap_following(req))
+        self.assertEqual(resp.status, 200)
+        data = json.loads(resp.text)
+        self.assertEqual(data["type"], "OrderedCollection")
+        self.assertEqual(data["totalItems"], 0)
+
+    def test_resolve_public_key(self):
+        # 1. Standalone key object (GoToSocial)
+        with patch("activitypub.fetch_remote_actor", new_callable=AsyncMock) as mock_fetch:
+            mock_fetch.return_value = {
+                "id": "https://so.example/users/bob/main-key",
+                "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nFAKESTANDALONE\n-----END PUBLIC KEY-----"
+            }
+            pem, doc = asyncio.run(activitypub.resolve_public_key("https://so.example/users/bob/main-key"))
+            self.assertEqual(pem, "-----BEGIN PUBLIC KEY-----\nFAKESTANDALONE\n-----END PUBLIC KEY-----")
+            self.assertIsNotNone(doc)
+
+        # 2. Embedded publicKey object (Mastodon)
+        with patch("activitypub.fetch_remote_actor", new_callable=AsyncMock) as mock_fetch:
+            mock_fetch.return_value = {
+                "id": "https://mastodon.example/users/alice",
+                "publicKey": {
+                    "id": "https://mastodon.example/users/alice#main-key",
+                    "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nFAKEEMBEDDED\n-----END PUBLIC KEY-----"
+                }
+            }
+            pem, doc = asyncio.run(activitypub.resolve_public_key("https://mastodon.example/users/alice#main-key"))
+            self.assertEqual(pem, "-----BEGIN PUBLIC KEY-----\nFAKEEMBEDDED\n-----END PUBLIC KEY-----")
+            self.assertIsNotNone(doc)
+
+    def test_handle_ap_inbox_follow_and_shared_inbox(self):
+        token = "inboxtok1234"
+        database.add_catalog_channel(chat_id=108, name="Inbox Chan", description="", member_count=1, invite_link="", token=token)
+        database.set_config("base_url", "https://dc.gluek.info")
+
+        # Generate remote keypair for testing incoming signed requests
+        remote_priv, remote_pub = activitypub.generate_actor_keypair()
+        remote_actor_id = "https://remote.social/users/carol"
+        remote_key_id = "https://remote.social/users/carol/main-key"
+
+        # 1. Direct inbox POST: /c/{token}/inbox
+        follow_act = {
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "id": "https://remote.social/activities/1",
+            "type": "Follow",
+            "actor": remote_actor_id,
+            "object": f"https://dc.gluek.info/c/{token}",
+        }
+        body_bytes = json.dumps(follow_act).encode("utf-8")
+        headers = activitypub.sign_headers("POST", f"https://dc.gluek.info/c/{token}/inbox", body_bytes, remote_priv, remote_key_id)
+
+        req_direct = MagicMock()
+        req_direct.match_info = {"token": token}
+        req_direct.path = f"/c/{token}/inbox"
+        req_direct.raw_path = f"/c/{token}/inbox"
+        req_direct.headers = headers
+        req_direct.method = "POST"
+        req_direct.read = AsyncMock(return_value=body_bytes)
+
+        with patch("activitypub.resolve_public_key", new_callable=AsyncMock) as mock_resolve, \
+             patch("activitypub.fetch_remote_actor", new_callable=AsyncMock) as mock_fetch, \
+             patch("activitypub.deliver_to_inbox", new_callable=AsyncMock) as mock_deliver:
+
+            mock_resolve.return_value = (remote_pub, {"id": remote_actor_id})
+            mock_fetch.return_value = {
+                "id": remote_actor_id,
+                "inbox": "https://remote.social/users/carol/inbox",
+                "endpoints": {"sharedInbox": "https://remote.social/inbox"}
+            }
+
+            resp = asyncio.run(bot.handle_ap_inbox(req_direct))
+            self.assertEqual(resp.status, 202)
+            followers = database.get_ap_followers(token)
+            self.assertEqual(len(followers), 1)
+            self.assertEqual(followers[0]["follower_actor_id"], remote_actor_id)
+
+        # 2. Shared inbox POST: /inbox (no token in match_info, extracted from object)
+        database.remove_ap_follower(token, remote_actor_id)
+        self.assertEqual(database.get_ap_followers_count(token), 0)
+
+        shared_headers = activitypub.sign_headers("POST", "https://dc.gluek.info/inbox", body_bytes, remote_priv, remote_key_id)
+        req_shared = MagicMock()
+        req_shared.match_info = {}
+        req_shared.path = "/inbox"
+        req_shared.raw_path = "/inbox"
+        req_shared.headers = shared_headers
+        req_shared.method = "POST"
+        req_shared.read = AsyncMock(return_value=body_bytes)
+
+        with patch("activitypub.resolve_public_key", new_callable=AsyncMock) as mock_resolve, \
+             patch("activitypub.fetch_remote_actor", new_callable=AsyncMock) as mock_fetch, \
+             patch("activitypub.deliver_to_inbox", new_callable=AsyncMock) as mock_deliver:
+
+            mock_resolve.return_value = (remote_pub, {"id": remote_actor_id})
+            mock_fetch.return_value = {
+                "id": remote_actor_id,
+                "inbox": "https://remote.social/users/carol/inbox",
+                "endpoints": {"sharedInbox": "https://remote.social/inbox"}
+            }
+
+            resp = asyncio.run(bot.handle_ap_inbox(req_shared))
+            self.assertEqual(resp.status, 202)
+            followers = database.get_ap_followers(token)
+            self.assertEqual(len(followers), 1)
+            self.assertEqual(followers[0]["follower_actor_id"], remote_actor_id)
+
+        # 3. Undo(Follow) via shared /inbox
+        undo_act = {
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "id": "https://remote.social/activities/2",
+            "type": "Undo",
+            "actor": remote_actor_id,
+            "object": follow_act
+        }
+        undo_bytes = json.dumps(undo_act).encode("utf-8")
+        undo_headers = activitypub.sign_headers("POST", "https://dc.gluek.info/inbox", undo_bytes, remote_priv, remote_key_id)
+        req_undo = MagicMock()
+        req_undo.match_info = {}
+        req_undo.path = "/inbox"
+        req_undo.raw_path = "/inbox"
+        req_undo.headers = undo_headers
+        req_undo.method = "POST"
+        req_undo.read = AsyncMock(return_value=undo_bytes)
+
+        with patch("activitypub.resolve_public_key", new_callable=AsyncMock) as mock_resolve:
+            mock_resolve.return_value = (remote_pub, {"id": remote_actor_id})
+            resp = asyncio.run(bot.handle_ap_inbox(req_undo))
+            self.assertEqual(resp.status, 202)
+            self.assertEqual(database.get_ap_followers_count(token), 0)
+
     def test_robots_txt_gotosocial(self):
         req = MagicMock()
         resp = asyncio.run(bot.handle_robots_txt(req))

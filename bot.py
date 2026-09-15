@@ -37,7 +37,7 @@ import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.12.2"
+VERSION = "2.12.3"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -8021,16 +8021,61 @@ async def handle_ap_actor(request):
         return web.Response(status=500, text="Internal server error")
 
 
-async def handle_ap_inbox(request):
-    """POST /c/{token}/inbox — receive Follow/Undo/Delete activities."""
-    token = request.match_info.get('token')
-    channel = database.get_catalog_channel_by_token(token)
-    if not channel or channel.get('is_deleted'):
-        return web.Response(status=404, text="Channel not found")
+def _extract_channel_token_from_activity(activity: dict) -> str | None:
+    """Extract channel token from ActivityStreams activity object/target field."""
+    if not isinstance(activity, dict):
+        return None
 
+    obj = activity.get("object")
+    target_str = None
+    if isinstance(obj, str):
+        target_str = obj
+    elif isinstance(obj, dict):
+        # In Undo(Follow), obj is the Follow activity whose object is the channel actor
+        inner_obj = obj.get("object")
+        if isinstance(inner_obj, str):
+            target_str = inner_obj
+        elif isinstance(inner_obj, dict):
+            target_str = inner_obj.get("id") or inner_obj.get("url")
+        else:
+            target_str = obj.get("id") or obj.get("url")
+
+    if not target_str and isinstance(activity.get("target"), str):
+        target_str = activity.get("target")
+
+    if target_str:
+        m = re.search(r'/c/([a-zA-Z0-9]{12})', target_str)
+        if m:
+            return m.group(1)
+    return None
+
+
+async def handle_ap_inbox(request):
+    """POST /c/{token}/inbox or POST /inbox (sharedInbox) — receive Follow/Undo/Delete activities."""
     body = await request.read()
     if not body:
         return web.Response(status=400, text="Empty request body")
+
+    try:
+        activity = json.loads(body.decode("utf-8"))
+    except Exception:
+        return web.Response(status=400, text="Invalid JSON body")
+
+    base_url = _get_base_url(request)
+
+    # Determine channel token from route match_info or from activity object
+    token = request.match_info.get('token')
+    if not token:
+        token = _extract_channel_token_from_activity(activity)
+
+    act_type = activity.get("type")
+    if token:
+        channel = database.get_catalog_channel_by_token(token)
+        if not channel or channel.get('is_deleted'):
+            return web.Response(status=404, text="Channel not found")
+    elif act_type not in ("Delete",):
+        logger.warning(f"Could not resolve target channel token from AP activity: {activity}")
+        return web.Response(status=404, text="Target channel not found")
 
     # Verify HTTP Signature
     sig_header = request.headers.get("Signature") or request.headers.get("signature") or ""
@@ -8043,53 +8088,51 @@ async def handle_ap_inbox(request):
     if not key_id:
         return web.Response(status=401, text="Missing keyId in Signature")
 
-    # Fetch remote actor to get public key
-    actor_uri = key_id.split('#')[0]
-    remote_actor = await activitypub.fetch_remote_actor(actor_uri)
-    if not remote_actor or "publicKey" not in remote_actor:
+    # Fetch remote public key with Authorized Fetch support
+    pub_pem, _ = await activitypub.resolve_public_key(key_id, sign_as_token=token, base_url=base_url)
+    if not pub_pem:
+        logger.warning(f"Could not resolve remote actor public key for {key_id}")
         return web.Response(status=401, text="Could not resolve remote actor public key")
 
-    pub_pem = remote_actor["publicKey"].get("publicKeyPem")
-    if not pub_pem:
-        return web.Response(status=401, text="Remote actor missing publicKeyPem")
-
-    req_path = request.path_qs if hasattr(request, 'path_qs') else request.path
+    req_path = getattr(request, 'raw_path', None) or getattr(request, 'path_qs', None) or request.path
     if not activitypub.verify_http_signature(request.method, req_path, dict(request.headers), body, pub_pem):
-        logger.warning(f"AP signature verification failed for {key_id}")
+        logger.warning(f"AP signature verification failed for {key_id} on {req_path}")
         return web.Response(status=401, text="Invalid signature")
 
-    try:
-        activity = json.loads(body.decode("utf-8"))
-    except Exception:
-        return web.Response(status=400, text="Invalid JSON body")
-
-    act_type = activity.get("type")
-    base_url = _get_base_url(request)
-    actor_url = f"{base_url}/c/{token}"
+    actor_url = f"{base_url}/c/{token}" if token else ""
 
     if act_type == "Follow":
         follower_id = activity.get("actor")
-        if follower_id:
-            follower_actor = remote_actor if remote_actor.get("id") == follower_id else await activitypub.fetch_remote_actor(follower_id)
+        if follower_id and token:
+            follower_actor = await activitypub.fetch_remote_actor(follower_id, sign_as_token=token, base_url=base_url)
             if follower_actor:
                 inbox = follower_actor.get("inbox")
-                shared_inbox = follower_actor.get("endpoints", {}).get("sharedInbox")
-                if inbox:
-                    database.add_ap_follower(token, follower_id, inbox, shared_inbox)
+                shared_inbox = follower_actor.get("endpoints", {}).get("sharedInbox") if isinstance(follower_actor.get("endpoints"), dict) else None
+                if inbox or shared_inbox:
+                    database.add_ap_follower(token, follower_id, inbox or shared_inbox, shared_inbox)
                     logger.info(f"New AP follower for channel {token}: {follower_id}")
                     # Build and send Accept activity
                     accept_act = activitypub.build_accept_follow(actor_url, activity)
                     accept_body = json.dumps(accept_act, ensure_ascii=False).encode("utf-8")
-                    priv_pem, pub_pem = activitypub.get_or_create_actor_keys(token)
-                    target_inbox = shared_inbox or inbox
+                    priv_pem, _ = activitypub.get_or_create_actor_keys(token)
+                    target_inbox = inbox or shared_inbox
                     asyncio.create_task(activitypub.deliver_to_inbox(target_inbox, accept_body, priv_pem, f"{actor_url}#main-key"))
+                else:
+                    logger.warning(f"Follower {follower_id} has no inbox or sharedInbox")
+            else:
+                logger.warning(f"Could not fetch follower actor {follower_id}")
         return web.Response(status=202, text="Accepted")
 
     elif act_type == "Undo":
         obj = activity.get("object")
+        is_undo_follow = False
         if isinstance(obj, dict) and obj.get("type") == "Follow":
+            is_undo_follow = True
+        elif isinstance(obj, str):
+            is_undo_follow = True
+        if is_undo_follow:
             follower_id = activity.get("actor")
-            if follower_id:
+            if follower_id and token:
                 database.remove_ap_follower(token, follower_id)
                 logger.info(f"Removed AP follower for channel {token}: {follower_id}")
         return web.Response(status=202, text="Accepted")
@@ -8149,6 +8192,25 @@ async def handle_ap_followers(request):
         content_type="application/activity+json",
         charset="utf-8",
         headers={"Cache-Control": "public, max-age=60"}
+    )
+
+
+async def handle_ap_following(request):
+    """GET /c/{token}/following -> OrderedCollection (empty, count 0)."""
+    token = request.match_info.get('token')
+    channel = database.get_catalog_channel_by_token(token)
+    if not channel or channel.get('is_deleted'):
+        return web.Response(status=404, text="Channel not found")
+
+    base_url = _get_base_url(request)
+    following_url = f"{base_url}/c/{token}/following"
+
+    collection = activitypub.build_ordered_collection(following_url, 0)
+    return web.Response(
+        text=json.dumps(collection, ensure_ascii=False),
+        content_type="application/activity+json",
+        charset="utf-8",
+        headers={"Cache-Control": "public, max-age=300"}
     )
 
 
@@ -8295,8 +8357,10 @@ async def _run_web_server():
     app.router.add_get('/nodeinfo/2.0', handle_nodeinfo)
     app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/actor', handle_ap_actor)
     app.router.add_post('/c/{token:[a-zA-Z0-9]{12}}/inbox', handle_ap_inbox)
+    app.router.add_post('/inbox', handle_ap_inbox)
     app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/outbox', handle_ap_outbox)
     app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/followers', handle_ap_followers)
+    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/following', handle_ap_following)
     app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/posts/{msg_id:[0-9]+}', handle_ap_post)
 
     access_log_format = '%{X-Forwarded-For}i %t "%r" %s %b "%{Referer}i" "%{User-Agent}i"'
