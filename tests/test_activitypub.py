@@ -488,6 +488,7 @@ class TestActivityPub(unittest.TestCase):
 
         req = MagicMock()
         req.match_info = {"token": token}
+        req.query = {}
         req.headers = {}
         resp = asyncio.run(bot.handle_ap_outbox(req))
         self.assertEqual(resp.status, 200)
@@ -495,7 +496,21 @@ class TestActivityPub(unittest.TestCase):
         outbox = json.loads(resp.text)
         self.assertEqual(outbox["type"], "OrderedCollection")
         self.assertEqual(outbox["totalItems"], 2)
+        self.assertEqual(outbox["first"], f"https://dc.gluek.info/c/{token}/outbox?page=true")
         self.assertEqual(len(outbox["orderedItems"]), 2)
+
+        # Paginated request (?page=true)
+        req_page = MagicMock()
+        req_page.match_info = {"token": token}
+        req_page.query = {"page": "true"}
+        req_page.headers = {}
+        resp_page = asyncio.run(bot.handle_ap_outbox(req_page))
+        self.assertEqual(resp_page.status, 200)
+        page = json.loads(resp_page.text)
+        self.assertEqual(page["type"], "OrderedCollectionPage")
+        self.assertEqual(page["partOf"], f"https://dc.gluek.info/c/{token}/outbox")
+        self.assertEqual(page["totalItems"], 2)
+        self.assertEqual(len(page["orderedItems"]), 2)
 
     def test_handle_ap_followers(self):
         token = "followerstok"

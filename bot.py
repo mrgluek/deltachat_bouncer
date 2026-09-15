@@ -8148,7 +8148,7 @@ async def handle_ap_inbox(request):
 
 
 async def handle_ap_outbox(request):
-    """GET /c/{token}/outbox -> OrderedCollection."""
+    """GET /c/{token}/outbox -> OrderedCollection or OrderedCollectionPage."""
     token = request.match_info.get('token')
     channel = database.get_catalog_channel_by_token(token)
     if not channel or channel.get('is_deleted'):
@@ -8164,7 +8164,26 @@ async def handle_ap_outbox(request):
         note = activitypub.build_note(channel, p, base_url)
         ordered_items.append(activitypub.build_create_activity(actor_url, note))
 
-    collection = activitypub.build_ordered_collection(outbox_url, len(ordered_items))
+    is_page = "page" in request.query or request.query.get("page") in ("true", "1")
+
+    if is_page:
+        page_url = f"{outbox_url}?page=true"
+        collection_page = activitypub.build_ordered_collection_page(
+            page_id=page_url,
+            part_of=outbox_url,
+            total_items=len(ordered_items),
+            ordered_items=ordered_items
+        )
+        return web.Response(
+            text=json.dumps(collection_page, ensure_ascii=False),
+            content_type="application/activity+json",
+            charset="utf-8",
+            headers={"Cache-Control": "public, max-age=60"}
+        )
+
+    # Root OrderedCollection with pointer to first page
+    first_url = f"{outbox_url}?page=true" if ordered_items else None
+    collection = activitypub.build_ordered_collection(outbox_url, len(ordered_items), first=first_url, last=first_url)
     collection["orderedItems"] = ordered_items
 
     return web.Response(

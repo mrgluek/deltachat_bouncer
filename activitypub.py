@@ -317,14 +317,38 @@ def build_accept_follow(actor_url: str, follow_activity: dict) -> dict:
         accept["to"] = [recipient]
     return accept
 
-def build_ordered_collection(collection_id: str, total_items: int) -> dict:
+def build_ordered_collection(collection_id: str, total_items: int,
+                             first: str | None = None, last: str | None = None) -> dict:
     """Build ActivityStreams OrderedCollection object."""
-    return {
+    coll = {
         "@context": "https://www.w3.org/ns/activitystreams",
         "id": collection_id,
         "type": "OrderedCollection",
         "totalItems": total_items,
     }
+    if first:
+        coll["first"] = first
+    if last:
+        coll["last"] = last
+    return coll
+
+def build_ordered_collection_page(page_id: str, part_of: str, total_items: int,
+                                  ordered_items: list, next_page: str | None = None,
+                                  prev_page: str | None = None) -> dict:
+    """Build ActivityStreams OrderedCollectionPage object."""
+    page = {
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": page_id,
+        "type": "OrderedCollectionPage",
+        "partOf": part_of,
+        "totalItems": total_items,
+        "orderedItems": ordered_items,
+    }
+    if next_page:
+        page["next"] = next_page
+    if prev_page:
+        page["prev"] = prev_page
+    return page
 
 def format_post_html(text: str) -> str:
     """Convert post text to simple HTML for ActivityPub content field.
