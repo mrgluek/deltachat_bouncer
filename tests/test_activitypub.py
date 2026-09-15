@@ -700,6 +700,28 @@ class TestActivityPub(unittest.TestCase):
         self.assertIn("Allow: /media/", resp.text)
         self.assertIn("Disallow: /.well-known/webfinger", resp.text)
 
+    def test_multislash_route_and_base_url_cleanup(self):
+        token = "cleanurltok1"
+        database.add_catalog_channel(chat_id=109, name="Clean Chan", description="", member_count=1, invite_link="", token=token)
+        priv, pub = activitypub.get_or_create_actor_keys(token)
+
+        # 1. build_actor_json strips trailing slash
+        actor = activitypub.build_actor_json({"token": token, "name": "Clean Chan"}, "https://dc.gluek.info///", pub)
+        self.assertEqual(actor["id"], f"https://dc.gluek.info/c/{token}")
+        self.assertEqual(actor["publicKey"]["id"], f"https://dc.gluek.info/c/{token}#main-key")
+        self.assertEqual(actor["endpoints"]["sharedInbox"], "https://dc.gluek.info/inbox")
+
+        # 2. build_note strips trailing slash
+        note = activitypub.build_note({"token": token}, {"id": 123, "text": "Hi"}, "https://dc.gluek.info/")
+        self.assertEqual(note["attributedTo"], f"https://dc.gluek.info/c/{token}")
+        self.assertNotIn("//c/", note["attributedTo"])
+
+        # 3. bot._get_base_url strips trailing slashes and whitespace
+        database.set_config("base_url", "  https://dc.gluek.info///  ")
+        req = MagicMock()
+        req.headers = {}
+        self.assertEqual(bot._get_base_url(req), "https://dc.gluek.info")
+
 
 if __name__ == "__main__":
     unittest.main()

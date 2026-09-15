@@ -37,7 +37,7 @@ import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.12.3"
+VERSION = "2.12.4"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -4885,7 +4885,7 @@ def _ingest_channel_post(bot, accid, msg, catalog_channel: dict, token: str):
             try:
                 followers_count = database.get_ap_followers_count(token)
                 if followers_count > 0:
-                    base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
+                    base_url = (database.get_config("base_url") or os.getenv("BASE_URL") or "").strip().rstrip('/')
                     if base_url:
                         post_data = {
                             "msg_id": msg_id,
@@ -7793,7 +7793,7 @@ def _get_base_url(request) -> str:
         scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
         host = request.headers.get("X-Forwarded-Host", request.host)
         base_url = f"{scheme}://{host}"
-    return base_url.rstrip("/")
+    return base_url.strip().rstrip("/")
 
 
 async def handle_channel_preview(request):
@@ -8343,25 +8343,25 @@ async def _run_web_server():
     app.router.add_get('/qr.svg', handle_qr_svg)
     app.router.add_get('/qr.png', handle_qr_png)
     app.router.add_get('/', handle_index)
-    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}', handle_channel_preview)
-    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/qr.png', handle_channel_qr_png)
-    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/qr.svg', handle_channel_qr_svg)
-    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/avatar.png', handle_channel_avatar)
-    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/rss.xml', handle_channel_rss)
-    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/rss', handle_channel_rss_redirect)
-    app.router.add_get('/media/{token:[a-zA-Z0-9]{12}}/{msg_id:[0-9]+}/{filename}', handle_media_file)
+    app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}', handle_channel_preview)
+    app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}/qr.png', handle_channel_qr_png)
+    app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}/qr.svg', handle_channel_qr_svg)
+    app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}/avatar.png', handle_channel_avatar)
+    app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}/rss.xml', handle_channel_rss)
+    app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}/rss', handle_channel_rss_redirect)
+    app.router.add_get(r'/{slash:/*}media/{token:[a-zA-Z0-9]{12}}/{msg_id:[0-9]+}/{filename}', handle_media_file)
 
     # ActivityPub routes
     app.router.add_get('/.well-known/webfinger', handle_webfinger)
     app.router.add_get('/.well-known/nodeinfo', handle_nodeinfo_discovery)
     app.router.add_get('/nodeinfo/2.0', handle_nodeinfo)
-    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/actor', handle_ap_actor)
-    app.router.add_post('/c/{token:[a-zA-Z0-9]{12}}/inbox', handle_ap_inbox)
-    app.router.add_post('/inbox', handle_ap_inbox)
-    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/outbox', handle_ap_outbox)
-    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/followers', handle_ap_followers)
-    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/following', handle_ap_following)
-    app.router.add_get('/c/{token:[a-zA-Z0-9]{12}}/posts/{msg_id:[0-9]+}', handle_ap_post)
+    app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}/actor', handle_ap_actor)
+    app.router.add_post(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}/inbox', handle_ap_inbox)
+    app.router.add_post(r'/{slash:/*}inbox', handle_ap_inbox)
+    app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}/outbox', handle_ap_outbox)
+    app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}/followers', handle_ap_followers)
+    app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}/following', handle_ap_following)
+    app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}/posts/{msg_id:[0-9]+}', handle_ap_post)
 
     access_log_format = '%{X-Forwarded-For}i %t "%r" %s %b "%{Referer}i" "%{User-Agent}i"'
     runner = web.AppRunner(app, access_log_format=access_log_format)

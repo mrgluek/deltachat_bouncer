@@ -212,6 +212,7 @@ def verify_http_signature(method: str, path: str, headers: dict, body: bytes,
 
 def build_actor_json(channel: dict, base_url: str, public_key_pem: str) -> dict:
     """Build ActivityStreams Actor object from channel data."""
+    base_url = (base_url or "").strip().rstrip('/')
     token = channel['token']
     actor_url = f"{base_url}/c/{token}"
     return {
@@ -249,6 +250,7 @@ def build_actor_json(channel: dict, base_url: str, public_key_pem: str) -> dict:
 
 def build_note(channel: dict, post: dict, base_url: str) -> dict:
     """Build ActivityStreams Note object from a channel post."""
+    base_url = (base_url or "").strip().rstrip('/')
     token = channel['token']
     actor_url = f"{base_url}/c/{token}"
     msg_id = post.get('msg_id') or post.get('id')
@@ -374,6 +376,7 @@ async def _delivery_loop():
 
 async def _deliver_post(token: str, post_data: dict, base_url: str):
     """Deliver a Create(Note) to all follower inboxes for a channel."""
+    base_url = (base_url or "").strip().rstrip('/')
     channel = database.get_catalog_channel_by_token(token)
     if not channel:
         return
@@ -423,6 +426,7 @@ def queue_post_delivery(token: str, post_data: dict, base_url: str):
     """Thread-safe: queue a post for AP delivery. Called from _ingest_channel_post (sync context)."""
     if _web_loop is None or _delivery_queue is None:
         return
+    base_url = (base_url or "").strip().rstrip('/')
     try:
         asyncio.run_coroutine_threadsafe(
             _delivery_queue.put((token, post_data, base_url)),
@@ -444,8 +448,8 @@ def _get_default_signing_info() -> tuple[str, str] | None:
         if not channels:
             return None
         token = channels[0]['token']
-        base_url = database.get_config("base_url") or os.getenv("BASE_URL") or "https://dc.gluek.info"
-        return token, base_url.rstrip('/')
+        base_url = (database.get_config("base_url") or os.getenv("BASE_URL") or "https://dc.gluek.info").strip().rstrip('/')
+        return token, base_url
     except Exception:
         return None
 
