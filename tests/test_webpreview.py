@@ -287,10 +287,18 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn(f"{ingress}/media/{token}/2/photo.jpg", preview_ingress)
         self.assertIn(f'href="{ingress}/"', preview_ingress)
 
-        # Landing page with ingress
+        # Landing page with ingress (no invite link configured)
+        landing_ingress_no_link = bot.get_landing_page_html(ingress_path=ingress)
+        self.assertIn(f"{ingress}/icon.png", landing_ingress_no_link)
+        self.assertIn("Bot Link Unavailable", landing_ingress_no_link)
+        self.assertIn("Bot invite link is not configured yet", landing_ingress_no_link)
+
+        # Landing page with ingress (with bot invite link)
+        database.set_config("bot_invite_link", "https://i.delta.chat/#botinvite")
         landing_ingress = bot.get_landing_page_html(ingress_path=ingress)
         self.assertIn(f"{ingress}/icon.png", landing_ingress)
         self.assertIn(f"{ingress}/qr.png", landing_ingress)
+        self.assertIn("Add Bouncer Bot", landing_ingress)
 
         # Tombstone HTML
         tombstone_html = bot.get_tombstone_html(channel["name"], ingress_path=ingress)
@@ -305,6 +313,24 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn("Channel Not Found", not_found_html)
         self.assertIn(f'href="{ingress}/"', not_found_html)
         self.assertIn(f'{ingress}/icon.png', not_found_html)
+
+    def test_channel_preview_without_invite_link(self):
+        """Verify channel preview disables action button and omits QR modal when invite link is empty."""
+        channel_no_invite = {
+            "token": "noinvite123",
+            "name": "Private Stream",
+            "description": "No invite link configured",
+            "member_count": 5,
+            "invite_link": "",
+        }
+        posts = [{"msg_id": 1, "text": "Post 1", "from_name": "Admin", "timestamp": time.time()}]
+        html_out = bot.get_channel_preview_html(channel_no_invite, posts, "https://channels.example.com")
+        self.assertIn("Invite Link Unavailable", html_out)
+        self.assertIn('disabled style="opacity: 0.55; cursor: not-allowed;"', html_out)
+        self.assertNotIn("Show QR Code", html_out)
+        self.assertNotIn('id="qr-modal"', html_out)
+        # RSS link should still be available
+        self.assertIn("/c/noinvite123/rss.xml", html_out)
 
     def test_rss_xml_generation(self):
         token = database.add_catalog_channel(

@@ -77,6 +77,7 @@ class TestBouncerBot(unittest.TestCase):
                     os.remove(TEST_DB + ext)
                 except Exception:
                     pass
+        bot.clear_pending_delayed_commands()
 
     def test_format_duration(self):
         self.assertEqual(bot._format_duration(45), "45s")
@@ -1221,7 +1222,7 @@ class TestBouncerBot(unittest.TestCase):
             self.assertIn("Backup transport `user@example.com` added", sent_text)
 
     def test_slap_cooldown_anti_spam(self):
-        """Verify /slap enforces cooldown for non-admin users."""
+        """Verify /slap enforces cooldown for non-admin users by queueing and reacting with ⏳ instead of spamming text."""
         mock_bot = MagicMock()
         mock_event = MagicMock()
         mock_event.msg.chat_id = 9030
@@ -1230,17 +1231,81 @@ class TestBouncerBot(unittest.TestCase):
         mock_event.payload = "someone"
 
         bot._chat_slap_anti_spam.clear()
-        with patch('bot._is_dc_admin', return_value=False), patch('bot._send') as mock_send:
-            # First slap proceeds
-            bot.slap_command(mock_bot, 1, mock_event)
-            self.assertIn(9030, bot._chat_slap_anti_spam)
+        bot.clear_pending_delayed_commands()
+        try:
+            with patch('bot._is_dc_admin', return_value=False), \
+                 patch('bot._send') as mock_send, \
+                 patch('bot._react') as mock_react:
+                # First slap proceeds
+                bot.slap_command(mock_bot, 1, mock_event)
+                self.assertIn(9030, bot._chat_slap_anti_spam)
+                mock_send.assert_called()
 
-            # Immediate second slap is blocked by cooldown
-            mock_send.reset_mock()
-            bot.slap_command(mock_bot, 1, mock_event)
-            mock_send.assert_called()
-            sent_text = mock_send.call_args[0][3]
-            self.assertIn("Please wait", sent_text)
+                # Immediate second slap is queued without group spam
+                mock_send.reset_mock()
+                mock_react.reset_mock()
+                mock_event.msg.id = 101
+                bot.slap_command(mock_bot, 1, mock_event)
+                mock_send.assert_not_called()
+                mock_react.assert_called_with(mock_bot, 1, 101, "⏳")
+        finally:
+            bot.clear_pending_delayed_commands()
+
+    def test_queue_delayed_command_lifecycle(self):
+        """Verify _queue_delayed_command sets ⏳ and transitions to ☑️ upon completion."""
+        mock_bot = MagicMock()
+        mock_msg = MagicMock()
+        mock_msg.id = 505
+        mock_msg.chat_id = 8888
+
+        executed = []
+        def dummy_cmd(val):
+            executed.append(val)
+
+        bot.clear_pending_delayed_commands()
+        try:
+            with patch('bot._react') as mock_react:
+                bot._queue_delayed_command(mock_bot, 1, mock_msg, "test_cmd", 0.05, dummy_cmd, "hello")
+                mock_react.assert_called_with(mock_bot, 1, 505, "⏳")
+
+                time.sleep(0.15)
+
+                self.assertEqual(executed, ["hello"])
+                mock_react.assert_any_call(mock_bot, 1, 505, "☑️")
+        finally:
+            bot.clear_pending_delayed_commands()
+
+    def test_queue_delayed_command_deduplication(self):
+        """Verify multiple messages during cooldown are coalesced and all get ☑️."""
+        mock_bot = MagicMock()
+        mock_msg1 = MagicMock()
+        mock_msg1.id = 701
+        mock_msg1.chat_id = 9999
+
+        mock_msg2 = MagicMock()
+        mock_msg2.id = 702
+        mock_msg2.chat_id = 9999
+
+        call_count = [0]
+        def dummy_cmd():
+            call_count[0] += 1
+
+        bot.clear_pending_delayed_commands()
+        try:
+            with patch('bot._react') as mock_react:
+                bot._queue_delayed_command(mock_bot, 1, mock_msg1, "test_cmd", 0.05, dummy_cmd)
+                bot._queue_delayed_command(mock_bot, 1, mock_msg2, "test_cmd", 0.05, dummy_cmd)
+
+                mock_react.assert_any_call(mock_bot, 1, 701, "⏳")
+                mock_react.assert_any_call(mock_bot, 1, 702, "⏳")
+
+                time.sleep(0.15)
+
+                self.assertEqual(call_count[0], 1)
+                mock_react.assert_any_call(mock_bot, 1, 701, "☑️")
+                mock_react.assert_any_call(mock_bot, 1, 702, "☑️")
+        finally:
+            bot.clear_pending_delayed_commands()
 
     def test_transport_stats_buffering_and_flushing(self):
         """Verify transport sent/received stats are buffered and written to DB on flush."""

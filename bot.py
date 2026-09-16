@@ -37,7 +37,7 @@ import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.12.6"
+VERSION = "2.12.7"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -108,6 +108,9 @@ def get_bot_invite_link() -> str:
     global dc_bot_instance, dc_accid, bot_invite_link_cache
     if "link" in bot_invite_link_cache:
         return bot_invite_link_cache["link"]
+    cfg_link = database.get_config("bot_invite_link")
+    if cfg_link:
+        return cfg_link
     if dc_bot_instance and dc_accid:
         try:
             link = dc_bot_instance.rpc.get_chat_securejoin_qr_code(dc_accid, None)
@@ -388,6 +391,57 @@ def _react(bot, accid, msg_id, reaction):
         bot.rpc.send_reaction(accid, msg_id, [reaction] if reaction else [])
     except Exception as e:
         logger.warning(f"Failed to send reaction {reaction}: {e}")
+
+_pending_delayed_commands: dict[str, tuple[threading.Timer, list[int]]] = {}
+_pending_delayed_lock = threading.Lock()
+
+def _queue_delayed_command(bot, accid, msg, command_key: str, remaining_sec: float, handler_fn, *args, **kwargs) -> bool:
+    """React with ⏳ and queue the command to execute once remaining_sec expires.
+    When execution finishes, changes reaction to ☑️ on all queued messages.
+    Suppresses duplicate executions if already pending for this chat.
+    """
+    _react(bot, accid, msg.id, "⏳")
+    key = f"{command_key}:{msg.chat_id}"
+
+    with _pending_delayed_lock:
+        if key in _pending_delayed_commands:
+            timer, msg_ids = _pending_delayed_commands[key]
+            if msg.id not in msg_ids:
+                msg_ids.append(msg.id)
+            return True
+
+        msg_ids = [msg.id]
+
+        def _runner():
+            with _pending_delayed_lock:
+                entry = _pending_delayed_commands.pop(key, None)
+                final_msg_ids = entry[1] if entry else msg_ids
+            try:
+                handler_fn(*args, **kwargs)
+                for mid in final_msg_ids:
+                    _react(bot, accid, mid, "☑️")
+            except Exception as e:
+                logger.error(f"Error running delayed command {command_key} for chat {msg.chat_id}: {e}")
+                for mid in final_msg_ids:
+                    _react(bot, accid, mid, "❌")
+
+        timer = threading.Timer(max(0.01, float(remaining_sec)), _runner)
+        timer.daemon = True
+        _pending_delayed_commands[key] = (timer, msg_ids)
+        timer.start()
+        return True
+
+def clear_pending_delayed_commands():
+    """Cancel and clear all pending delayed command timers."""
+    with _pending_delayed_lock:
+        for timer, _ in _pending_delayed_commands.values():
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+        _pending_delayed_commands.clear()
+
+
 
 def _get_top_posters(bot, accid, chat_id, limit=10, hours=24):
     """Return top posters in the given chat for the last N hours."""
@@ -1980,23 +2034,19 @@ def initadmin_command(bot, accid, event):
 
 
 @dc_cli.on(events.NewMessage(command="/bounce"))
-def bounce_command(bot, accid, event):
+def bounce_command(bot, accid, event, skip_cooldown: bool = False):
     msg = event.msg
     
     # Allow everyone to use /bounce, but with a cooldown (admins are exempt)
     is_admin = _is_dc_admin(bot, accid, msg.from_id)
     now = time.time()
     
-    if not is_admin:
+    if not is_admin and not skip_cooldown:
         last_bounce = _chat_anti_spam.get(msg.chat_id, 0)
         diff = now - last_bounce
         if diff < BOUNCE_COOLDOWN_SECONDS:
             remaining_sec = max(1, int(BOUNCE_COOLDOWN_SECONDS - diff))
-            if remaining_sec < 60:
-                 _send(bot, accid, msg.chat_id, f"⌛️ This group was checked recently. Please wait {remaining_sec}s before running another check.")
-            else:
-                 remaining_min = int(remaining_sec / 60)
-                 _send(bot, accid, msg.chat_id, f"⌛️ This group was checked recently. Please wait {remaining_min}m before running another check.")
+            _queue_delayed_command(bot, accid, msg, "bounce", remaining_sec, bounce_command, bot, accid, event, skip_cooldown=True)
             return
 
     query = event.payload.strip() if event.payload else ""
@@ -2459,15 +2509,15 @@ def kick_command(bot, accid, event):
 
 
 @dc_cli.on(events.NewMessage(command="/slap"))
-def slap_command(bot, accid, event):
+def slap_command(bot, accid, event, skip_cooldown: bool = False):
     msg = event.msg
     now = time.time()
-    if not _is_dc_admin(bot, accid, msg.from_id):
+    if not _is_dc_admin(bot, accid, msg.from_id) and not skip_cooldown:
         last_slap = _chat_slap_anti_spam.get(msg.chat_id, 0)
         diff = now - last_slap
         if diff < SLAP_COOLDOWN_SECONDS:
             remaining_sec = max(1, int(SLAP_COOLDOWN_SECONDS - diff))
-            _send(bot, accid, msg.chat_id, f"⌛️ Please wait {remaining_sec}s before using /slap again.")
+            _queue_delayed_command(bot, accid, msg, "slap", remaining_sec, slap_command, bot, accid, event, skip_cooldown=True)
             return
 
     _chat_slap_anti_spam[msg.chat_id] = now
@@ -2630,28 +2680,24 @@ def back_command(bot, accid, event):
             logger.error(f"Error notifying recipient {recipient_id} that sender is back: {e}")
 
 @dc_cli.on(events.NewMessage(command="/top"))
-def top_command(bot, accid, event):
+def top_command(bot, accid, event, skip_cooldown: bool = False):
     msg = event.msg
-    # 10-minute cooldown similar to other commands
+    # 1-minute cooldown similar to other commands
     last_check = _chat_anti_spam.get(msg.chat_id, 0) # Reuse bounce cooldown for simplicity
     now = time.time()
     
-    if not _is_dc_admin(bot, accid, msg.from_id):
+    if not _is_dc_admin(bot, accid, msg.from_id) and not skip_cooldown:
         diff = now - last_check
         if diff < BOUNCE_COOLDOWN_SECONDS:
-             remaining_sec = max(1, int(BOUNCE_COOLDOWN_SECONDS - diff))
-             if remaining_sec < 60:
-                  _send(bot, accid, msg.chat_id, f"⌛️ Please wait {remaining_sec}s before running another check.")
-             else:
-                  remaining_min = int(remaining_sec / 60)
-                  _send(bot, accid, msg.chat_id, f"⌛️ Please wait {remaining_min}m before running another check.")
-             return
+            remaining_sec = max(1, int(BOUNCE_COOLDOWN_SECONDS - diff))
+            _queue_delayed_command(bot, accid, msg, "top", remaining_sec, top_command, bot, accid, event, skip_cooldown=True)
+            return
     
     _chat_anti_spam[msg.chat_id] = now
     _send(bot, accid, msg.chat_id, _get_top_posters_report(bot, accid, msg.chat_id))
 
 @dc_cli.on(events.NewMessage(command="/search"))
-def search_command(bot, accid, event):
+def search_command(bot, accid, event, skip_cooldown: bool = False):
     msg = event.msg
     
     # 1. Check if this is a global search (admin in private chat) or a local group search
@@ -2679,16 +2725,12 @@ def search_command(bot, accid, event):
 
     # 2. Check cooldown (admins/global searches are exempt)
     now = time.time()
-    if not global_search and not is_admin:
+    if not global_search and not is_admin and not skip_cooldown:
         last_search = _chat_search_anti_spam.get(msg.chat_id, 0)
         diff = now - last_search
         if diff < SEARCH_COOLDOWN_SECONDS:
             remaining_sec = max(1, int(SEARCH_COOLDOWN_SECONDS - diff))
-            if remaining_sec < 60:
-                _send(bot, accid, msg.chat_id, f"⌛️ A search was performed recently in this group. Please wait {remaining_sec}s before running another search.")
-            else:
-                remaining_min = int(remaining_sec / 60)
-                _send(bot, accid, msg.chat_id, f"⌛️ A search was performed recently in this group. Please wait {remaining_min}m before running another search.")
+            _queue_delayed_command(bot, accid, msg, "search", remaining_sec, search_command, bot, accid, event, skip_cooldown=True)
             return
 
     # 3. Parse and validate queries
@@ -2899,7 +2941,7 @@ def help_command(bot, accid, event):
         f"/cmping <server1> ... — Ping relays to/from specified servers.\n"
         f"/virus <url> — Scan URL or replied file/link with VirusTotal.\n\n"
         f"/donate — Support development ❤️\n\n"
-        f"💡 _Commands have a 10-minute cooldown per group (except for admins)._\n\n"
+        f"💡 _Commands have a 1-minute cooldown per group (15s for cmping/slap, 10s for search; admins are exempt)._\n\n"
         f"🤖 **Source:** Run your own bot: https://git.gluek.info/gluek/deltachat_bouncer"
     )
     
@@ -2948,7 +2990,7 @@ def donate_command(bot, accid, event):
           "Thank you! 🙏")
 
 @dc_cli.on(events.NewMessage(command="/invite"))
-def invite_command(bot, accid, event):
+def invite_command(bot, accid, event, skip_cooldown: bool = False):
     msg = event.msg
     
     # 1. Check if this is a group chat
@@ -2967,12 +3009,12 @@ def invite_command(bot, accid, event):
     is_admin = _is_dc_admin(bot, accid, msg.from_id)
     now = time.time()
     
-    if not is_admin:
+    if not is_admin and not skip_cooldown:
         last_check = _chat_anti_spam.get(msg.chat_id, 0)
         diff = now - last_check
         if diff < BOUNCE_COOLDOWN_SECONDS:
             remaining_sec = max(1, int(BOUNCE_COOLDOWN_SECONDS - diff))
-            _send(bot, accid, msg.chat_id, f"⌛️ Please wait {remaining_sec}s before running another check.")
+            _queue_delayed_command(bot, accid, msg, "invite", remaining_sec, invite_command, bot, accid, event, skip_cooldown=True)
             return
 
     # Update cooldown timestamp
@@ -3281,7 +3323,7 @@ def rmtransport_command(bot, accid, event):
         _send(bot, accid, msg.chat_id, f"❌ Failed to remove transport: {e}")
 
 @dc_cli.on(events.NewMessage(command="/relays"))
-def relays_command(bot, accid, event):
+def relays_command(bot, accid, event, skip_cooldown: bool = False):
     """Check group members for regular mail providers, including secondary transports."""
     msg = event.msg
     
@@ -3289,16 +3331,12 @@ def relays_command(bot, accid, event):
     is_admin = _is_dc_admin(bot, accid, msg.from_id)
     now = time.time()
     
-    if not is_admin:
+    if not is_admin and not skip_cooldown:
         last_check = _chat_relays_anti_spam.get(msg.chat_id, 0)
         diff = now - last_check
         if diff < BOUNCE_COOLDOWN_SECONDS:
             remaining_sec = max(1, int(BOUNCE_COOLDOWN_SECONDS - diff))
-            if remaining_sec < 60:
-                 _send(bot, accid, msg.chat_id, f"⌛️ Relay check was done recently. Please wait {remaining_sec}s before running another check.")
-            else:
-                 remaining_min = int(remaining_sec / 60)
-                 _send(bot, accid, msg.chat_id, f"⌛️ Relay check was done recently. Please wait {remaining_min}m before running another check.")
+            _queue_delayed_command(bot, accid, msg, "relays", remaining_sec, relays_command, bot, accid, event, skip_cooldown=True)
             return
 
     # Update timestamp
@@ -4110,17 +4148,19 @@ def _bg_cmping_worker_inner(bot, accid, chat_id, msg_id, bot_domains, specified_
     _send(bot, accid, chat_id, "\n\n".join(report_parts).strip())
 
 @dc_cli.on(events.NewMessage(command="/cmping"))
-def cmping_command(bot, accid, event):
+def cmping_command(bot, accid, event, skip_cooldown: bool = False):
     msg = event.msg
     
-    # 1. Check cooldown (debounce) - 15 seconds
+    # 1. Check cooldown (debounce) - 15 seconds (admins are exempt)
     now = time.time()
-    last_run = _chat_cmping_anti_spam.get(msg.chat_id, 0)
-    diff = now - last_run
-    if diff < CMPING_COOLDOWN_SECONDS:
-        remaining_sec = max(1, int(CMPING_COOLDOWN_SECONDS - diff))
-        _send(bot, accid, msg.chat_id, f"⌛️ Please wait {remaining_sec}s before running /cmping again.")
-        return
+    is_admin = _is_dc_admin(bot, accid, msg.from_id)
+    if not is_admin and not skip_cooldown:
+        last_run = _chat_cmping_anti_spam.get(msg.chat_id, 0)
+        diff = now - last_run
+        if diff < CMPING_COOLDOWN_SECONDS:
+            remaining_sec = max(1, int(CMPING_COOLDOWN_SECONDS - diff))
+            _queue_delayed_command(bot, accid, msg, "cmping", remaining_sec, cmping_command, bot, accid, event, skip_cooldown=True)
+            return
         
     # 2. Parse command arguments
     payload_str = event.payload.strip() if event.payload else ""
@@ -6364,11 +6404,38 @@ def get_landing_page_html(ingress_path: str = "") -> str:
         return index_page_html_cache
 
     invite_link = get_bot_invite_link()
-    deep_link = invite_link
-    if invite_link.startswith("OPEN-CHAT:"):
+    deep_link = invite_link or ""
+    if invite_link and invite_link.startswith("OPEN-CHAT:"):
         deep_link = "https://i.delta.chat/#" + invite_link[10:]
 
     base_path = ingress_path.rstrip("/")
+    if invite_link:
+        hero_btn_html = """<button class="btn btn-primary" onclick="document.getElementById('qr-modal').style.display='flex'">
+                <span>📱</span> Add Bot to Delta Chat
+            </button>"""
+        qr_modal_html = f"""<div id="qr-modal" class="modal" onclick="if(event.target === this) this.style.display='none'">
+        <div class="modal-content">
+            <h3>Add Bouncer Bot</h3>
+            <p style="font-size: 0.9rem; color: var(--text-muted);">Scan this QR code with your Delta Chat mobile app or click the link below.</p>
+            <img src="{base_path}/qr.png" alt="Bot QR Code" />
+            <div style="display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap;">
+                <a href="{deep_link}" class="btn btn-primary" style="padding: 0.5rem 1rem; font-size: 0.9rem;">Open in Delta Chat</a>
+                <button class="close-btn" onclick="document.getElementById('qr-modal').style.display='none'">Close</button>
+            </div>
+        </div>
+    </div>"""
+    else:
+        hero_btn_html = """<button class="btn btn-primary" disabled style="opacity: 0.55; cursor: not-allowed;" title="Bot invite link not yet configured">
+                <span>📱</span> Bot Link Unavailable
+            </button>"""
+        qr_modal_html = """<div id="qr-modal" class="modal" onclick="if(event.target === this) this.style.display='none'">
+        <div class="modal-content">
+            <h3>Add Bouncer Bot</h3>
+            <p style="font-size: 0.95rem; color: var(--text-muted); margin: 1.5rem 0;">ℹ️ Bot invite link is not configured yet. Please check back later.</p>
+            <button class="close-btn" onclick="document.getElementById('qr-modal').style.display='none'">Close</button>
+        </div>
+    </div>"""
+
     bg_url = f"{base_path}/background.jpg"
     home_url = f"{base_path}/" if base_path else "/"
     channels = database.get_all_catalog_channels(public_only=True)
@@ -6706,9 +6773,7 @@ def get_landing_page_html(ingress_path: str = "") -> str:
             <div class="hero-badge">🛡️ Group Quality & Channel Gateway</div>
             <h1>Maintain Group Quality & Channel Web Previews</h1>
             <p>Bouncer bot maintains group quality by monitoring inactivity and saving server resources by pruning stale users. It features inactivity reports, automatic two-stage warnings & kicks, VirusTotal security inspection, CMPing server monitoring, and clean web previews & RSS feeds for public channels.</p>
-            <button class="btn btn-primary" onclick="document.getElementById('qr-modal').style.display='flex'">
-                <span>📱</span> Add Bot to Delta Chat
-            </button>
+            {hero_btn_html}
         </section>
 
         {channels_section}
@@ -6808,17 +6873,7 @@ def get_landing_page_html(ingress_path: str = "") -> str:
         </section>
     </main>
 
-    <div id="qr-modal" class="modal" onclick="if(event.target === this) this.style.display='none'">
-        <div class="modal-content">
-            <h3>Add Bouncer Bot</h3>
-            <p style="font-size: 0.9rem; color: var(--text-muted);">Scan this QR code with your Delta Chat mobile app or click the link below.</p>
-            <img src="{base_path}/qr.png" alt="Bot QR Code" />
-            <div style="display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap;">
-                <a href="{deep_link}" class="btn btn-primary" style="padding: 0.5rem 1rem; font-size: 0.9rem;">Open in Delta Chat</a>
-                <button class="close-btn" onclick="document.getElementById('qr-modal').style.display='none'">Close</button>
-            </div>
-        </div>
-    </div>
+    {qr_modal_html}
 
     <footer>
         <p>Powered by <a href="https://github.com/mrgluek/deltachat_bouncer" target="_blank">Delta Chat Bouncer Bot</a> (v{VERSION}) · <a href="https://git.gluek.info/gluek/deltachat_bouncer" target="_blank">Forgejo Mirror</a></p>
@@ -6826,7 +6881,8 @@ def get_landing_page_html(ingress_path: str = "") -> str:
 </body>
 </html>
 """
-    index_page_html_cache = html_content
+    if not ingress_path:
+        index_page_html_cache = html_content
     return html_content
 
 
@@ -6858,6 +6914,25 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
     qr_img_url = f"{base_path}/c/{token}/qr.png"
     rss_url = f"{base_url.rstrip('/')}/c/{token}/rss.xml" if has_full_base else f"{base_path}/c/{token}/rss.xml"
     home_url = f"{base_path}/" if base_path else "/"
+
+    if join_link:
+        actions_buttons_html = f"""<a href="{join_link}" class="btn btn-primary"><span>✈️</span> Open in Delta Chat</a>
+                <button onclick="document.getElementById('qr-modal').style.display='flex'" class="btn btn-secondary"><span>📱</span> Show QR Code</button>"""
+        qr_modal_html = f"""
+    <div id="qr-modal" class="modal" onclick="if(event.target === this) this.style.display='none'">
+        <div class="modal-content">
+            <h3>Scan with Delta Chat</h3>
+            <p style="font-size: 0.9rem; color: var(--text-muted);">Scan this QR code with the Delta Chat camera to join <strong>{ch_name_esc}</strong>.</p>
+            <img src="{qr_img_url}" alt="Channel Join QR Code" />
+            <div style="display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap;">
+                <button class="close-btn" onclick="navigator.clipboard.writeText('{join_link}').then(() => alert('Link copied to clipboard!'))">Copy Link</button>
+                <button class="close-btn" onclick="document.getElementById('qr-modal').style.display='none'">Close</button>
+            </div>
+        </div>
+    </div>"""
+    else:
+        actions_buttons_html = """<button class="btn btn-primary" disabled style="opacity: 0.55; cursor: not-allowed;" title="Invite link not available"><span>✈️</span> Invite Link Unavailable</button>"""
+        qr_modal_html = ""
 
     fedi_domain = ""
     if has_full_base:
@@ -7357,8 +7432,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
                 {f'<p class="channel-desc">{_autolink(ch_desc)}</p>' if ch_desc else ''}
             </div>
             <div class="actions-row">
-                <a href="{join_link}" class="btn btn-primary"><span>✈️</span> Open in Delta Chat</a>
-                <button onclick="document.getElementById('qr-modal').style.display='flex'" class="btn btn-secondary"><span>📱</span> Show QR Code</button>
+                {actions_buttons_html}
                 <a href="{rss_url}" class="btn btn-secondary"><span>📡</span> RSS Feed</a>
             </div>
         </section>
@@ -7369,17 +7443,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
         </section>
     </main>
 
-    <div id="qr-modal" class="modal" onclick="if(event.target === this) this.style.display='none'">
-        <div class="modal-content">
-            <h3>Scan with Delta Chat</h3>
-            <p style="font-size: 0.9rem; color: var(--text-muted);">Scan this QR code with the Delta Chat camera to join <strong>{ch_name_esc}</strong>.</p>
-            <img src="{qr_img_url}" alt="Channel Join QR Code" />
-            <div style="display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap;">
-                <button class="close-btn" onclick="navigator.clipboard.writeText('{join_link}').then(() => alert('Link copied to clipboard!'))">Copy Link</button>
-                <button class="close-btn" onclick="document.getElementById('qr-modal').style.display='none'">Close</button>
-            </div>
-        </div>
-    </div>
+    {qr_modal_html}
 
     <footer>
         <p>Powered by <a href="https://github.com/mrgluek/deltachat_bouncer" target="_blank">Delta Chat Bouncer Bot</a> (v{VERSION}) · <a href="https://git.gluek.info/gluek/deltachat_bouncer" target="_blank">Forgejo Mirror</a></p>

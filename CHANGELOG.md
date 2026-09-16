@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.12.7] - 2026-09-16
+
+### UI & UX Improvements
+- **Documentation Accuracy (`U1`)**:
+  - Updated `/help` cooldown description and `README.md` to reflect real command limits (60s shared group cooldown, 15s for `/cmping` and `/slap`, 10s for `/search`) instead of obsolete 10-minute claims.
+- **Graceful Handling of Empty Channel Invite Links (`U2`)**:
+  - Web preview channels without configured invite links now render a clean disabled button (`Invite Link Unavailable`) instead of a broken empty link (`<a href="">`).
+  - Suppressed the "Show QR Code" button and join modal when no invite link exists, preventing broken QR image tags or copying empty strings.
+  - Preserved RSS feed discoverability even when direct chat invites are disabled.
+- **Landing Page QR Modal Fallback (`U3`)**:
+  - When the bot's own invite link is not yet configured, the landing page hero section displays a disabled `Bot Link Unavailable` button.
+  - The landing page QR modal displays an informative fallback message (`ℹ️ Bot invite link is not configured yet. Please check back later.`) rather than an empty modal box or broken image.
+- **Non-Intrusive Command Cooldowns & Execution Queue (`U4`)**:
+  - Replaced group-wide cooldown notification spam (`⌛️ Please wait ...`) with a silent `⏳` reaction on the caller's message.
+  - Implemented asynchronous command queuing (`_queue_delayed_command`): commands triggered during an active cooldown are scheduled to run automatically as soon as the cooldown window expires.
+  - Coalesced concurrent invocations from multiple members during cooldown so the command executes once when ready.
+  - Upon successful delayed execution, reactions automatically update to `☑️` across all queued messages (or `❌` on error).
+
 ## [2.12.6] - 2026-09-16
 
 ### Security & Hardening
