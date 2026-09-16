@@ -235,11 +235,16 @@ def init_db():
                 follower_actor_id TEXT NOT NULL,
                 follower_inbox TEXT NOT NULL,
                 follower_shared_inbox TEXT,
+                follower_public_key TEXT,
                 created_at REAL NOT NULL,
                 UNIQUE(actor_token, follower_actor_id)
             )
         ''')
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_ap_followers_token ON ap_followers(actor_token)")
+        try:
+            cursor.execute("ALTER TABLE ap_followers ADD COLUMN follower_public_key TEXT")
+        except sqlite3.OperationalError:
+            pass
 
         # Pending join requests table
         cursor.execute('''
@@ -1629,17 +1634,34 @@ def save_ap_actor_keys(token: str, private_key_pem: str, public_key_pem: str):
 # ── ActivityPub Followers ──
 
 def add_ap_follower(actor_token: str, follower_actor_id: str,
-                    follower_inbox: str, follower_shared_inbox: str = None):
+                    follower_inbox: str, follower_shared_inbox: str = None,
+                    follower_public_key: str = None):
     """Add a remote Fediverse follower for a channel."""
     with _writer_transaction() as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO ap_followers (actor_token, follower_actor_id, follower_inbox, follower_shared_inbox, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO ap_followers (actor_token, follower_actor_id, follower_inbox, follower_shared_inbox, follower_public_key, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(actor_token, follower_actor_id) DO UPDATE SET
                 follower_inbox=excluded.follower_inbox,
-                follower_shared_inbox=excluded.follower_shared_inbox
-        ''', (actor_token, follower_actor_id, follower_inbox, follower_shared_inbox, time.time()))
+                follower_shared_inbox=excluded.follower_shared_inbox,
+                follower_public_key=COALESCE(excluded.follower_public_key, ap_followers.follower_public_key)
+        ''', (actor_token, follower_actor_id, follower_inbox, follower_shared_inbox, follower_public_key, time.time()))
+
+
+def get_follower_public_key(follower_actor_id: str) -> str | None:
+    """Get stored public key PEM for a follower actor ID."""
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT follower_public_key FROM ap_followers WHERE follower_actor_id = ? AND follower_public_key IS NOT NULL LIMIT 1",
+            (follower_actor_id,)
+        )
+        row = cursor.fetchone()
+        return row[0] if row and row[0] else None
+    finally:
+        conn.close()
 
 
 def remove_ap_follower(actor_token: str, follower_actor_id: str) -> bool:

@@ -7,6 +7,7 @@ import shutil
 import sys
 import time
 import unittest
+import email.utils
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -800,6 +801,138 @@ class TestActivityPub(unittest.TestCase):
         self.assertIn("user_count", data["stats"])
         self.assertIn("status_count", data["stats"])
         self.assertEqual(data["thumbnail"], "https://dc.gluek.info/background.jpg")
+
+    def test_extract_signature_info_formats(self):
+        # 1. RFC 9421 format
+        rfc_headers = {
+            "Signature-Input": 'sig1=("@method" "@target-uri" "date" "digest");created=1726488438;keyid="https://remote.social/users/alice#main-key";alg="rsa-v1_5-sha256"',
+            "Signature": "sig1=:aW52YWxpZHNpZw==:",
+            "Date": "Wed, 16 Sep 2026 12:00:00 GMT"
+        }
+        info = activitypub.extract_signature_info(rfc_headers)
+        self.assertEqual(info["format"], "rfc9421")
+        self.assertEqual(info["key_id"], "https://remote.social/users/alice#main-key")
+        self.assertEqual(info["algorithm"], "rsa-v1_5-sha256")
+        self.assertEqual(info["signature_b64"], "aW52YWxpZHNpZw==")
+        self.assertEqual(info["headers"], ["@method", "@target-uri", "date", "digest"])
+        self.assertEqual(info["created"], 1726488438)
+
+        # 2. Cavage format
+        cavage_headers = {
+            "Signature": 'keyId="https://remote.social/users/bob#main-key",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="bXlzaWc="'
+        }
+        info2 = activitypub.extract_signature_info(cavage_headers)
+        self.assertEqual(info2["format"], "cavage")
+        self.assertEqual(info2["key_id"], "https://remote.social/users/bob#main-key")
+        self.assertEqual(info2["algorithm"], "rsa-sha256")
+        self.assertEqual(info2["signature_b64"], "bXlzaWc=")
+        self.assertEqual(info2["headers"], ["(request-target)", "host", "date", "digest"])
+
+        # 3. Empty headers
+        self.assertEqual(activitypub.extract_signature_info({}), {})
+
+    def test_rfc9421_signature_verification(self):
+        priv_pem, pub_pem = activitypub.generate_actor_keypair()
+        key_id = "https://remote.social/users/alice#main-key"
+        body = b'{"type":"Delete","actor":"https://remote.social/users/alice"}'
+        digest_bytes = hashlib.sha256(body).digest()
+        digest_b64 = base64.b64encode(digest_bytes).decode('ascii')
+        created_ts = int(time.time())
+        target_uri = "https://dc.gluek.info/inbox"
+        method = "POST"
+        path = "/inbox"
+
+        sig_params = f'("@method" "@target-uri" "digest");created={created_ts};keyid="{key_id}";alg="rsa-v1_5-sha256"'
+        signing_lines = [
+            f'"@method": {method}',
+            f'"@target-uri": {target_uri}',
+            f'"digest": SHA-256={digest_b64}',
+            f'"@signature-params": {sig_params}'
+        ]
+        signing_string = "\n".join(signing_lines).encode("utf-8")
+
+        from cryptography.hazmat.primitives import serialization, hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+        private_key = serialization.load_pem_private_key(priv_pem.encode("utf-8"), password=None)
+        sig_bytes = private_key.sign(signing_string, padding.PKCS1v15(), hashes.SHA256())
+        sig_b64 = base64.b64encode(sig_bytes).decode("ascii")
+
+        headers = {
+            "Host": "dc.gluek.info",
+            "Digest": f"SHA-256={digest_b64}",
+            "Signature-Input": f"sig1={sig_params}",
+            "Signature": f"sig1=:{sig_b64}:"
+        }
+
+        # Cheap check passes
+        valid, reason = activitypub.validate_signature_cheap(method, headers, body)
+        self.assertTrue(valid, f"Expected cheap check valid, got {reason}")
+
+        # Verification passes
+        self.assertTrue(activitypub.verify_http_signature(method, path, headers, body, pub_pem, target_uri=target_uri))
+
+        # Tampered body fails verification
+        tampered_body = b'{"type":"Delete","actor":"https://remote.social/users/eve"}'
+        self.assertFalse(activitypub.verify_http_signature(method, path, headers, tampered_body, pub_pem, target_uri=target_uri))
+
+    def test_cached_follower_public_key_resolution(self):
+        token = "cachedkeychan"
+        actor_id = "https://remote.social/users/david"
+        key_id = f"{actor_id}#main-key"
+        _, pub_pem = activitypub.generate_actor_keypair()
+
+        # Add follower with public key
+        database.add_ap_follower(token, actor_id, f"{actor_id}/inbox", follower_public_key=pub_pem)
+
+        # resolve_public_key should return cached key without outbound HTTP fetch
+        with patch("activitypub.fetch_remote_actor", new_callable=AsyncMock) as mock_fetch:
+            res_key, doc = asyncio.run(activitypub.resolve_public_key(key_id))
+            self.assertEqual(res_key, pub_pem)
+            self.assertEqual(doc["id"], actor_id)
+            mock_fetch.assert_not_called()
+
+    def test_handle_ap_inbox_delete_gone_or_suspended_actor(self):
+        token = "deltok123456"
+        database.add_catalog_channel(chat_id=115, name="Delete Chan", description="", member_count=1, invite_link="", token=token)
+
+        actor_id = "https://remote.social/ap/users/116395919712956015"
+        key_id = f"{actor_id}#main-key"
+        database.add_ap_follower(token, actor_id, f"{actor_id}/inbox")
+        self.assertEqual(database.get_ap_followers_count(token), 1)
+
+        delete_act = {
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "id": f"{actor_id}#delete",
+            "type": "Delete",
+            "actor": actor_id,
+            "to": ["https://www.w3.org/ns/activitystreams#Public"],
+            "object": actor_id
+        }
+        body_bytes = json.dumps(delete_act).encode("utf-8")
+        digest_b64 = base64.b64encode(hashlib.sha256(body_bytes).digest()).decode("ascii")
+
+        req = MagicMock()
+        req.match_info = {}
+        req.path = "/inbox"
+        req.raw_path = "/inbox"
+        req.method = "POST"
+        req.headers = {
+            "Host": "dc.gluek.info",
+            "Date": email.utils.formatdate(usegmt=True),
+            "Digest": f"SHA-256={digest_b64}",
+            "Signature": f'keyId="{key_id}",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="dummy_signature"'
+        }
+        req.read = AsyncMock(return_value=body_bytes)
+
+        # Simulate remote instance returning 403 or 410 on public key / actor fetch
+        activitypub._last_fetch_status[key_id] = 403
+        activitypub._last_fetch_status[actor_id] = 403
+
+        with patch("activitypub.resolve_public_key", new_callable=AsyncMock) as mock_resolve:
+            mock_resolve.return_value = (None, None)
+            resp = asyncio.run(bot.handle_ap_inbox(req))
+            self.assertEqual(resp.status, 202)
+            self.assertEqual(database.get_ap_followers_count(token), 0)
 
 
 if __name__ == "__main__":

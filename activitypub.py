@@ -150,60 +150,217 @@ def parse_signature_header(sig_header: str) -> dict:
             parsed[k.strip()] = v.strip().strip('"')
     return parsed
 
+def extract_signature_info(headers: dict) -> dict:
+    """Extract signature metadata from headers supporting both:
+    1. Modern RFC 9421 HTTP Message Signatures (`Signature-Input` + `Signature: sig1=...`)
+    2. Legacy Cavage / draft-cavage-http-signatures (`Signature: keyId="..."...`)
+    """
+    if not headers:
+        return {}
+
+    headers_lower = {k.lower(): str(v) for k, v in headers.items()}
+    sig_input = headers_lower.get('signature-input')
+    sig_header = headers_lower.get('signature')
+
+    # If no Signature header, check Authorization: Signature ...
+    if not sig_header:
+        auth = headers_lower.get('authorization', '')
+        if auth.lower().startswith('signature '):
+            sig_header = auth[10:].strip()
+
+    # Priority 1: RFC 9421 when Signature-Input is present
+    if sig_input:
+        first_input = sig_input.split('\n')[0].strip()
+        m = re.match(r'^\s*([a-zA-Z0-9_-]+)\s*=\s*(.+)$', first_input)
+        if m:
+            label = m.group(1)
+            params = m.group(2).strip()
+
+            comp_m = re.search(r'\((.*?)\)', params)
+            components = re.findall(r'"([^"]+)"', comp_m.group(1)) if comp_m else []
+
+            keyid_m = re.search(r'keyid="([^"]+)"', params, re.IGNORECASE)
+            key_id = keyid_m.group(1) if keyid_m else None
+
+            alg_m = re.search(r'alg="?([a-zA-Z0-9_-]+)"?', params, re.IGNORECASE)
+            alg = alg_m.group(1) if alg_m else "rsa-v1_5-sha256"
+
+            created_m = re.search(r'created=(\d+)', params)
+            created = int(created_m.group(1)) if created_m else None
+
+            # Find signature bytes in Signature header
+            sig_b64 = None
+            if sig_header:
+                sig_m = re.search(rf'{re.escape(label)}\s*=\s*:([^:]+):', sig_header)
+                if not sig_m:
+                    sig_m = re.search(rf'{re.escape(label)}\s*=\s*"([^"]+)"', sig_header)
+                if not sig_m:
+                    sig_m = re.search(r':([^:]+):', sig_header)
+                if sig_m:
+                    sig_b64 = sig_m.group(1).strip()
+
+            if key_id or sig_b64:
+                return {
+                    "format": "rfc9421",
+                    "key_id": key_id,
+                    "algorithm": alg,
+                    "signature_b64": sig_b64,
+                    "headers": components,
+                    "created": created,
+                    "label": label,
+                    "sig_params": params,
+                    "raw_dict": {"Signature-Input": sig_input, "Signature": sig_header or ""}
+                }
+
+    # Priority 2: Cavage / draft-cavage-http-signatures
+    if sig_header:
+        sig_dict = parse_signature_header(sig_header)
+        key_id = sig_dict.get('keyId')
+        sig_b64 = sig_dict.get('signature')
+        headers_str = sig_dict.get('headers', '')
+        headers_list = headers_str.split(' ') if headers_str else []
+        alg = sig_dict.get('algorithm', 'rsa-sha256')
+
+        if key_id or sig_b64 or headers_str:
+            return {
+                "format": "cavage",
+                "key_id": key_id,
+                "algorithm": alg,
+                "signature_b64": sig_b64,
+                "headers": headers_list,
+                "created": None,
+                "label": None,
+                "sig_params": None,
+                "raw_dict": sig_dict
+            }
+
+    return {}
+
 def verify_http_signature(method: str, path: str, headers: dict, body: bytes,
-                          public_key_pem: str) -> bool:
-    """Verify HTTP Signature on an incoming request."""
+                          public_key_pem: str, target_uri: str | None = None) -> bool:
+    """Verify HTTP Signature on an incoming request, supporting both RFC 9421 and Cavage."""
     if serialization is None:
         raise ImportError("cryptography package is not available.")
-        
+
     headers_lower = {k.lower(): str(v) for k, v in headers.items()}
-    
-    sig_header = headers_lower.get('signature')
-    if not sig_header:
+    sig_info = extract_signature_info(headers_lower)
+    if not sig_info:
         return False
-        
-    sig_dict = parse_signature_header(sig_header)
-    if 'signature' not in sig_dict or 'headers' not in sig_dict:
-        return False
-        
-    if 'date' in headers_lower:
+
+    # Date / timestamp check
+    created_ts = sig_info.get('created')
+    now = datetime.now(timezone.utc)
+    if created_ts is not None:
+        if abs(now.timestamp() - created_ts) > 300:
+            return False
+    elif 'date' in headers_lower:
         try:
             date_dt = parsedate_to_datetime(headers_lower['date'])
-            now = datetime.now(timezone.utc)
+            if date_dt.tzinfo is None:
+                date_dt = date_dt.replace(tzinfo=timezone.utc)
             if abs((now - date_dt).total_seconds()) > 300:
                 return False
         except Exception:
             return False
-            
-    if method.upper() == 'POST' and 'digest' in headers_lower:
+
+    # Digest check
+    if method.upper() in ('POST', 'PUT'):
         digest_bytes = hashlib.sha256(body or b'').digest()
         digest_b64 = base64.b64encode(digest_bytes).decode('ascii')
-        expected_digest = f"SHA-256={digest_b64}"
-        if headers_lower['digest'].lower() != expected_digest.lower():
-            return False
+        if 'digest' in headers_lower:
+            expected_digest = f"SHA-256={digest_b64}"
+            if headers_lower['digest'].lower() != expected_digest.lower():
+                return False
+        if 'content-digest' in headers_lower:
+            expected_cd = f"sha-256=:{digest_b64}:"
+            if headers_lower['content-digest'].lower() != expected_cd.lower():
+                return False
 
-    headers_to_sign = sig_dict['headers'].split(' ')
-    signing_lines = []
-    for h in headers_to_sign:
-        if h == '(request-target)':
-            signing_lines.append(f"(request-target): {method.lower()} {path}")
+    public_key = serialization.load_pem_public_key(public_key_pem.encode('utf-8'))
+
+    def _verify_rfc9421(info: dict) -> bool:
+        sig_b64 = info.get('signature_b64')
+        if not sig_b64:
+            return False
+        signing_lines = []
+        for comp in info.get('headers', []):
+            comp_lower = comp.lower()
+            if comp_lower == '@method':
+                signing_lines.append(f'"@method": {method.upper()}')
+            elif comp_lower == '@target-uri':
+                uri = target_uri
+                if not uri:
+                    scheme = headers_lower.get('x-forwarded-proto') or 'https'
+                    host = headers_lower.get('x-forwarded-host') or headers_lower.get('host') or 'localhost'
+                    uri = f"{scheme}://{host}{path}"
+                signing_lines.append(f'"@target-uri": {uri}')
+            elif comp_lower == '@path':
+                signing_lines.append(f'"@path": {path.split("?")[0]}')
+            elif comp_lower == '@query':
+                q = path.split("?")[1] if "?" in path else ""
+                signing_lines.append(f'"@query": ?{q}' if q else '"@query": ')
+            elif comp_lower == '@authority':
+                auth = headers_lower.get('x-forwarded-host') or headers_lower.get('host') or ''
+                signing_lines.append(f'"@authority": {auth}')
+            elif comp_lower == '@request-target':
+                signing_lines.append(f'"@request-target": {method.lower()} {path}')
+            else:
+                val = headers_lower.get(comp_lower, '')
+                signing_lines.append(f'"{comp_lower}": {val}')
+        signing_lines.append(f'"@signature-params": {info.get("sig_params", "")}')
+        signing_string = "\n".join(signing_lines).encode('utf-8')
+
+        sig_bytes = base64.b64decode(sig_b64)
+        alg = (info.get('algorithm') or '').lower()
+        if 'pss' in alg:
+            h = hashes.SHA512() if 'sha512' in alg else hashes.SHA256()
+            padding_algo = padding.PSS(mgf=padding.MGF1(h), salt_length=padding.PSS.MAX_LENGTH)
         else:
-            val = headers_lower.get(h, '')
-            signing_lines.append(f"{h}: {val}")
-            
-    signing_string = "\n".join(signing_lines).encode('utf-8')
-    
-    try:
-        signature_bytes = base64.b64decode(sig_dict['signature'])
-        public_key = serialization.load_pem_public_key(public_key_pem.encode('utf-8'))
-        hash_algo = hashes.SHA512() if 'sha512' in sig_dict.get('algorithm', '').lower() else hashes.SHA256()
-        public_key.verify(
-            signature_bytes,
-            signing_string,
-            padding.PKCS1v15(),
-            hash_algo
-        )
+            h = hashes.SHA512() if 'sha512' in alg else hashes.SHA256()
+            padding_algo = padding.PKCS1v15()
+
+        public_key.verify(sig_bytes, signing_string, padding_algo, h)
         return True
+
+    def _verify_cavage(info: dict) -> bool:
+        sig_b64 = info.get('signature_b64')
+        if not sig_b64:
+            return False
+        headers_to_sign = info.get('headers', [])
+        signing_lines = []
+        for h in headers_to_sign:
+            if h == '(request-target)':
+                signing_lines.append(f"(request-target): {method.lower()} {path}")
+            else:
+                val = headers_lower.get(h.lower(), '')
+                signing_lines.append(f"{h}: {val}")
+        signing_string = "\n".join(signing_lines).encode('utf-8')
+        sig_bytes = base64.b64decode(sig_b64)
+        hash_algo = hashes.SHA512() if 'sha512' in info.get('algorithm', '').lower() else hashes.SHA256()
+        public_key.verify(sig_bytes, signing_string, padding.PKCS1v15(), hash_algo)
+        return True
+
+    try:
+        if sig_info.get("format") == "rfc9421":
+            try:
+                return _verify_rfc9421(sig_info)
+            except Exception as e:
+                logger.debug(f"RFC 9421 signature verify error: {e}")
+                # Fallback to Cavage if Cavage is also present in headers
+                sig_header = headers_lower.get('signature', '')
+                if 'keyid=' in sig_header.lower():
+                    cavage_info = {
+                        "format": "cavage",
+                        "raw_dict": parse_signature_header(sig_header)
+                    }
+                    cavage_info["key_id"] = cavage_info["raw_dict"].get("keyId")
+                    cavage_info["headers"] = cavage_info["raw_dict"].get("headers", "date").split(" ")
+                    cavage_info["signature_b64"] = cavage_info["raw_dict"].get("signature")
+                    cavage_info["algorithm"] = cavage_info["raw_dict"].get("algorithm", "rsa-sha256")
+                    return _verify_cavage(cavage_info)
+                return False
+        else:
+            return _verify_cavage(sig_info)
     except Exception as e:
         logger.debug(f"HTTP signature verification failed: {e}")
         return False
@@ -390,7 +547,7 @@ async def init_delivery_worker(loop: asyncio.AbstractEventLoop):
     _delivery_queue = asyncio.Queue()
     _http_session = _aiohttp.ClientSession(
         timeout=_aiohttp.ClientTimeout(total=15),
-        headers={"User-Agent": "BouncerBot/2.12.3 (+https://dc.gluek.info)"}
+        headers={"User-Agent": "BouncerBot/2.12.8 (+https://dc.gluek.info)"}
     )
     asyncio.create_task(_delivery_loop())
     logger.info("ActivityPub delivery worker started.")
@@ -606,51 +763,91 @@ def is_safe_url(url: str, allow_private: bool | None = None) -> tuple[bool, str]
 def validate_signature_cheap(method: str, headers: dict, body: bytes) -> tuple[bool, str]:
     """Perform fast, non-cryptographic validation of HTTP Signature and headers
     before attempting outbound remote key fetches (SSRF & DoS mitigation).
+    Supports both RFC 9421 and Cavage.
     Returns (is_valid, error_reason).
     """
     headers_lower = {k.lower(): str(v) for k, v in headers.items()}
     sig_header = headers_lower.get('signature')
-    if not sig_header:
+    sig_input = headers_lower.get('signature-input')
+    auth_header = headers_lower.get('authorization', '')
+
+    if not sig_header and not sig_input and not auth_header.lower().startswith('signature '):
         return False, "Missing Signature header"
 
-    sig_dict = parse_signature_header(sig_header)
-    if 'keyId' not in sig_dict or not sig_dict['keyId']:
+    sig_info = extract_signature_info(headers_lower)
+    if not sig_info:
+        return False, "Missing Signature header"
+
+    if not sig_info.get('key_id'):
         return False, "Missing keyId in Signature header"
-    if 'signature' not in sig_dict or not sig_dict['signature']:
+    if not sig_info.get('signature_b64'):
         return False, "Missing signature data in Signature header"
-    if 'headers' not in sig_dict or not sig_dict['headers']:
+    if not sig_info.get('headers'):
         return False, "Missing headers list in Signature header"
 
-    # 1. Date header freshness verification (±300s)
+    # 1. Date header / created timestamp freshness verification (±300s)
+    created_ts = sig_info.get('created')
+    now = datetime.now(timezone.utc)
     date_header = headers_lower.get('date')
-    if not date_header:
+
+    if created_ts is not None:
+        if abs(now.timestamp() - created_ts) > 300:
+            return False, "Signature created timestamp outside allowed 300s window"
+        if date_header:
+            try:
+                date_dt = parsedate_to_datetime(date_header)
+                if date_dt.tzinfo is None:
+                    date_dt = date_dt.replace(tzinfo=timezone.utc)
+                if abs((now - date_dt).total_seconds()) > 300:
+                    return False, "Date header outside allowed 300s window"
+            except Exception:
+                return False, "Malformed Date header"
+    elif date_header:
+        try:
+            date_dt = parsedate_to_datetime(date_header)
+            if date_dt.tzinfo is None:
+                date_dt = date_dt.replace(tzinfo=timezone.utc)
+            if abs((now - date_dt).total_seconds()) > 300:
+                return False, "Date header outside allowed 300s window"
+        except Exception:
+            return False, "Malformed Date header"
+    else:
         return False, "Missing Date header"
-    try:
-        date_dt = parsedate_to_datetime(date_header)
-        if date_dt.tzinfo is None:
-            date_dt = date_dt.replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
-        if abs((now - date_dt).total_seconds()) > 300:
-            return False, "Date header outside allowed 300s window"
-    except Exception:
-        return False, "Malformed Date header"
 
     # 2. Digest header verification for requests with bodies (e.g. POST)
     if method.upper() in ('POST', 'PUT'):
+        digest_bytes = hashlib.sha256(body or b'').digest()
+        digest_b64 = base64.b64encode(digest_bytes).decode('ascii')
+
+        # Check standard Cavage Digest: SHA-256=<base64>
         digest_header = headers_lower.get('digest')
         if digest_header:
-            digest_bytes = hashlib.sha256(body or b'').digest()
-            digest_b64 = base64.b64encode(digest_bytes).decode('ascii')
             expected_digest = f"SHA-256={digest_b64}"
             if digest_header.lower() != expected_digest.lower():
                 return False, "Digest header does not match body SHA-256"
 
+        # Check RFC 9530 Content-Digest: sha-256=:<base64>:
+        content_digest_header = headers_lower.get('content-digest')
+        if content_digest_header:
+            expected_cd = f"sha-256=:{digest_b64}:"
+            if content_digest_header.lower() != expected_cd.lower():
+                return False, "Content-Digest header does not match body SHA-256"
+
     # 3. KeyId URL safety verification (SSRF prevention)
-    is_safe, reason = is_safe_url(sig_dict['keyId'])
+    is_safe, reason = is_safe_url(sig_info['key_id'])
     if not is_safe:
         return False, f"Unsafe keyId URL: {reason}"
 
     return True, "OK"
+
+
+_last_fetch_status: dict[str, int] = {}
+
+def get_last_fetch_status(url: str) -> int | None:
+    """Return the HTTP status code of the most recent fetch attempt for this URL."""
+    if not url:
+        return None
+    return _last_fetch_status.get(url) or _last_fetch_status.get(url.split('#')[0])
 
 
 async def fetch_remote_actor(actor_id: str, use_cache: bool = True,
@@ -673,7 +870,7 @@ async def fetch_remote_actor(actor_id: str, use_cache: bool = True,
 
     headers = {
         'Accept': 'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams"',
-        'User-Agent': 'BouncerBot/2.12.3 (+https://dc.gluek.info)',
+        'User-Agent': 'BouncerBot/2.12.8 (+https://dc.gluek.info)',
     }
 
     if sign_as_token and base_url and serialization is not None:
@@ -686,6 +883,10 @@ async def fetch_remote_actor(actor_id: str, use_cache: bool = True,
 
     try:
         async with _http_session.get(actor_id, headers=headers, timeout=_aiohttp.ClientTimeout(total=10)) as resp:
+            fetch_url = actor_id.split('#')[0]
+            _last_fetch_status[actor_id] = resp.status
+            _last_fetch_status[fetch_url] = resp.status
+
             # Handle Authorized Fetch (401/403) by retrying with signature from default channel if not signed yet
             if resp.status in (401, 403) and not (sign_as_token and base_url):
                 signing = _get_default_signing_info()
@@ -696,14 +897,19 @@ async def fetch_remote_actor(actor_id: str, use_cache: bool = True,
                         key_id = f"{s_base}/c/{s_tok}#main-key"
                         auth_headers = {
                             'Accept': 'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams"',
-                            'User-Agent': 'BouncerBot/2.12.3 (+https://dc.gluek.info)',
+                            'User-Agent': 'BouncerBot/2.12.8 (+https://dc.gluek.info)',
                         }
                         auth_headers.update(sign_headers('GET', actor_id, None, priv_pem, key_id))
                         async with _http_session.get(actor_id, headers=auth_headers, timeout=_aiohttp.ClientTimeout(total=10)) as resp2:
+                            _last_fetch_status[actor_id] = resp2.status
+                            _last_fetch_status[fetch_url] = resp2.status
                             if resp2.status == 200:
                                 actor_data = await resp2.json(content_type=None)
                                 _remote_actor_cache[actor_id] = (time.time() + REMOTE_ACTOR_CACHE_TTL, actor_data)
                                 return actor_data
+                            elif resp2.status in (403, 404, 410):
+                                logger.info(f"Signed GET for {actor_id} returned HTTP {resp2.status} (deleted or unavailable)")
+                                return None
                             else:
                                 logger.warning(f"Signed GET for {actor_id} returned {resp2.status}")
                                 return None
@@ -712,7 +918,10 @@ async def fetch_remote_actor(actor_id: str, use_cache: bool = True,
                         return None
 
             if resp.status != 200:
-                logger.warning(f"Failed to fetch actor {actor_id}: {resp.status}")
+                if resp.status in (403, 404, 410):
+                    logger.info(f"Fetch remote actor {actor_id} returned HTTP {resp.status} (deleted or unavailable)")
+                else:
+                    logger.warning(f"Failed to fetch actor {actor_id}: {resp.status}")
                 return None
             actor_data = await resp.json(content_type=None)
             _remote_actor_cache[actor_id] = (time.time() + REMOTE_ACTOR_CACHE_TTL, actor_data)
@@ -727,6 +936,7 @@ async def resolve_public_key(key_id: str, sign_as_token: str | None = None,
     """Resolve public key PEM from a keyId URL.
     Returns (public_key_pem, actor_or_key_doc).
     Handles:
+    - Cached follower public keys in database
     - Key endpoints returning publicKeyPem directly (e.g. GoToSocial /main-key)
     - Actor endpoints returning publicKey dict (e.g. Mastodon /users/alice#main-key)
     - Remote servers enforcing Authorized Fetch
@@ -734,13 +944,21 @@ async def resolve_public_key(key_id: str, sign_as_token: str | None = None,
     if not key_id:
         return None, None
 
+    actor_id = key_id.split('#')[0]
+    try:
+        cached_pk = database.get_follower_public_key(actor_id)
+        if cached_pk:
+            return cached_pk, {"id": actor_id, "publicKey": {"id": key_id, "publicKeyPem": cached_pk}}
+    except Exception as e:
+        logger.debug(f"DB follower public key lookup error for {actor_id}: {e}")
+
     safe, reason = is_safe_url(key_id)
     if not safe:
         logger.warning(f"Blocked unsafe keyId URL {key_id}: {reason}")
         return None, None
 
     # Try fetching key_id directly (without fragment)
-    fetch_url = key_id.split('#')[0]
+    fetch_url = actor_id
     data = await fetch_remote_actor(fetch_url, sign_as_token=sign_as_token, base_url=base_url)
     if not data and fetch_url != key_id:
         data = await fetch_remote_actor(key_id, sign_as_token=sign_as_token, base_url=base_url)

@@ -37,7 +37,7 @@ import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.12.7"
+VERSION = "2.12.8"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -8194,17 +8194,34 @@ async def handle_ap_inbox(request):
         logger.warning(f"AP inbox signature preliminary check failed: {reason}")
         return web.Response(status=401, text=reason)
 
-    sig_dict = activitypub.parse_signature_header(req_headers.get("Signature") or req_headers.get("signature") or "")
-    key_id = sig_dict.get("keyId")
+    sig_info = activitypub.extract_signature_info(req_headers)
+    key_id = sig_info.get("key_id") if sig_info else None
 
     # Fetch remote public key with Authorized Fetch support
     pub_pem, _ = await activitypub.resolve_public_key(key_id, sign_as_token=token, base_url=base_url)
     if not pub_pem:
+        fetch_status = activitypub.get_last_fetch_status(key_id)
+        if act_type == "Delete" and fetch_status in (403, 404, 410):
+            deleted_actor = activity.get("actor") or activity.get("object")
+            if isinstance(deleted_actor, dict):
+                deleted_actor = deleted_actor.get("id") or deleted_actor.get("url")
+            if isinstance(deleted_actor, str) and key_id:
+                actor_host = urllib.parse.urlparse(deleted_actor).netloc.lower()
+                key_host = urllib.parse.urlparse(key_id).netloc.lower()
+                if actor_host and actor_host == key_host:
+                    removed = database.remove_ap_followers_by_actor(deleted_actor)
+                    logger.info(
+                        f"Processed Delete for gone/suspended AP actor: {deleted_actor} "
+                        f"(remote status {fetch_status}, removed {removed} follower record(s))"
+                    )
+                    return web.Response(status=202, text="Accepted")
+
         logger.warning(f"Could not resolve remote actor public key for {key_id}")
         return web.Response(status=401, text="Could not resolve remote actor public key")
 
     req_path = getattr(request, 'raw_path', None) or getattr(request, 'path_qs', None) or request.path
-    if not activitypub.verify_http_signature(request.method, req_path, req_headers, body, pub_pem):
+    target_uri = f"{base_url.rstrip('/')}{req_path}" if base_url else str(request.url)
+    if not activitypub.verify_http_signature(request.method, req_path, req_headers, body, pub_pem, target_uri=target_uri):
         logger.warning(f"AP signature verification failed for {key_id} on {req_path}")
         return web.Response(status=401, text="Invalid signature")
 
@@ -8218,7 +8235,19 @@ async def handle_ap_inbox(request):
                 inbox = follower_actor.get("inbox")
                 shared_inbox = follower_actor.get("endpoints", {}).get("sharedInbox") if isinstance(follower_actor.get("endpoints"), dict) else None
                 if inbox or shared_inbox:
-                    database.add_ap_follower(token, follower_id, inbox or shared_inbox, shared_inbox)
+                    follower_pk = None
+                    pk_obj = follower_actor.get("publicKey")
+                    if isinstance(pk_obj, dict):
+                        follower_pk = pk_obj.get("publicKeyPem")
+                    elif isinstance(pk_obj, list):
+                        for item in pk_obj:
+                            if isinstance(item, dict) and item.get("publicKeyPem"):
+                                follower_pk = item["publicKeyPem"]
+                                break
+                    database.add_ap_follower(
+                        token, follower_id, inbox or shared_inbox, shared_inbox,
+                        follower_public_key=follower_pk
+                    )
                     logger.info(f"New AP follower for channel {token}: {follower_id}")
                     # Build and send Accept activity, followed by backfilling recent posts
                     accept_act = activitypub.build_accept_follow(actor_url, activity)
@@ -8255,6 +8284,8 @@ async def handle_ap_inbox(request):
 
     elif act_type == "Delete":
         deleted_actor = activity.get("actor") or activity.get("object")
+        if isinstance(deleted_actor, dict):
+            deleted_actor = deleted_actor.get("id") or deleted_actor.get("url")
         if isinstance(deleted_actor, str):
             database.remove_ap_followers_by_actor(deleted_actor)
             logger.info(f"Removed deleted AP actor: {deleted_actor}")
