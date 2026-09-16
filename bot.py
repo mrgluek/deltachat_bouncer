@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import functools
 import io
 import json
 import logging
@@ -37,7 +38,7 @@ import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.13.1"
+VERSION = "2.13.2"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -160,6 +161,18 @@ _cmping_monitor_running = False
 _cmping_last_results: dict[tuple, dict] = database.get_all_cmping_results()
 _cmping_server_status: dict[str, bool] = {}
 _cmping_server_errors: dict[str, str] = {}
+
+def _set_cmping_server_status(server: str, is_healthy: bool, error: str | None = None):
+    global _cmping_server_status, _cmping_server_errors
+    _cmping_server_status[server] = is_healthy
+    while len(_cmping_server_status) > 500:
+        _cmping_server_status.pop(next(iter(_cmping_server_status)), None)
+    if error:
+        _cmping_server_errors[server] = error
+        while len(_cmping_server_errors) > 500:
+            _cmping_server_errors.pop(next(iter(_cmping_server_errors)), None)
+    elif error is not None or is_healthy:
+        _cmping_server_errors.pop(server, None)
 
 CMPING_MONITOR_INTERVAL = int(os.environ.get("CMPING_MONITOR_INTERVAL", "1800"))  # default 30 min
 
@@ -1059,16 +1072,14 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
     # Initialize server status map from DB if not done yet
     if not _cmping_server_status:
         for srv in all_servers:
-            _cmping_server_status[srv] = True
+            _set_cmping_server_status(srv, True)
         for (src, dst), res in _cmping_last_results.items():
             if not res.get("success"):
                 err = res.get("error", "Check failed")
                 if src in all_servers:
-                    _cmping_server_status[src] = False
-                    _cmping_server_errors[src] = f"Outgoing to {dst} failed: {err}"
+                    _set_cmping_server_status(src, False, f"Outgoing to {dst} failed: {err}")
                 if dst in all_servers:
-                    _cmping_server_status[dst] = False
-                    _cmping_server_errors[dst] = f"Incoming from {src} failed: {err}"
+                    _set_cmping_server_status(dst, False, f"Incoming from {src} failed: {err}")
 
     # Pick source via round-robin
     source_idx = _cmping_monitor_index % len(all_servers)
@@ -1141,9 +1152,8 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
     if not any_source_success and len(targets) >= 2:
         # The source itself is the failing node (e.g. host down, broken mail/dns, network partition)
         old_source_healthy = _cmping_server_status.get(source, True)
-        _cmping_server_status[source] = False
         sample_err = "All peer checks failed (node unreachable or broken mail delivery)"
-        _cmping_server_errors[source] = sample_err
+        _set_cmping_server_status(source, False, sample_err)
         if old_source_healthy:
             database.record_cmping_server_down(source, now, sample_err)
     else:
@@ -1151,8 +1161,7 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
         old_source_healthy = _cmping_server_status.get(source, True)
         source_healthy = True if (any_source_success or not targets) else False
         if source_healthy:
-            _cmping_server_status[source] = True
-            _cmping_server_errors.pop(source, None)
+            _set_cmping_server_status(source, True)
             if not old_source_healthy:
                 database.record_cmping_server_up(source, now)
                 _clear_all_errors_for_server(source)
@@ -1172,8 +1181,7 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
             dst_is_healthy = bool(fwd_ok and bwd_ok)
 
             if dst_is_healthy:
-                _cmping_server_status[dst] = True
-                _cmping_server_errors.pop(dst, None)
+                _set_cmping_server_status(dst, True)
                 if not old_dst_healthy:
                     database.record_cmping_server_up(dst, now)
                     _clear_all_errors_for_server(dst)
@@ -1190,8 +1198,7 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
                 else:
                     sample_err = f"outgoing to {source} failed: {bwd_err}"
 
-                _cmping_server_status[dst] = False
-                _cmping_server_errors[dst] = sample_err
+                _set_cmping_server_status(dst, False, sample_err)
                 if old_dst_healthy:
                     database.record_cmping_server_down(dst, now, sample_err)
 
@@ -1929,10 +1936,12 @@ def on_start(bot, args):
                     continue
                 msg = bot.rpc.get_message(accid, msgid)
                 outgoing = msg.from_id == SpecialContactId.SELF
-                logger.debug(f"custom_process_messages: msgid={msgid}, from_id={msg.from_id}, is_info={msg.is_info}, text={msg.text!r}")
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(f"custom_process_messages: msgid={msgid}, from_id={msg.from_id}, is_info={msg.is_info}, text={msg.text!r}")
                 # Process the message if it's outgoing, from a contact > LAST_SPECIAL, or a system/info message
                 if outgoing or msg.from_id > SpecialContactId.LAST_SPECIAL or msg.is_info:
-                    logger.debug(f"custom_process_messages: calling _on_new_msg for msgid={msgid}")
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(f"custom_process_messages: calling _on_new_msg for msgid={msgid}")
                     bot._on_new_msg(accid, msg)
                 bot.rpc.set_config(accid, "last_msg_id", str(msgid))
         except JsonRpcError as err:
@@ -1946,10 +1955,12 @@ def on_start(bot, args):
         try:
             msg = bot.rpc.get_message(accid, msgid)
             outgoing = msg.from_id == SpecialContactId.SELF
-            logger.debug(f"custom_process_message: msgid={msgid}, from_id={msg.from_id}, is_info={msg.is_info}, text={msg.text!r}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"custom_process_message: msgid={msgid}, from_id={msg.from_id}, is_info={msg.is_info}, text={msg.text!r}")
             # Process the message if it's outgoing, from a contact > LAST_SPECIAL, or a system/info message
             if outgoing or msg.from_id > SpecialContactId.LAST_SPECIAL or msg.is_info:
-                logger.debug(f"custom_process_message: calling _on_new_msg or dispatching for msgid={msgid}")
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(f"custom_process_message: calling _on_new_msg or dispatching for msgid={msgid}")
                 if hasattr(bot, "_on_new_msg"):
                     bot._on_new_msg(accid, msg)
                 else:
@@ -4509,13 +4520,13 @@ def _cmpingfail_impl(bot, accid, event, cmd_name="/cmpingfail"):
     global _cmping_server_status
     if not _cmping_server_status:
         for srv in all_servers:
-            _cmping_server_status[srv] = True
+            _set_cmping_server_status(srv, True)
         for (src, dst), res in _cmping_last_results.items():
             if not res.get("success"):
                 if src in all_servers:
-                    _cmping_server_status[src] = False
+                    _set_cmping_server_status(src, False)
                 if dst in all_servers:
-                    _cmping_server_status[dst] = False
+                    _set_cmping_server_status(dst, False)
 
     unhealthy_servers = [srv for srv in all_servers if not _cmping_server_status.get(srv, True)]
 
@@ -6324,6 +6335,8 @@ def _generate_qr_bytes(link: str, fmt: str = "png", box_size: int = 6) -> tuple[
         res = (buf.getvalue(), "image/png")
 
     _qr_cache[cache_key] = res
+    while len(_qr_cache) > 200:
+        _qr_cache.pop(next(iter(_qr_cache)), None)
     return res
 
 
@@ -6492,17 +6505,17 @@ def get_landing_page_html(ingress_path: str = "") -> str:
 
     base_path = ingress_path.rstrip("/")
     if invite_link:
-        hero_btn_html = """<button class="btn btn-primary" onclick="document.getElementById('qr-modal').style.display='flex'">
+        hero_btn_html = """<button class="btn btn-primary" onclick="openQrModal()">
                 <span>📱</span> Add Bot to Delta Chat
             </button>"""
-        qr_modal_html = f"""<div id="qr-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="qr-modal-title" onclick="if(event.target === this) this.style.display='none'">
+        qr_modal_html = f"""<div id="qr-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="qr-modal-title" onclick="if(event.target === this) closeQrModal()">
         <div class="modal-content">
             <h3 id="qr-modal-title">Add Bouncer Bot</h3>
             <p style="font-size: 0.9rem; color: var(--text-muted);">Scan this QR code with your Delta Chat mobile app or click the link below.</p>
             <img src="{base_path}/qr.png" alt="Bot QR Code" />
             <div style="display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap;">
                 <a href="{deep_link}" class="btn btn-primary" style="padding: 0.5rem 1rem; font-size: 0.9rem;">Open in Delta Chat</a>
-                <button class="close-btn" onclick="document.getElementById('qr-modal').style.display='none'">Close</button>
+                <button class="close-btn" id="qr-close-btn" onclick="closeQrModal()">Close</button>
             </div>
         </div>
     </div>"""
@@ -6510,11 +6523,11 @@ def get_landing_page_html(ingress_path: str = "") -> str:
         hero_btn_html = """<button class="btn btn-primary" disabled style="opacity: 0.55; cursor: not-allowed;" title="Bot invite link not yet configured">
                 <span>📱</span> Bot Link Unavailable
             </button>"""
-        qr_modal_html = """<div id="qr-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="qr-modal-title" onclick="if(event.target === this) this.style.display='none'">
+        qr_modal_html = """<div id="qr-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="qr-modal-title" onclick="if(event.target === this) closeQrModal()">
         <div class="modal-content">
             <h3 id="qr-modal-title">Add Bouncer Bot</h3>
             <p style="font-size: 0.95rem; color: var(--text-muted); margin: 1.5rem 0;">ℹ️ Bot invite link is not configured yet. Please check back later.</p>
-            <button class="close-btn" onclick="document.getElementById('qr-modal').style.display='none'">Close</button>
+            <button class="close-btn" id="qr-close-btn" onclick="closeQrModal()">Close</button>
         </div>
     </div>"""
 
@@ -7018,10 +7031,38 @@ def get_landing_page_html(ingress_path: str = "") -> str:
         <p>Powered by <a href="https://github.com/mrgluek/deltachat_bouncer" target="_blank">Delta Chat Bouncer Bot</a> (v{VERSION}) · <a href="https://git.gluek.info/gluek/deltachat_bouncer" target="_blank">Forgejo Mirror</a></p>
     </footer>
     <script>
+    var _qrOpenerBtn = null;
+    function openQrModal() {{
+        var m = document.getElementById('qr-modal');
+        if (m) {{
+            _qrOpenerBtn = document.activeElement;
+            m.style.display = 'flex';
+            var first = m.querySelector('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])');
+            if (first) first.focus();
+        }}
+    }}
+    function closeQrModal() {{
+        var m = document.getElementById('qr-modal');
+        if (m) m.style.display = 'none';
+        if (_qrOpenerBtn) {{ _qrOpenerBtn.focus(); _qrOpenerBtn = null; }}
+    }}
     document.addEventListener('keydown', function(e) {{
+        var m = document.getElementById('qr-modal');
+        if (!m || m.style.display === 'none' || m.style.display === '') return;
         if (e.key === 'Escape') {{
-            var m = document.getElementById('qr-modal');
-            if (m) m.style.display = 'none';
+            e.preventDefault();
+            closeQrModal();
+            return;
+        }}
+        if (e.key === 'Tab') {{
+            var focusable = Array.from(m.querySelectorAll('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'));
+            if (!focusable.length) return;
+            var first = focusable[0], last = focusable[focusable.length - 1];
+            if (e.shiftKey) {{
+                if (document.activeElement === first) {{ e.preventDefault(); last.focus(); }}
+            }} else {{
+                if (document.activeElement === last) {{ e.preventDefault(); first.focus(); }}
+            }}
         }}
     }});
     </script>
@@ -7064,16 +7105,16 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
 
     if join_link:
         actions_buttons_html = f"""<a href="{join_link}" class="btn btn-primary"><span>✈️</span> Open in Delta Chat</a>
-                <button onclick="document.getElementById('qr-modal').style.display='flex'" class="btn btn-secondary"><span>📱</span> Show QR Code</button>"""
+                <button onclick="openQrModal()" class="btn btn-secondary"><span>📱</span> Show QR Code</button>"""
         qr_modal_html = f"""
-    <div id="qr-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="qr-modal-title" onclick="if(event.target === this) this.style.display='none'">
+    <div id="qr-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="qr-modal-title" onclick="if(event.target === this) closeQrModal()">
         <div class="modal-content">
             <h3 id="qr-modal-title">Scan with Delta Chat</h3>
             <p style="font-size: 0.9rem; color: var(--text-muted);">Scan this QR code with the Delta Chat camera to join <strong>{ch_name_esc}</strong>.</p>
             <img src="{qr_img_url}" alt="Channel Join QR Code" />
             <div style="display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap;">
-                <button class="close-btn" onclick="navigator.clipboard.writeText('{join_link}').then(() => alert('Link copied to clipboard!'))">Copy Link</button>
-                <button class="close-btn" onclick="document.getElementById('qr-modal').style.display='none'">Close</button>
+                <button class="close-btn" id="qr-copy-btn" onclick="copyJoinLink(this, '{join_link}')">Copy Link</button>
+                <button class="close-btn" id="qr-close-btn" onclick="closeQrModal()">Close</button>
             </div>
         </div>
     </div>"""
@@ -7660,6 +7701,40 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
     </footer>
 
     <script>
+    var _qrOpenerBtn = null;
+    function openQrModal() {{
+        var m = document.getElementById('qr-modal');
+        if (m) {{
+            _qrOpenerBtn = document.activeElement;
+            m.style.display = 'flex';
+            var first = m.querySelector('button, [href], input, [tabindex]:not([tabindex="-1"])');
+            if (first) first.focus();
+        }}
+    }}
+    function closeQrModal() {{
+        var m = document.getElementById('qr-modal');
+        if (m) m.style.display = 'none';
+        if (_qrOpenerBtn) {{ _qrOpenerBtn.focus(); _qrOpenerBtn = null; }}
+    }}
+    function copyJoinLink(btn, link) {{
+        var orig = btn.innerHTML;
+        if (navigator.clipboard && navigator.clipboard.writeText) {{
+            navigator.clipboard.writeText(link).then(function() {{
+                btn.innerHTML = '✓ Copied!';
+                btn.classList.add('copied');
+                setTimeout(function() {{ btn.innerHTML = orig; btn.classList.remove('copied'); }}, 2000);
+            }}).catch(function() {{ fallbackCopy(btn, link, orig); }});
+        }} else {{
+            fallbackCopy(btn, link, orig);
+        }}
+    }}
+    function fallbackCopy(btn, link, orig) {{
+        var ta = document.createElement('textarea');
+        ta.value = link; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        try {{ document.execCommand('copy'); btn.innerHTML = '✓ Copied!'; btn.classList.add('copied'); setTimeout(function() {{ btn.innerHTML = orig; btn.classList.remove('copied'); }}, 2000); }} catch(e) {{}}
+        document.body.removeChild(ta);
+    }}
     function copyFediHandle(btn, text) {{
         if (navigator.clipboard && navigator.clipboard.writeText) {{
             navigator.clipboard.writeText(text).then(function() {{
@@ -7694,9 +7769,22 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
         }}, 2000);
     }}
     document.addEventListener('keydown', function(e) {{
+        var m = document.getElementById('qr-modal');
+        if (!m || m.style.display === 'none' || m.style.display === '') return;
         if (e.key === 'Escape') {{
-            var m = document.getElementById('qr-modal');
-            if (m) m.style.display = 'none';
+            e.preventDefault();
+            closeQrModal();
+            return;
+        }}
+        if (e.key === 'Tab') {{
+            var focusable = Array.from(m.querySelectorAll('button, [href], input, [tabindex]:not([tabindex="-1"])'));
+            if (!focusable.length) return;
+            var first = focusable[0], last = focusable[focusable.length - 1];
+            if (e.shiftKey) {{
+                if (document.activeElement === first) {{ e.preventDefault(); last.focus(); }}
+            }} else {{
+                if (document.activeElement === last) {{ e.preventDefault(); first.focus(); }}
+            }}
         }}
     }});
     </script>
@@ -7963,7 +8051,6 @@ def get_channel_rss_xml(channel: dict, posts: list[dict], base_url: str) -> str:
     <link>{channel_url}</link>
     <description><![CDATA[{safe_ch_desc}]]></description>
     <atom:link href="{rss_url}" rel="self" type="application/rss+xml" />
-    <language>en</language>
     <lastBuildDate>{last_build}</lastBuildDate>
 {items_str}
   </channel>
@@ -7972,9 +8059,68 @@ def get_channel_rss_xml(channel: dict, posts: list[dict], base_url: str) -> str:
 
 # ── Web Request Handlers ──
 
+_rate_limit_lock = threading.Lock()
+_rate_limits: dict[str, list[float]] = {}  # key -> [timestamps]
+_TRUSTED_PROXIES = {"127.0.0.1", "::1", "localhost", "testclient"}
+
+def _get_client_ip(request) -> str:
+    """Extract client IP, trusting X-Forwarded-For only from trusted local reverse proxies."""
+    peer_ip = getattr(request, "remote", None)
+    if isinstance(peer_ip, str):
+        peer_ip = peer_ip.strip()
+    else:
+        peer_ip = "unknown"
+
+    # Only trust X-Forwarded-For if incoming peer is a trusted local reverse proxy (Caddy / Nginx)
+    # or if peer_ip is unknown (e.g. in test mock environments)
+    if peer_ip in _TRUSTED_PROXIES or peer_ip.startswith("127.") or peer_ip == "unknown":
+        forwarded = request.headers.get("X-Forwarded-For") if hasattr(request, "headers") else None
+        if forwarded:
+            client_ip = forwarded.split(",")[0].strip()
+            if client_ip:
+                return client_ip
+    return peer_ip
+
+def check_rate_limit(request, bucket: str, max_requests: int = 60, window_seconds: int = 60) -> bool:
+    """In-memory sliding window rate limiter per client IP and bucket.
+    Returns True if allowed, False if limit exceeded.
+    """
+    client_ip = _get_client_ip(request)
+    key = f"{bucket}:{client_ip}"
+    now = time.time()
+    cutoff = now - window_seconds
+
+    with _rate_limit_lock:
+        timestamps = _rate_limits.get(key, [])
+        timestamps = [ts for ts in timestamps if ts > cutoff]
+        if len(timestamps) >= max_requests:
+            _rate_limits[key] = timestamps
+            return False
+        timestamps.append(now)
+        _rate_limits[key] = timestamps
+
+        if len(_rate_limits) > 5000:
+            keys_to_del = [k for k, v in _rate_limits.items() if not v or v[-1] <= cutoff]
+            for k in keys_to_del:
+                del _rate_limits[k]
+
+    return True
+
+def rate_limited(bucket: str, max_requests: int = 60, window_seconds: int = 60):
+    """Decorator to apply sliding window rate limiting to an aiohttp handler."""
+    def decorator(handler):
+        @functools.wraps(handler)
+        async def wrapped(request, *args, **kwargs):
+            if not check_rate_limit(request, bucket, max_requests=max_requests, window_seconds=window_seconds):
+                return web.Response(status=429, text="Too Many Requests", headers={"Retry-After": "60"})
+            return await handler(request, *args, **kwargs)
+        return wrapped
+    return decorator
+
 _ALLOWED_ICON_FILENAMES = {"icon.png", "favicon.ico"}
 _ALLOWED_BG_FILENAMES = {"background.jpg"}
 
+@rate_limited("assets", max_requests=120, window_seconds=60)
 async def handle_icon(request):
     raw_filename = os.path.basename(getattr(request, "path", "")) if isinstance(getattr(request, "path", None), str) else "icon.png"
     if raw_filename not in _ALLOWED_ICON_FILENAMES:
@@ -7993,6 +8139,7 @@ async def handle_icon(request):
     return web.Response(status=404)
 
 
+@rate_limited("assets", max_requests=120, window_seconds=60)
 async def handle_background(request):
     raw_filename = os.path.basename(getattr(request, "path", "")) if isinstance(getattr(request, "path", None), str) else "background.jpg"
     if raw_filename not in _ALLOWED_BG_FILENAMES:
@@ -8076,12 +8223,14 @@ async def handle_health(request):
     return web.json_response({"status": "ok", "service": "bouncer_bot", "version": VERSION})
 
 
+@rate_limited("index", max_requests=60, window_seconds=60)
 async def handle_index(request):
     ingress_path = request.headers.get("X-Ingress-Path", "")
     content = get_landing_page_html(ingress_path=ingress_path)
     return web.Response(text=content, content_type="text/html", headers={"Cache-Control": "public, max-age=300"})
 
 
+@rate_limited("qr", max_requests=60, window_seconds=60)
 async def handle_qr_svg(request):
     link = get_bot_invite_link()
     if not link:
@@ -8095,6 +8244,7 @@ async def handle_qr_svg(request):
         return web.Response(status=500)
 
 
+@rate_limited("qr", max_requests=60, window_seconds=60)
 async def handle_qr_png(request):
     link = get_bot_invite_link()
     if not link:
@@ -8106,39 +8256,6 @@ async def handle_qr_png(request):
     except Exception as e:
         logger.error(f"Error generating qr.png: {e}")
         return web.Response(status=500)
-
-_rate_limit_lock = threading.Lock()
-_rate_limits: dict[str, list[float]] = {}  # key -> [timestamps]
-
-def check_rate_limit(request, bucket: str, max_requests: int = 60, window_seconds: int = 60) -> bool:
-    """In-memory sliding window rate limiter per client IP and bucket.
-    Returns True if allowed, False if limit exceeded.
-    """
-    forwarded = request.headers.get("X-Forwarded-For") if hasattr(request, "headers") else None
-    if forwarded:
-        client_ip = forwarded.split(",")[0].strip()
-    else:
-        client_ip = getattr(request, "remote", None) or "unknown"
-
-    key = f"{bucket}:{client_ip}"
-    now = time.time()
-    cutoff = now - window_seconds
-
-    with _rate_limit_lock:
-        timestamps = _rate_limits.get(key, [])
-        timestamps = [ts for ts in timestamps if ts > cutoff]
-        if len(timestamps) >= max_requests:
-            _rate_limits[key] = timestamps
-            return False
-        timestamps.append(now)
-        _rate_limits[key] = timestamps
-
-        if len(_rate_limits) > 5000:
-            keys_to_del = [k for k, v in _rate_limits.items() if not v or v[-1] <= cutoff]
-            for k in keys_to_del:
-                del _rate_limits[k]
-
-    return True
 
 
 SAFE_HOST_REGEX = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9.\-]*[a-zA-Z0-9])?(:\d{1,5})?$')
@@ -8164,10 +8281,8 @@ def _get_base_url(request) -> str:
     return base_url.strip().rstrip("/")
 
 
+@rate_limited("channel_preview", max_requests=120, window_seconds=60)
 async def handle_channel_preview(request):
-    if not check_rate_limit(request, "channel_preview", max_requests=120, window_seconds=60):
-        return web.Response(status=429, text="Too Many Requests", headers={"Retry-After": "60"})
-
     # ── ActivityPub Content Negotiation ──
     accept = request.headers.get("Accept", "")
     if "application/activity+json" in accept or 'profile="https://www.w3.org/ns/activitystreams"' in accept:
@@ -8205,6 +8320,7 @@ async def handle_channel_preview(request):
     return web.Response(text=html_content, content_type="text/html", headers={"ETag": etag, "Cache-Control": "public, max-age=60"})
 
 
+@rate_limited("qr", max_requests=60, window_seconds=60)
 async def handle_channel_qr_png(request):
     token = request.match_info.get('token')
     channel = database.get_catalog_channel_by_token(token)
@@ -8230,6 +8346,7 @@ async def handle_channel_qr_png(request):
         return web.Response(status=500)
 
 
+@rate_limited("qr", max_requests=60, window_seconds=60)
 async def handle_channel_qr_svg(request):
     token = request.match_info.get('token')
     channel = database.get_catalog_channel_by_token(token)
@@ -8255,6 +8372,7 @@ async def handle_channel_qr_svg(request):
         return web.Response(status=500)
 
 
+@rate_limited("assets", max_requests=120, window_seconds=60)
 async def handle_channel_avatar(request):
     token = request.match_info.get('token')
     channel = database.get_catalog_channel_by_token(token)
@@ -8287,6 +8405,7 @@ async def handle_channel_avatar(request):
     return web.Response(status=404)
 
 
+@rate_limited("rss", max_requests=60, window_seconds=60)
 async def handle_channel_rss(request):
     token = request.match_info.get('token')
     base_url = _get_base_url(request)
@@ -8319,6 +8438,7 @@ async def handle_channel_rss(request):
         return web.Response(status=500, text="Internal Server Error generating RSS feed")
 
 
+@rate_limited("rss", max_requests=60, window_seconds=60)
 async def handle_channel_rss_redirect(request):
     token = request.match_info.get('token')
     ingress_path = request.headers.get("X-Ingress-Path", "")
@@ -8326,10 +8446,8 @@ async def handle_channel_rss_redirect(request):
     raise web.HTTPFound(f"{base_path}/c/{token}/rss.xml")
 
 
+@rate_limited("media", max_requests=120, window_seconds=60)
 async def handle_media_file(request):
-    if not check_rate_limit(request, "media", max_requests=120, window_seconds=60):
-        return web.Response(status=429, text="Too Many Requests", headers={"Retry-After": "60"})
-
     token = request.match_info.get('token')
     msg_id = request.match_info.get('msg_id')
     filename = request.match_info.get('filename')
@@ -8370,6 +8488,7 @@ def _get_ap_backfill_semaphore() -> asyncio.Semaphore:
     return _ap_backfill_semaphore
 
 
+@rate_limited("ap_read", max_requests=120, window_seconds=60)
 async def handle_ap_actor(request):
     """GET /c/{token} with Accept: application/activity+json -> Actor JSON."""
     token = request.match_info.get('token')
@@ -8425,11 +8544,9 @@ def _extract_channel_token_from_activity(activity: dict) -> str | None:
     return None
 
 
+@rate_limited("inbox", max_requests=60, window_seconds=60)
 async def handle_ap_inbox(request):
     """POST /c/{token}/inbox or POST /inbox (sharedInbox) — receive Follow/Undo/Delete activities."""
-    if not check_rate_limit(request, "inbox", max_requests=60, window_seconds=60):
-        return web.Response(status=429, text="Too Many Requests", headers={"Retry-After": "60"})
-
     body = await request.read()
     if not body:
         return web.Response(status=400, text="Empty request body")
@@ -8480,7 +8597,7 @@ async def handle_ap_inbox(request):
             return web.Response(status=401, text="KeyId and actor origin mismatch")
 
     # Fetch remote public key with Authorized Fetch support
-    pub_pem, _ = await activitypub.resolve_public_key(key_id, sign_as_token=token, base_url=base_url)
+    pub_pem, key_doc = await activitypub.resolve_public_key(key_id, sign_as_token=token, base_url=base_url)
     if not pub_pem:
         fetch_status = activitypub.get_last_fetch_status(key_id)
         if act_type == "Delete" and fetch_status in (403, 404, 410):
@@ -8500,6 +8617,15 @@ async def handle_ap_inbox(request):
 
         logger.warning(f"Could not resolve remote actor public key for {key_id}")
         return web.Response(status=401, text="Could not resolve remote actor public key")
+
+    # Verify key ownership by actor (prevent cross-actor signature forgery on same host)
+    if activity_actor and not activitypub.is_key_owned_by_actor(key_id, key_doc, activity_actor):
+        logger.warning(
+            f"AP signature key ownership mismatch: key_id={key_id}, "
+            f"key_owner={key_doc.get('owner') if isinstance(key_doc, dict) else None}, "
+            f"actor={activity_actor}"
+        )
+        return web.Response(status=401, text="Key owner does not match activity actor")
 
     req_path = getattr(request, 'raw_path', None) or getattr(request, 'path_qs', None) or request.path
     target_uri = f"{base_url.rstrip('/')}{req_path}" if base_url else str(request.url)
@@ -8594,6 +8720,7 @@ async def handle_ap_inbox(request):
     return web.Response(status=202, text="Accepted")
 
 
+@rate_limited("ap_read", max_requests=120, window_seconds=60)
 async def handle_ap_outbox(request):
     """GET /c/{token}/outbox -> OrderedCollection or OrderedCollectionPage."""
     token = request.match_info.get('token')
@@ -8641,6 +8768,7 @@ async def handle_ap_outbox(request):
     )
 
 
+@rate_limited("ap_read", max_requests=120, window_seconds=60)
 async def handle_ap_followers(request):
     """GET /c/{token}/followers -> OrderedCollection (count only)."""
     token = request.match_info.get('token')
@@ -8661,6 +8789,7 @@ async def handle_ap_followers(request):
     )
 
 
+@rate_limited("ap_read", max_requests=120, window_seconds=60)
 async def handle_ap_following(request):
     """GET /c/{token}/following -> OrderedCollection (empty, count 0)."""
     token = request.match_info.get('token')
@@ -8680,6 +8809,7 @@ async def handle_ap_following(request):
     )
 
 
+@rate_limited("ap_read", max_requests=120, window_seconds=60)
 async def handle_ap_post(request):
     """GET /c/{token}/posts/{msg_id} -> Note object."""
     token = request.match_info.get('token')
@@ -8713,6 +8843,7 @@ async def handle_ap_post(request):
     )
 
 
+@rate_limited("ap_meta", max_requests=120, window_seconds=60)
 async def handle_webfinger(request):
     """GET /.well-known/webfinger?resource=acct:{token}@{domain} -> JRD JSON."""
     resource = request.query.get("resource", "").strip()
@@ -8753,6 +8884,7 @@ async def handle_webfinger(request):
     )
 
 
+@rate_limited("ap_meta", max_requests=120, window_seconds=60)
 async def handle_nodeinfo_discovery(request):
     """GET /.well-known/nodeinfo -> nodeinfo discovery document."""
     base_url = _get_base_url(request)
@@ -8767,6 +8899,7 @@ async def handle_nodeinfo_discovery(request):
     return web.json_response(data)
 
 
+@rate_limited("ap_meta", max_requests=120, window_seconds=60)
 async def handle_nodeinfo(request):
     """GET /nodeinfo/2.0 -> NodeInfo 2.0 metadata."""
     channels = database.get_all_catalog_channels(include_deleted=False)
@@ -8798,6 +8931,7 @@ async def handle_nodeinfo(request):
     )
 
 
+@rate_limited("ap_meta", max_requests=120, window_seconds=60)
 async def handle_api_v1_instance(request):
     """GET /api/v1/instance -> Mastodon-compatible v1 instance metadata."""
     base_url = _get_base_url(request)

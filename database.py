@@ -1264,11 +1264,14 @@ def save_cmping_result(src: str, dst: str, success: bool, error: str, avg: float
         )
 
 
-def get_all_cmping_results() -> dict:
-    """Load all cmping results from the database."""
+def get_all_cmping_results(limit: int = 500) -> dict:
+    """Load latest cmping results from the database."""
     with _reader_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT src, dst, success, error, avg, checked_at FROM cmping_results")
+        cursor.execute(
+            "SELECT src, dst, success, error, avg, checked_at FROM cmping_results ORDER BY checked_at DESC LIMIT ?",
+            (limit,)
+        )
         rows = cursor.fetchall()
 
         results = {}
@@ -1415,13 +1418,13 @@ def reopen_cmping_incident(incident_id: int):
         )
 
 
-def get_cmping_incident_downtime_events(incident_id: int) -> list[dict]:
+def get_cmping_incident_downtime_events(incident_id: int, limit: int = 500) -> list[dict]:
     with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM cmping_downtime_events WHERE incident_id = ? ORDER BY went_down_at ASC",
-            (incident_id,)
+            "SELECT * FROM cmping_downtime_events WHERE incident_id = ? ORDER BY went_down_at ASC LIMIT ?",
+            (incident_id, limit)
         )
         rows = cursor.fetchall()
         return [dict(r) for r in rows]

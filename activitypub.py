@@ -12,6 +12,7 @@ import re
 import socket
 import threading
 import time
+import typing
 import uuid
 from datetime import datetime, timezone
 from email.utils import formatdate, parsedate_to_datetime
@@ -31,7 +32,7 @@ except ImportError:
 import database
 
 logger = logging.getLogger("bouncer_bot.activitypub")
-VERSION = "2.13.1"
+VERSION = "2.13.2"
 
 # ==============================================================================
 # 1. RSA Key Management
@@ -983,7 +984,7 @@ async def resolve_public_key(key_id: str, sign_as_token: str | None = None,
     try:
         cached_pk = database.get_follower_public_key(actor_id)
         if cached_pk:
-            return cached_pk, {"id": actor_id, "publicKey": {"id": key_id, "publicKeyPem": cached_pk}}
+            return cached_pk, {"id": actor_id, "owner": actor_id, "publicKey": {"id": key_id, "publicKeyPem": cached_pk, "owner": actor_id}}
     except Exception as e:
         logger.debug(f"DB follower public key lookup error for {actor_id}: {e}")
 
@@ -1028,3 +1029,70 @@ async def resolve_public_key(key_id: str, sign_as_token: str | None = None,
                 return pk2["publicKeyPem"], key_data
 
     return None, data
+
+
+def is_key_owned_by_actor(key_id: str | None, key_doc: typing.Any, actor: str | None) -> bool:
+    """Verify that a signing public key belongs to the claiming actor.
+    Prevents cross-account signature forgery within the same domain.
+    """
+    if not actor:
+        return False
+    actor_norm = actor.strip().rstrip("/")
+    if not actor_norm:
+        return False
+
+    # 1. If key_doc provides an explicit owner, verify it
+    if isinstance(key_doc, dict):
+        # Case A: Standalone key document {"id": "...", "owner": "...", "publicKeyPem": "..."}
+        owner = key_doc.get("owner")
+        if isinstance(owner, str):
+            if owner.strip().rstrip("/") != actor_norm:
+                return False
+            return True
+
+        # Case B: Embedded publicKey {"id": "...", "publicKey": {"owner": "...", ...}}
+        pk = key_doc.get("publicKey")
+        if isinstance(pk, dict):
+            pk_owner = pk.get("owner")
+            if isinstance(pk_owner, str):
+                if pk_owner.strip().rstrip("/") != actor_norm:
+                    return False
+                return True
+        elif isinstance(pk, list):
+            for item in pk:
+                if isinstance(item, dict) and (item.get("id") == key_id or len(pk) == 1):
+                    pk_owner = item.get("owner")
+                    if isinstance(pk_owner, str):
+                        if pk_owner.strip().rstrip("/") != actor_norm:
+                            return False
+                        return True
+
+        # Case C: Actor document with canonical 'id' and aliases
+        doc_id = key_doc.get("id")
+        if isinstance(doc_id, str):
+            doc_id_norm = doc_id.strip().rstrip("/")
+            if doc_id_norm == actor_norm:
+                return True
+            url_val = key_doc.get("url")
+            if isinstance(url_val, str) and url_val.strip().rstrip("/") == actor_norm:
+                return True
+            aliases = key_doc.get("alsoKnownAs") or key_doc.get("aliases") or []
+            if isinstance(aliases, list) and any(isinstance(a, str) and a.strip().rstrip("/") == actor_norm for a in aliases):
+                return True
+            # If doc_id is an Actor object of standard type and does NOT match actor, it's a mismatch
+            if key_doc.get("type") in ("Person", "Service", "Application", "Group", "Organization"):
+                return False
+
+    # 2. Check canonical key_id URI: actor URI + fragment (e.g. https://domain/users/alice#main-key)
+    if key_id and "#" in key_id:
+        key_actor = key_id.split("#")[0].strip().rstrip("/")
+        if key_actor == actor_norm:
+            return True
+
+    # 3. Fallback for dict with matching doc_id
+    if isinstance(key_doc, dict):
+        doc_id = key_doc.get("id")
+        if isinstance(doc_id, str) and doc_id.strip().rstrip("/") == actor_norm:
+            return True
+
+    return False
