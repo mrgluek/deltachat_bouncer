@@ -685,11 +685,11 @@ def is_fingerprint_autokick_ignored(fingerprint: str) -> bool:
         row = cursor.fetchone()
         return bool(row)
 
-def get_all_autokick_ignored_fingerprints() -> list[tuple[str, str, float]]:
+def get_all_autokick_ignored_fingerprints(limit: int = 1000) -> list[tuple[str, str, float]]:
     """Return all ignored fingerprints as [(fingerprint, note, added_at), ...]."""
     with _reader_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT fingerprint, note, added_at FROM autokick_ignored_fingerprints ORDER BY added_at ASC")
+        cursor.execute("SELECT fingerprint, note, added_at FROM autokick_ignored_fingerprints ORDER BY added_at ASC LIMIT ?", (limit,))
         rows = cursor.fetchall()
         return [(r[0], r[1] or "", float(r[2])) for r in rows]
 
@@ -740,7 +740,7 @@ def ensure_contacts_first_seen_batch(contact_ids: list[int], timestamp: float):
 
 def increment_transport_sent(addr: str):
     """Increment the sent counter for a transport address (buffered in memory)."""
-    if not addr:
+    if not addr or not isinstance(addr, str):
         return
     now = int(time.time())
     should_flush = False
@@ -758,7 +758,7 @@ def increment_transport_sent(addr: str):
 
 def increment_transport_received(addr: str):
     """Increment the received counter for a transport address (buffered in memory)."""
-    if not addr:
+    if not addr or not isinstance(addr, str):
         return
     now = int(time.time())
     should_flush = False
@@ -803,13 +803,13 @@ def flush_transport_stats():
             ''', (addr, sent, recv, last_s, last_r))
 
 
-def get_all_transport_stats() -> list[dict]:
+def get_all_transport_stats(limit: int = 100) -> list[dict]:
     """Get statistics for all tracked transports (flushes buffer first)."""
     flush_transport_stats()
     with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM transport_stats ORDER BY msgs_sent + msgs_received DESC")
+        cursor.execute("SELECT * FROM transport_stats ORDER BY msgs_sent + msgs_received DESC LIMIT ?", (limit,))
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
 
@@ -856,11 +856,11 @@ def remove_catalog_chat(chat_id: int):
         cursor.execute("DELETE FROM catalog_chats WHERE chat_id = ?", (chat_id,))
 
 
-def get_all_catalog_chats() -> list[dict]:
+def get_all_catalog_chats(limit: int = 500) -> list[dict]:
     with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM catalog_chats ORDER BY id ASC")
+        cursor.execute("SELECT * FROM catalog_chats ORDER BY id ASC LIMIT ?", (limit,))
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
 
@@ -1035,20 +1035,20 @@ def hard_remove_catalog_channel(chat_id: int) -> bool:
         return cursor.rowcount > 0
 
 
-def get_all_catalog_channels(include_deleted: bool = False, public_only: bool = False) -> list[dict]:
+def get_all_catalog_channels(include_deleted: bool = False, public_only: bool = False, limit: int = 500) -> list[dict]:
     with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         if include_deleted:
             if public_only:
-                cursor.execute("SELECT * FROM catalog_channels WHERE is_public = 1 ORDER BY id ASC")
+                cursor.execute("SELECT * FROM catalog_channels WHERE is_public = 1 ORDER BY id ASC LIMIT ?", (limit,))
             else:
-                cursor.execute("SELECT * FROM catalog_channels ORDER BY id ASC")
+                cursor.execute("SELECT * FROM catalog_channels ORDER BY id ASC LIMIT ?", (limit,))
         else:
             if public_only:
-                cursor.execute("SELECT * FROM catalog_channels WHERE is_deleted = 0 AND is_public = 1 ORDER BY id ASC")
+                cursor.execute("SELECT * FROM catalog_channels WHERE is_deleted = 0 AND is_public = 1 ORDER BY id ASC LIMIT ?", (limit,))
             else:
-                cursor.execute("SELECT * FROM catalog_channels WHERE is_deleted = 0 ORDER BY id ASC")
+                cursor.execute("SELECT * FROM catalog_channels WHERE is_deleted = 0 ORDER BY id ASC LIMIT ?", (limit,))
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
 
@@ -1355,11 +1355,11 @@ def get_active_cmping_incident() -> dict | None:
         row = cursor.fetchone()
         return dict(row) if row else None
 
-def get_all_active_cmping_incidents() -> list[dict]:
+def get_all_active_cmping_incidents(limit: int = 100) -> list[dict]:
     with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM cmping_incidents WHERE status = 'ongoing' ORDER BY id ASC")
+        cursor.execute("SELECT * FROM cmping_incidents WHERE status = 'ongoing' ORDER BY id ASC LIMIT ?", (limit,))
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
 
@@ -1719,26 +1719,26 @@ def remove_ap_followers_by_actor(follower_actor_id: str) -> int:
         return cursor.rowcount
 
 
-def get_ap_followers(actor_token: str) -> list[dict]:
+def get_ap_followers(actor_token: str, limit: int = 5000) -> list[dict]:
     """Get all followers for a channel."""
     with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM ap_followers WHERE actor_token = ? ORDER BY created_at ASC",
-            (actor_token,)
+            "SELECT * FROM ap_followers WHERE actor_token = ? ORDER BY created_at ASC LIMIT ?",
+            (actor_token, limit)
         )
         return [dict(r) for r in cursor.fetchall()]
 
 
-def get_ap_follower_inboxes(actor_token: str) -> list[dict]:
+def get_ap_follower_inboxes(actor_token: str, limit: int = 5000) -> list[dict]:
     """Get deduplicated inbox URLs for delivery. Returns list of {follower_inbox, follower_shared_inbox}."""
     with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT DISTINCT follower_inbox, follower_shared_inbox FROM ap_followers WHERE actor_token = ?",
-            (actor_token,)
+            "SELECT DISTINCT follower_inbox, follower_shared_inbox FROM ap_followers WHERE actor_token = ? LIMIT ?",
+            (actor_token, limit)
         )
         return [dict(r) for r in cursor.fetchall()]
 

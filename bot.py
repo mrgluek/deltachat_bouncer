@@ -37,7 +37,7 @@ import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.12.9"
+VERSION = "2.13.0"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -89,7 +89,10 @@ INACTIVITY_DAYS_THRESHOLD = 21
 INACTIVITY_SECONDS_THRESHOLD = INACTIVITY_DAYS_THRESHOLD * 24 * 3600
 
 # Anti-spam: {chat_id: timestamp}
-_chat_anti_spam: dict[int, float] = {}
+_chat_bounce_anti_spam: dict[int, float] = {}
+_chat_top_anti_spam: dict[int, float] = {}
+_chat_invite_anti_spam: dict[int, float] = {}
+_chat_anti_spam = _chat_bounce_anti_spam  # alias for backwards compatibility
 _chat_relays_anti_spam: dict[int, float] = {}
 _chat_search_anti_spam: dict[int, float] = {}
 _chat_cmping_anti_spam: dict[int, float] = {}
@@ -188,7 +191,7 @@ def _prune_anti_spam_dicts():
     """Prune anti-spam entries older than 3600 seconds to prevent memory growth."""
     now = time.time()
     cutoff = now - 3600
-    for spam_dict in (_chat_anti_spam, _chat_relays_anti_spam, _chat_search_anti_spam, _chat_cmping_anti_spam, _chat_slap_anti_spam):
+    for spam_dict in (_chat_bounce_anti_spam, _chat_top_anti_spam, _chat_invite_anti_spam, _chat_relays_anti_spam, _chat_search_anti_spam, _chat_cmping_anti_spam, _chat_slap_anti_spam):
         expired = [cid for cid, ts in list(spam_dict.items()) if ts < cutoff]
         for cid in expired:
             spam_dict.pop(cid, None)
@@ -213,20 +216,23 @@ REGULAR_MAIL_DOMAINS = {
     "rambler.ru"
 }
 
-# Age indicator: each circle = 1 week of bot knowing the user
+# Age indicator: each circle/square = 1 week of bot knowing the user
 _AGE_CIRCLES = ["🔴", "🟠", "🟡", "🟢", "🔵", "🟣", "🟤", "⚫", "⚪"]
+_AGE_SQUARES = ["🟥", "🟧", "🟨", "🟩", "🟦", "🟪", "🟫", "⬛", "⬜"]
 
-def _get_contact_age_indicator(contact_id: int) -> str:
-    """Return a colored circle emoji based on how long the bot has known this contact.
-    🔴 = <1 week, 🟠 = 1-2 weeks, ... ⚪ = 8+ weeks."""
+def _get_contact_age_indicator(contact_id: int, is_multi_chat: bool = False) -> str:
+    """Return a colored circle emoji (or square if member of multiple community chats)
+    based on how long the bot has known this contact.
+    🔴/🟥 = <1 week, 🟠/🟧 = 1-2 weeks, ... ⚪/⬜ = 8+ weeks."""
     now = time.time()
     first_seen = database.get_contact_first_seen(contact_id)
     if first_seen is None:
         database.ensure_contact_first_seen(contact_id, now)
         first_seen = now
     weeks = int((now - first_seen) / (7 * 24 * 3600))
-    idx = min(weeks, len(_AGE_CIRCLES) - 1)
-    return _AGE_CIRCLES[idx]
+    palette = _AGE_SQUARES if is_multi_chat else _AGE_CIRCLES
+    idx = min(weeks, len(palette) - 1)
+    return palette[idx]
 
 # ── Admin helpers ──
 
@@ -264,7 +270,8 @@ def _get_contact_fingerprint(bot, accid, contact_id, contact=None):
                     continue
 
         if self_fps:
-            logger.debug(f"Detected bot's own fingerprints from enc_info: {[f[-8:] for f in self_fps]}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"Detected bot's own fingerprints from enc_info: {[f[-8:] for f in self_fps]}")
     except Exception as e:
         logger.error(f"Error detecting self-fingerprint: {e}")
 
@@ -299,14 +306,14 @@ def _get_contact_fingerprint(bot, accid, contact_id, contact=None):
             continue
     return None
 
-def _is_dc_admin(bot, accid, contact_id):
+def _is_dc_admin(bot, accid, contact_id, contact=None):
     """Check if the given contact is the bot administrator (by email or fingerprint)."""
     try:
-        contact = None
-        try:
-            contact = bot.rpc.get_contact(accid, contact_id)
-        except Exception:
-            pass
+        if not contact:
+            try:
+                contact = bot.rpc.get_contact(accid, contact_id)
+            except Exception:
+                pass
         
         if not contact:
             return False
@@ -319,18 +326,21 @@ def _is_dc_admin(bot, accid, contact_id):
         admin_fp = database.get_admin_fingerprint()
         if admin_fp:
             c_fp = _get_contact_fingerprint(bot, accid, contact_id, contact=contact)
-            logger.debug(f"Admin check (FP) for {contact_id}: stored={admin_fp}, contact={c_fp}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"Admin check (FP) for {contact_id}: stored={admin_fp}, contact={c_fp}")
             if c_fp:
                 if admin_fp.upper() in c_fp.upper().split(','):
                     return True
             
-            logger.debug(f"Admin check: Fingerprint mismatch or missing for {contact_id}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"Admin check: Fingerprint mismatch or missing for {contact_id}")
             return False
         
         # 2. Check email
         sender_email = contact.address
         admin_email = database.get_config("admin_dc_email")
-        logger.debug(f"Admin check (Email) for {contact_id}: stored={admin_email}, contact={sender_email}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Admin check (Email) for {contact_id}: stored={admin_email}, contact={sender_email}")
         if admin_email and sender_email and admin_email.lower().strip() == sender_email.lower().strip():
             return True
             
@@ -350,6 +360,30 @@ def _is_contact_autokick_ignored(bot, accid, contact_id, contact=None) -> bool:
     except Exception as e:
         logger.error(f"Error checking autokick ignore for contact {contact_id}: {e}")
     return False
+
+def _get_user_badges(bot, accid, contact_id: int, contact=None) -> str:
+    """Return badges for special user roles/statuses:
+    👑 = bot admin
+    ⭐ = autokick ignored
+    💤 = away
+    """
+    badges = []
+    try:
+        if _is_dc_admin(bot, accid, contact_id, contact=contact):
+            badges.append("👑")
+    except Exception:
+        pass
+    try:
+        if _is_contact_autokick_ignored(bot, accid, contact_id, contact=contact):
+            badges.append("⭐")
+    except Exception:
+        pass
+    try:
+        if database.get_away_status(contact_id):
+            badges.append("💤")
+    except Exception:
+        pass
+    return " ".join(badges)
 
 def _get_chat_autokick_warn_threshold(autokick_days: int) -> int:
     """Calculate the inactivity threshold in days when warnings start.
@@ -371,7 +405,7 @@ def _send(bot, accid, chat_id, text, reply_to_id=None):
         # Track success
         try:
             addr = bot.rpc.get_config(accid, "configured_addr") or bot.rpc.get_config(accid, "addr") or "unknown"
-            if addr != "unknown":
+            if addr and isinstance(addr, str) and addr != "unknown":
                 database.increment_transport_sent(addr)
         except Exception:
             pass
@@ -1070,6 +1104,10 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
         ]:
             key = (src_d, dst_d)
             _cmping_last_results[key] = result
+            if len(_cmping_last_results) > 500:
+                oldest_keys = sorted(_cmping_last_results.keys(), key=lambda k: _cmping_last_results[k].get("checked_at", 0))[:50]
+                for ok in oldest_keys:
+                    _cmping_last_results.pop(ok, None)
             database.save_cmping_result(
                 src=src_d,
                 dst=dst_d,
@@ -1452,6 +1490,7 @@ def _setup_resilient_mode(bot):
                 bot.logger.info(f"Resilient send bg: waiting for initial delivery of msg {m_id} on {init_addr}...")
                 start_time = time.time()
                 delivered = False
+                poll_delay = 0.2
                 while time.time() - start_time < 10:
                     try:
                         msg_snapshot = bot.rpc.get_message(account_id, m_id)
@@ -1465,7 +1504,8 @@ def _setup_resilient_mode(bot):
                             break
                     except Exception as poll_err:
                         bot.logger.debug(f"Resilient send bg initial poll error: {poll_err}")
-                    time.sleep(0.5)
+                    time.sleep(poll_delay)
+                    poll_delay = min(1.0, poll_delay * 1.5)
 
                 if not delivered:
                     bot.logger.warning(f"Resilient send bg: initial msg {m_id} did not deliver on {init_addr} within timeout.")
@@ -1491,6 +1531,7 @@ def _setup_resilient_mode(bot):
                         # Wait up to 10 seconds for the resent message to be delivered/failed
                         start_time = time.time()
                         delivered = False
+                        poll_delay = 0.2
                         while time.time() - start_time < 10:
                             try:
                                 msg_snapshot = bot.rpc.get_message(account_id, m_id)
@@ -1504,7 +1545,8 @@ def _setup_resilient_mode(bot):
                                     break
                             except Exception as poll_err:
                                 bot.logger.debug(f"Resilient send bg poll error: {poll_err}")
-                            time.sleep(0.5)
+                            time.sleep(poll_delay)
+                            poll_delay = min(1.0, poll_delay * 1.5)
 
                         if not delivered:
                             bot.logger.warning(f"Resilient send bg: msg {m_id} did not deliver on {t_addr} within timeout.")
@@ -2042,7 +2084,7 @@ def bounce_command(bot, accid, event, skip_cooldown: bool = False):
     now = time.time()
     
     if not is_admin and not skip_cooldown:
-        last_bounce = _chat_anti_spam.get(msg.chat_id, 0)
+        last_bounce = _chat_bounce_anti_spam.get(msg.chat_id, 0)
         diff = now - last_bounce
         if diff < BOUNCE_COOLDOWN_SECONDS:
             remaining_sec = max(1, int(BOUNCE_COOLDOWN_SECONDS - diff))
@@ -2103,7 +2145,7 @@ def bounce_command(bot, accid, event, skip_cooldown: bool = False):
             return
 
         # Update timestamp for cooldown since this was a successful check
-        _chat_anti_spam[msg.chat_id] = now
+        _chat_bounce_anti_spam[msg.chat_id] = now
 
         report_lines = []
         for contact in matched_contacts:
@@ -2114,9 +2156,11 @@ def bounce_command(bot, accid, event, skip_cooldown: bool = False):
             # Ensure contact first-seen tracking is updated
             database.ensure_contact_first_seen(contact.id, now)
             age = _get_contact_age_indicator(contact.id)
+            badges = _get_user_badges(bot, accid, contact.id, contact=contact)
+            badge_str = f" {badges}" if badges else ""
             
             if last_seen == 0:
-                report_lines.append(f"• /contact{contact.id} {age} **{name}** ({address}) — [never seen]")
+                report_lines.append(f"• /contact{contact.id} {age} **{name}**{badge_str} ({address}) — [never seen]")
             else:
                 date_str = datetime.fromtimestamp(last_seen).strftime("%-d %b %Y")
                 days_ago = int((now - last_seen) / (24 * 3600))
@@ -2126,7 +2170,7 @@ def bounce_command(bot, accid, event, skip_cooldown: bool = False):
                     seen_str = "yesterday"
                 else:
                     seen_str = f"{days_ago}d ago"
-                report_lines.append(f"• /contact{contact.id} {age} **{name}** ({address}) — last seen {date_str} ({seen_str})")
+                report_lines.append(f"• /contact{contact.id} {age} **{name}**{badge_str} ({address}) — last seen {date_str} ({seen_str})")
 
         if len(matched_contacts) > 1:
             report = f"🔍 **Activity Check Matches ({len(matched_contacts)}):**\n\n" + "\n".join(report_lines)
@@ -2137,7 +2181,7 @@ def bounce_command(bot, accid, event, skip_cooldown: bool = False):
         return
 
     # Update timestamp
-    _chat_anti_spam[msg.chat_id] = now
+    _chat_bounce_anti_spam[msg.chat_id] = now
 
     autokick_days = database.get_chat_autokick(msg.chat_id)
     if autokick_days > 0:
@@ -2154,7 +2198,9 @@ def bounce_command(bot, accid, event, skip_cooldown: bool = False):
             lines = []
             for c in warn_candidates:
                 remaining = max(1, autokick_days - c["inactive_days"])
-                lines.append(f"• /contact{c['id']} **{c['name']}** ({c['address']}) — {c['reason']} ({remaining}d remaining)")
+                badges = _get_user_badges(bot, accid, c["id"])
+                badge_str = f" {badges}" if badges else ""
+                lines.append(f"• /contact{c['id']} **{c['name']}**{badge_str} ({c['address']}) — {c['reason']} ({remaining}d remaining)")
             days_left = autokick_days - warn_threshold
             unit_str = f"<{days_left}d" if days_left > 1 else "<1d"
             report = (
@@ -2633,23 +2679,12 @@ def away_command(bot, accid, event):
         reply_text = f"_{sender_name} is now away: {text}_"
         _send(bot, accid, msg.chat_id, reply_text)
     else:
-        try:
-            recipients = database.get_notified_recipients(msg.from_id)
-        except Exception as e:
-            logger.error(f"Error getting notified recipients: {e}")
-            recipients = []
-
-        database.remove_away_status(msg.from_id)
-        reply_text = f"_{sender_name} is back_"
-        _send(bot, accid, msg.chat_id, reply_text)
-
-        # Notify recipients in PM
-        for recipient_id in recipients:
-            try:
-                private_chat_id = bot.rpc.create_chat_by_contact_id(accid, recipient_id)
-                _send(bot, accid, private_chat_id, f"_{sender_name} is back_")
-            except Exception as e:
-                logger.error(f"Error notifying recipient {recipient_id} that sender is back: {e}")
+        away_info = database.get_away_status_details(msg.from_id)
+        if away_info:
+            current_status, _ = away_info
+            _send(bot, accid, msg.chat_id, f"ℹ️ You are currently away: _{current_status}_\n\nTo update your status, use `/away <message>`.\nTo clear your status and mark yourself back, use `/back`.")
+        else:
+            _send(bot, accid, msg.chat_id, "ℹ️ You are not currently away.\n\nUsage: `/away <message>` — set your away status.\nExample: `/away at lunch until 2pm`")
 
 @dc_cli.on(events.NewMessage(command="/back"))
 def back_command(bot, accid, event):
@@ -2682,8 +2717,8 @@ def back_command(bot, accid, event):
 @dc_cli.on(events.NewMessage(command="/top"))
 def top_command(bot, accid, event, skip_cooldown: bool = False):
     msg = event.msg
-    # 1-minute cooldown similar to other commands
-    last_check = _chat_anti_spam.get(msg.chat_id, 0) # Reuse bounce cooldown for simplicity
+    # 1-minute cooldown for /top
+    last_check = _chat_top_anti_spam.get(msg.chat_id, 0)
     now = time.time()
     
     if not _is_dc_admin(bot, accid, msg.from_id) and not skip_cooldown:
@@ -2693,7 +2728,7 @@ def top_command(bot, accid, event, skip_cooldown: bool = False):
             _queue_delayed_command(bot, accid, msg, "top", remaining_sec, top_command, bot, accid, event, skip_cooldown=True)
             return
     
-    _chat_anti_spam[msg.chat_id] = now
+    _chat_top_anti_spam[msg.chat_id] = now
     _send(bot, accid, msg.chat_id, _get_top_posters_report(bot, accid, msg.chat_id))
 
 @dc_cli.on(events.NewMessage(command="/search"))
@@ -2872,12 +2907,14 @@ def search_command(bot, accid, event, skip_cooldown: bool = False):
                     # Track first-seen and get age indicator
                     database.ensure_contact_first_seen(contact_id, now)
                     age = _get_contact_age_indicator(contact_id)
+                    badges = _get_user_badges(bot, accid, contact_id, contact=contact)
 
                     found_users_map[contact_id] = {
                         "name": name,
                         "addrs_str": addrs_str,
                         "status": status,
                         "age": age,
+                        "badges": badges,
                         "groups": [chat_name]
                     }
             except Exception as e:
@@ -2890,11 +2927,13 @@ def search_command(bot, accid, event, skip_cooldown: bool = False):
             reply = f"🔍 **Global Search Results for {queries_str} ({len(found_users_map)}):**\n\n"
             for contact_id, info in found_users_map.items():
                 groups_str = ", ".join(info["groups"])
-                reply += f"• /contact{contact_id} {info['age']} **{info['name']}** ({info['addrs_str']}) [{info['status']}]\n  ↳ Groups: {groups_str}\n"
+                badge_str = f" {info['badges']}" if info.get('badges') else ""
+                reply += f"• /contact{contact_id} {info['age']} **{info['name']}**{badge_str} ({info['addrs_str']}) [{info['status']}]\n  ↳ Groups: {groups_str}\n"
         else:
             reply = f"🔍 **Search Results for {queries_str} ({len(found_users_map)}):**\n\n"
             for contact_id, info in found_users_map.items():
-                reply += f"• /contact{contact_id} {info['age']} **{info['name']}** ({info['addrs_str']}) [{info['status']}]\n"
+                badge_str = f" {info['badges']}" if info.get('badges') else ""
+                reply += f"• /contact{contact_id} {info['age']} **{info['name']}**{badge_str} ({info['addrs_str']}) [{info['status']}]\n"
         
         _send(bot, accid, msg.chat_id, reply)
     else:
@@ -2922,14 +2961,14 @@ def help_command(bot, accid, event):
         f"**Commands:**\n"
         f"/bounce [username] — Show user activity, or list members near auto-kick threshold in group.\n"
         f"/search [query1] ... — Search members by email/domain (e.g. @testrun.org) or reply to a message.\n"
-        f"/relays — Find group members using regular mail providers.\n"
+        f"/relays — Find group members using public Russian mail providers (Yandex, Mail.ru, etc.).\n"
         f"/top    — Show top 10 posters in the last 24 hours.\n"
         f"/invite — Generate an invite link/QR code for this group.\n"
         f"/slap <username> — Reply to the user's last message with a trout slap.\n"
         f"/me <action> — Perform an IRC-style action (e.g. /me waves).\n"
         f"/away <text> — Set your away status, auto-notifying anyone who mentions you or replies.\n"
         f"/back — Clear your away status.\n"
-        f"/contact<ID> — Get a contact object for the given ID.\n"
+        f"/contact<ID> — Share contact card for the given member ID.\n"
         f"/help   — This message.\n"
         f"/chats  — Show catalog of available chats.\n"
         f"/dchannels — Show catalog of available channels.\n"
@@ -3010,7 +3049,7 @@ def invite_command(bot, accid, event, skip_cooldown: bool = False):
     now = time.time()
     
     if not is_admin and not skip_cooldown:
-        last_check = _chat_anti_spam.get(msg.chat_id, 0)
+        last_check = _chat_invite_anti_spam.get(msg.chat_id, 0)
         diff = now - last_check
         if diff < BOUNCE_COOLDOWN_SECONDS:
             remaining_sec = max(1, int(BOUNCE_COOLDOWN_SECONDS - diff))
@@ -3018,7 +3057,7 @@ def invite_command(bot, accid, event, skip_cooldown: bool = False):
             return
 
     # Update cooldown timestamp
-    _chat_anti_spam[msg.chat_id] = now
+    _chat_invite_anti_spam[msg.chat_id] = now
 
     try:
         # Generate securejoin QR link
@@ -3073,7 +3112,7 @@ def invite_command(bot, accid, event, skip_cooldown: bool = False):
             # Track success
             try:
                 addr = bot.rpc.get_config(accid, "configured_addr") or bot.rpc.get_config(accid, "addr") or "unknown"
-                if addr != "unknown":
+                if addr and isinstance(addr, str) and addr != "unknown":
                     database.increment_transport_sent(addr)
             except Exception:
                 pass
@@ -3555,8 +3594,9 @@ def bg_channel_join_worker(bot, accid, admin_chat_id, url, chat_name, qr_info=No
         bot.rpc.secure_join(accid, url)
         
         joined_chat_id = None
-        for _ in range(30):
-            time.sleep(1)
+        delays = [0.25, 0.25, 0.5, 0.5, 1.0, 1.0, 1.5, 2.0, 2.0, 3.0, 3.0, 4.0, 5.0, 5.0]
+        for delay in delays:
+            time.sleep(delay)
             new_chats = set(bot.rpc.get_chatlist_entries(accid, None, None, None))
             added_chats = new_chats - old_chats
             if added_chats:
@@ -3788,7 +3828,7 @@ def welcome_command(bot, accid, event):
         preview_text = f" {welcome_text}" if welcome_text else ""
         _send(bot, accid, msg.chat_id, 
               f"✅ Welcome greeting for new members has been enabled!\n"
-              f"Example: 👋🏻 **Name** (💬 X), welcome to {catalog_chat['name']} group!{preview_text}")
+              f"Example: 👋🏻 🔴 **Name**, welcome to {catalog_chat['name']} group!{preview_text}")
     else:
         _send(bot, accid, msg.chat_id, 
               "/welcome on <additional text> — enable greeting with additional text\n"
@@ -4258,7 +4298,9 @@ def cmpingdel_command(bot, accid, event):
         # Clean up last results for this domain
         keys_to_remove = [k for k in _cmping_last_results if domain in k]
         for k in keys_to_remove:
-            del _cmping_last_results[k]
+            _cmping_last_results.pop(k, None)
+        _cmping_server_status.pop(domain, None)
+        _cmping_server_errors.pop(domain, None)
         database.delete_cmping_results_for_domain(domain)
         database.delete_cmping_history_for_domain(domain)
         _send(bot, accid, msg.chat_id, f"✅ {domain} removed from monitoring.")
@@ -5673,14 +5715,15 @@ def handle_dc_info_message(bot, accid, event):
                             contact = bot.rpc.get_contact(accid, new_member_id)
                             member_name = contact.name or contact.display_name or contact.address or "New member"
                             user_chat_count = get_user_chat_count(bot, accid, new_member_id)
+                            is_multi = (user_chat_count > 1)
                             
                             database.ensure_contact_first_seen(new_member_id, time.time())
-                            age = _get_contact_age_indicator(new_member_id)
+                            age = _get_contact_age_indicator(new_member_id, is_multi_chat=is_multi)
                             
                             chat_name = catalog_chat['name']
                             welcome_suffix = f" {catalog_chat['welcome_text']}" if catalog_chat.get('welcome_text') else ""
                             
-                            welcome_msg = f"👋🏻 {age} **{member_name}** (💬 {user_chat_count}), welcome to {chat_name} group!{welcome_suffix}"
+                            welcome_msg = f"👋🏻 {age} **{member_name}**, welcome to {chat_name} group!{welcome_suffix}"
                             _send(bot, accid, dc_chat_id, welcome_msg)
                             logger.info(f"Welcome greeting sent for {member_name} in chat {dc_chat_id}")
                         except Exception as welcome_err:
@@ -5850,9 +5893,11 @@ def handle_all_messages(bot, accid, event):
 
                 mentioned = False
                 for name in names_to_check:
-                    if name and name in message_text:
-                        mentioned = True
-                        break
+                    if name and len(name) >= 2:
+                        pattern = r'(?i)(?<!\w)' + re.escape(name) + r'(?!\w)'
+                        if re.search(pattern, message_text):
+                            mentioned = True
+                            break
 
                 if mentioned:
                     database.mark_notified_away(contact_id, msg.from_id, away_updated_at)
@@ -6192,7 +6237,7 @@ def handle_all_messages(bot, accid, event):
                             bot.rpc.send_msg(accid, msg.chat_id, MsgData(file=temp_path, viewtype="Vcard"))
                             try:
                                 addr = bot.rpc.get_config(accid, "configured_addr") or bot.rpc.get_config(accid, "addr") or "unknown"
-                                if addr != "unknown":
+                                if addr and isinstance(addr, str) and addr != "unknown":
                                     database.increment_transport_sent(addr)
                             except Exception:
                                 pass
@@ -6450,9 +6495,9 @@ def get_landing_page_html(ingress_path: str = "") -> str:
         hero_btn_html = """<button class="btn btn-primary" onclick="document.getElementById('qr-modal').style.display='flex'">
                 <span>📱</span> Add Bot to Delta Chat
             </button>"""
-        qr_modal_html = f"""<div id="qr-modal" class="modal" onclick="if(event.target === this) this.style.display='none'">
+        qr_modal_html = f"""<div id="qr-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="qr-modal-title" onclick="if(event.target === this) this.style.display='none'">
         <div class="modal-content">
-            <h3>Add Bouncer Bot</h3>
+            <h3 id="qr-modal-title">Add Bouncer Bot</h3>
             <p style="font-size: 0.9rem; color: var(--text-muted);">Scan this QR code with your Delta Chat mobile app or click the link below.</p>
             <img src="{base_path}/qr.png" alt="Bot QR Code" />
             <div style="display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap;">
@@ -6465,9 +6510,9 @@ def get_landing_page_html(ingress_path: str = "") -> str:
         hero_btn_html = """<button class="btn btn-primary" disabled style="opacity: 0.55; cursor: not-allowed;" title="Bot invite link not yet configured">
                 <span>📱</span> Bot Link Unavailable
             </button>"""
-        qr_modal_html = """<div id="qr-modal" class="modal" onclick="if(event.target === this) this.style.display='none'">
+        qr_modal_html = """<div id="qr-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="qr-modal-title" onclick="if(event.target === this) this.style.display='none'">
         <div class="modal-content">
-            <h3>Add Bouncer Bot</h3>
+            <h3 id="qr-modal-title">Add Bouncer Bot</h3>
             <p style="font-size: 0.95rem; color: var(--text-muted); margin: 1.5rem 0;">ℹ️ Bot invite link is not configured yet. Please check back later.</p>
             <button class="close-btn" onclick="document.getElementById('qr-modal').style.display='none'">Close</button>
         </div>
@@ -6517,6 +6562,12 @@ def get_landing_page_html(ingress_path: str = "") -> str:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Delta Chat Bouncer Bot</title>
+    <meta name="description" content="Bouncer bot maintains group quality with inactivity reports, auto-kick management, VirusTotal inspection, and public channel web previews with RSS feeds." />
+    <meta property="og:title" content="Delta Chat Bouncer Bot" />
+    <meta property="og:description" content="Maintain group quality and public channel web previews for Delta Chat." />
+    <meta property="og:image" content="{base_path}/icon.png" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary" />
     <link rel="icon" type="image/png" href="{base_path}/icon.png" />
     <link rel="shortcut icon" href="{base_path}/favicon.ico" />
     <style>
@@ -6915,6 +6966,14 @@ def get_landing_page_html(ingress_path: str = "") -> str:
     <footer>
         <p>Powered by <a href="https://github.com/mrgluek/deltachat_bouncer" target="_blank">Delta Chat Bouncer Bot</a> (v{VERSION}) · <a href="https://git.gluek.info/gluek/deltachat_bouncer" target="_blank">Forgejo Mirror</a></p>
     </footer>
+    <script>
+    document.addEventListener('keydown', function(e) {{
+        if (e.key === 'Escape') {{
+            var m = document.getElementById('qr-modal');
+            if (m) m.style.display = 'none';
+        }}
+    }});
+    </script>
 </body>
 </html>
 """
@@ -6956,9 +7015,9 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
         actions_buttons_html = f"""<a href="{join_link}" class="btn btn-primary"><span>✈️</span> Open in Delta Chat</a>
                 <button onclick="document.getElementById('qr-modal').style.display='flex'" class="btn btn-secondary"><span>📱</span> Show QR Code</button>"""
         qr_modal_html = f"""
-    <div id="qr-modal" class="modal" onclick="if(event.target === this) this.style.display='none'">
+    <div id="qr-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="qr-modal-title" onclick="if(event.target === this) this.style.display='none'">
         <div class="modal-content">
-            <h3>Scan with Delta Chat</h3>
+            <h3 id="qr-modal-title">Scan with Delta Chat</h3>
             <p style="font-size: 0.9rem; color: var(--text-muted);">Scan this QR code with the Delta Chat camera to join <strong>{ch_name_esc}</strong>.</p>
             <img src="{qr_img_url}" alt="Channel Join QR Code" />
             <div style="display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap;">
@@ -6977,9 +7036,18 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
             fedi_domain = urllib.parse.urlparse(base_url).netloc
         except Exception:
             pass
-    if not fedi_domain:
-        fedi_domain = "dc.gluek.info"
-    fedi_handle = f"@{token}@{fedi_domain}"
+    if fedi_domain:
+        fedi_handle = f"@{token}@{fedi_domain}"
+        fedi_btn_html = f"""<div class="top-nav">
+            <button class="fedi-tag-btn" onclick="copyFediHandle(this, '{fedi_handle}')" title="Click to copy Fediverse handle for Mastodon/Fediverse">
+                <span class="fedi-icon">🪐</span>
+                <span class="fedi-handle">{fedi_handle}</span>
+                <span class="fedi-copy-icon">📋</span>
+            </button>
+        </div>"""
+    else:
+        fedi_handle = ""
+        fedi_btn_html = ""
 
     # Build posts HTML
     posts_html_parts = []
@@ -7451,13 +7519,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
         <div class="top-nav">
             <a href="{home_url}">← Home</a>
         </div>
-        <div class="top-nav">
-            <button class="fedi-tag-btn" onclick="copyFediHandle(this, '{fedi_handle}')" title="Click to copy Fediverse handle for Mastodon/Fediverse">
-                <span class="fedi-icon">🪐</span>
-                <span class="fedi-handle">{fedi_handle}</span>
-                <span class="fedi-copy-icon">📋</span>
-            </button>
-        </div>
+        {fedi_btn_html}
     </header>
 
     <main>
@@ -7520,6 +7582,12 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
             btn.innerHTML = orig;
         }}, 2000);
     }}
+    document.addEventListener('keydown', function(e) {{
+        if (e.key === 'Escape') {{
+            var m = document.getElementById('qr-modal');
+            if (m) m.style.display = 'none';
+        }}
+    }});
     </script>
 </body>
 </html>
@@ -7723,19 +7791,36 @@ def get_channel_rss_xml(channel: dict, posts: list[dict], base_url: str) -> str:
         enclosure_tag = ""
         if media_fn and msg_id:
             media_url = f"{base_url.rstrip('/')}/media/{token}/{msg_id}/{media_fn}"
+            file_length = 0
+            expected_dir = os.path.join(CHANNEL_MEDIA_DIR, token)
+            for cand in [
+                os.path.join(expected_dir, f"{msg_id}_{media_fn}"),
+                os.path.join(expected_dir, f"{msg_id}_{os.path.splitext(media_fn)[0]}.webp"),
+                os.path.join(expected_dir, media_fn),
+            ]:
+                if os.path.exists(cand):
+                    try:
+                        file_length = os.path.getsize(cand)
+                        break
+                    except Exception:
+                        pass
+            if file_length <= 0 and p.get("file_bytes"):
+                file_length = p.get("file_bytes", 0)
+            length_attr = str(file_length if file_length > 0 else 1)
+
             if media_type == "image":
                 mime_type = "image/webp" if (media_fn and media_fn.lower().endswith(".webp")) else "image/jpeg"
                 desc_parts.append(f'<p><img src="{media_url}" alt="image" /></p>')
-                enclosure_tag = f'<enclosure url="{media_url}" length="0" type="{mime_type}" />'
+                enclosure_tag = f'<enclosure url="{media_url}" length="{length_attr}" type="{mime_type}" />'
             elif media_type == "video":
                 desc_parts.append(f'<p><video src="{media_url}" controls></video></p>')
-                enclosure_tag = f'<enclosure url="{media_url}" length="0" type="video/mp4" />'
+                enclosure_tag = f'<enclosure url="{media_url}" length="{length_attr}" type="video/mp4" />'
             elif media_type == "audio":
                 desc_parts.append(f'<p><audio src="{media_url}" controls></audio></p>')
-                enclosure_tag = f'<enclosure url="{media_url}" length="0" type="audio/mpeg" />'
+                enclosure_tag = f'<enclosure url="{media_url}" length="{length_attr}" type="audio/mpeg" />'
             else:
                 desc_parts.append(f'<p><a href="{media_url}">📎 Download {html.escape(media_fn)}</a></p>')
-                enclosure_tag = f'<enclosure url="{media_url}" length="0" type="application/octet-stream" />'
+                enclosure_tag = f'<enclosure url="{media_url}" length="{length_attr}" type="application/octet-stream" />'
 
         full_desc = "\n".join(desc_parts)
 
@@ -7921,13 +8006,26 @@ def check_rate_limit(request, bucket: str, max_requests: int = 60, window_second
     return True
 
 
+SAFE_HOST_REGEX = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9.\-]*[a-zA-Z0-9])?(:\d{1,5})?$')
+
+
 def _get_base_url(request) -> str:
-    """Resolve the base URL for web handlers."""
+    """Resolve the base URL for web handlers with safe host and scheme validation."""
     base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
     if not base_url:
-        scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
-        host = request.headers.get("X-Forwarded-Host", request.host)
-        base_url = f"{scheme}://{host}"
+        scheme = request.headers.get("X-Forwarded-Proto", getattr(request, "scheme", "http"))
+        if scheme not in ("http", "https"):
+            scheme = "http"
+        host = request.headers.get("X-Forwarded-Host")
+        if not host:
+            raw_host = getattr(request, "host", None)
+            if isinstance(raw_host, str):
+                host = raw_host
+            else:
+                host = request.headers.get("Host", "localhost")
+        if not host or not SAFE_HOST_REGEX.match(str(host).strip()):
+            host = "localhost"
+        base_url = f"{scheme}://{str(host).strip()}"
     return base_url.strip().rstrip("/")
 
 
@@ -7959,11 +8057,7 @@ async def handle_channel_preview(request):
     if channel.get('is_deleted'):
         return web.Response(text=get_tombstone_html(channel.get("name") or "Channel", ingress_path=ingress_path), status=200, content_type="text/html")
 
-    base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
-    if not base_url:
-        scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
-        host = request.headers.get("X-Forwarded-Host", request.host)
-        base_url = f"{scheme}://{host}"
+    base_url = _get_base_url(request)
 
     posts = database.get_channel_posts(channel['chat_id'], limit=50)
     html_content = get_channel_preview_html(channel, posts, base_url, ingress_path=ingress_path)
@@ -8060,12 +8154,7 @@ async def handle_channel_avatar(request):
 
 async def handle_channel_rss(request):
     token = request.match_info.get('token')
-
-    base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
-    if not base_url:
-        scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
-        host = request.headers.get("X-Forwarded-Host", request.host)
-        base_url = f"{scheme}://{host}"
+    base_url = _get_base_url(request)
 
     cache_key = f"{token}:{base_url}"
     cached = _channel_rss_cache.get(cache_key)
@@ -8233,6 +8322,17 @@ async def handle_ap_inbox(request):
 
     sig_info = activitypub.extract_signature_info(req_headers)
     key_id = sig_info.get("key_id") if sig_info else None
+
+    # Verify KeyId <-> Actor origin binding
+    activity_actor = activity.get("actor")
+    if isinstance(activity_actor, dict):
+        activity_actor = activity_actor.get("id") or activity_actor.get("url")
+    if isinstance(activity_actor, str) and key_id:
+        actor_host = urllib.parse.urlparse(activity_actor).netloc.lower()
+        key_host = urllib.parse.urlparse(key_id).netloc.lower()
+        if actor_host and key_host and actor_host != key_host:
+            logger.warning(f"AP signature KeyId/Actor origin mismatch: key_id={key_id}, actor={activity_actor}")
+            return web.Response(status=401, text="KeyId and actor origin mismatch")
 
     # Fetch remote public key with Authorized Fetch support
     pub_pem, _ = await activitypub.resolve_public_key(key_id, sign_as_token=token, base_url=base_url)
@@ -8539,7 +8639,7 @@ async def handle_api_v1_instance(request):
     """GET /api/v1/instance -> Mastodon-compatible v1 instance metadata."""
     base_url = _get_base_url(request)
     parsed = urllib.parse.urlparse(base_url)
-    domain = parsed.netloc or "dc.gluek.info"
+    domain = parsed.netloc or getattr(request, "host", "") or "localhost"
     channels = database.get_all_catalog_channels(include_deleted=False)
     posts_count = database.get_total_channel_posts_count()
     admin_email = database.get_config("admin_email") or ""

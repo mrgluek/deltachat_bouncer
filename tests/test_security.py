@@ -385,6 +385,75 @@ class TestSecurity(unittest.TestCase):
         self.assertIn("Too Many Requests", resp.text)
         self.assertEqual(resp.headers.get("Retry-After"), "60")
 
+    def test_validate_signature_cheap_anti_replay(self):
+        activitypub.reset_signature_replay_cache()
+        body = b'{"type":"Follow"}'
+        good_digest = "SHA-256=" + base64.b64encode(hashlib.sha256(body).digest()).decode('ascii')
+        headers = {
+            "Signature": 'keyId="https://remote.social/users/alice#main-key",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="unique-sig-12345678"',
+            "Date": email.utils.formatdate(usegmt=True),
+            "Digest": good_digest,
+        }
+        # First verification succeeds
+        valid, reason = activitypub.validate_signature_cheap("POST", headers, body)
+        self.assertTrue(valid, f"First verify should succeed, got: {reason}")
+
+        # Immediate replay of the exact same signature must fail anti-replay check
+        valid2, reason2 = activitypub.validate_signature_cheap("POST", headers, body)
+        self.assertFalse(valid2)
+        self.assertIn("Replay detected", reason2)
+
+    def test_get_base_url_host_validation(self):
+        database.set_config("base_url", "")
+        # 1. Valid host and scheme
+        req = MagicMock()
+        req.headers = {"X-Forwarded-Proto": "https", "X-Forwarded-Host": "chat.example.com"}
+        self.assertEqual(bot._get_base_url(req), "https://chat.example.com")
+
+        # 2. Host with port
+        req.headers = {"Host": "dc.local:8080"}
+        self.assertEqual(bot._get_base_url(req), "http://dc.local:8080")
+
+        # 3. Host with illegal characters / header injection fallback to localhost
+        req.headers = {"X-Forwarded-Host": "evil.com\r\nInjected-Header: bad"}
+        req.host = "evil.com\r\n"
+        self.assertEqual(bot._get_base_url(req), "http://localhost")
+
+        # 4. Configured BASE_URL overrides headers
+        database.set_config("base_url", "https://canonical.example.com")
+        self.assertEqual(bot._get_base_url(req), "https://canonical.example.com")
+        database.set_config("base_url", "")
+
+    def test_handle_ap_inbox_key_id_actor_mismatch(self):
+        token = "inboxmismatch"
+        database.add_catalog_channel(chat_id=301, name="Mismatch Chan", description="", member_count=1, invite_link="", token=token)
+        database.set_config("base_url", "https://dc.gluek.info")
+
+        body = json.dumps({
+            "type": "Follow",
+            "actor": "https://remote.social/users/alice",
+            "object": f"https://dc.gluek.info/c/{token}"
+        }).encode("utf-8")
+        good_digest = "SHA-256=" + base64.b64encode(hashlib.sha256(body).digest()).decode('ascii')
+
+        req = MagicMock()
+        req.method = "POST"
+        req.match_info = {"token": token}
+        req.remote = "198.51.100.44"
+        # keyId is on attacker.social, but actor is on remote.social -> origin mismatch!
+        req.headers = {
+            "Signature": 'keyId="https://attacker.social/keys/1#main-key",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="forged-sig-999"',
+            "Date": email.utils.formatdate(usegmt=True),
+            "Digest": good_digest,
+            "Host": "dc.gluek.info",
+        }
+        req.read = AsyncMock(return_value=body)
+
+        with patch('activitypub.is_safe_url', return_value=(True, "")):
+            resp = asyncio.run(bot.handle_ap_inbox(req))
+            self.assertEqual(resp.status, 401)
+            self.assertIn("KeyId and actor origin mismatch", resp.text)
+
 
 if __name__ == "__main__":
     unittest.main()

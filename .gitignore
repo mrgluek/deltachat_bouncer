@@ -1,5 +1,5 @@
-
-# Local overrides (healthchecks, etc.)
+# Environment files (credentials, API keys)
+.env
 .env.local
 __pycache__/
 *.db

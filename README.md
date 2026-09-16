@@ -4,23 +4,24 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 
 ## Features
 
-- ⚠️ **Inactivity Reports (`/bounce`):** In groups with `/autokick` enabled, displays members approaching the auto-kick threshold (< 7 days or < 1 day remaining) as well as observation progress for silent members still in their grace period. In other groups, reports members inactive for over 21 days.
+- ⚠️ **Inactivity Reports (`/bounce`):** In groups with `/autokick` enabled, displays members approaching the auto-kick threshold (< 7 days or < 1 day remaining) as well as observation progress for silent members still in their grace period. In other groups, reports members inactive for over 21 days. Displays user role badges (`👑` Admin, `⭐` Autokick Ignored, `💤` Away) and member age indicators (colored circles `🔴`..`⚪` or squares `🟥`..`⬜` for multi-group members). Operates on an independent 60s cooldown.
 - 🧹 **Automatic Inactivity Kick with Warnings (`/autokick`):** Automatically purge stale, inactive members from group chats in the background. Features a two-stage warning system: sends a private 1-on-1 direct message warning to inactive candidates and broadcasts a daily summary to the group (once every 24h). Members are kicked only after receiving a warning and passing a 24-hour grace period. Supports cryptographic fingerprint exemptions (`/autokick ignore`) and `/away` vacation status exemptions.
 - 🛡️ **Auto-kick Fingerprint Ignore List (`/autokick ignore`):** Exempt specific members or service bots from auto-kick by resolving and storing their cryptographic key fingerprint.
 - 👞 **Manual Member Kick (`/kick <userid>`):** Remove a specific member or multiple members from a group chat by contact ID (e.g. `/kick 123` or `/kick /contact123`), search query, or by replying to their message.
+- 💤 **Away Status & Auto-Reply (`/away`, `/back`):** Set a temporary away message (e.g. `/away on vacation until Monday`). When other members mention you by name in group chats, the bot informs them privately of your away status. Bare `/away` displays your current status or usage instructions. Running `/back` clears away status and notifies users who messaged you.
 - 📖 **Group Chat Catalog (`/chats`):** Users can browse all group chats cataloged by the bot, complete with name, description, and real-time membership count.
 - 📢 **Delta Chat Channels Catalog (`/dchannels`):** Users can browse all channels cataloged by the bot, complete with name and description.
-- 🌐 **Channel Web Preview & RSS Feeds (`/c/{token}`):** Public web previews for registered channels with live message history, attachments, QR code join modals, and standard RSS 2.0 feeds (`/c/{token}/rss.xml`). Soft-delete tombstone handling ensures graceful messaging when channels are removed from the catalog.
-- 🪐 **Fediverse / ActivityPub Federation (`@<token>@domain`):** Every registered channel acts as a full Fediverse actor (`type: "Service"` / 🤖 Bot). Users on Mastodon, Pleroma, Misskey, etc., can search `@<token>@<domain>` via WebFinger (`RFC 7033`), follow channels, and receive new messages and media attachments in their home feeds via authenticated HTTP Signatures (`RFC 9421` & `draft-cavage-http-signatures`).
+- 🌐 **Channel Web Preview & RSS Feeds (`/c/{token}`):** Public web previews for registered channels with live message history, attachments, accessible QR code join modals (with ESC key support and ARIA dialog attributes), OpenGraph/Twitter Card metadata, and standard RSS 2.0 feeds (`/c/{token}/rss.xml`) with exact media enclosure byte sizes. Soft-delete tombstone handling ensures graceful messaging when channels are removed from the catalog.
+- 🪐 **Fediverse / ActivityPub Federation (`@<token>@domain`):** Every registered channel acts as a full Fediverse actor (`type: "Service"` / 🤖 Bot). Users on Mastodon, Pleroma, Misskey, etc., can search `@<token>@<domain>` via WebFinger (`RFC 7033`), follow channels, and receive new messages and media attachments in their home feeds via authenticated HTTP Signatures (`RFC 9421` & `draft-cavage-http-signatures`) with strict KeyId/Actor origin binding and 300s anti-replay protection.
 - 🔐 **Join Approval Workflows:** Supports public and private groups. Requests to join public groups immediately receive an invite link, while private groups (`🔐`) require approvals from existing members in the group via dynamic `/approve<ID>` commands.
-- 👋🏻 **Custom Welcome Messages (`/welcome`):** Configure customizable welcoming greetings for new members joining the group, with stats (total chats in common) and custom rules text.
-- 🔗 **Invite Link (`/invite`):** Generate a SecureJoin invite link and QR code image for the current group chat. Available to all users with a 1-minute cooldown (admins are exempt). For private group chats, the generated link is single-use and will be automatically deleted from the chat once a new member joins.
-- 🔍 **Member Search (`/search [email1] ...`):** Find group members by one or more email terms (case-insensitive substring matching) or by replying to a message containing email addresses. Searches across all active transports (both primary and secondary addresses) and displays all configured addresses for matching contacts.
-- 📬 **Relay Check (`/relays`):** Scan for group members using regular mail providers (Yandex, Mail.ru, etc.).
-- 🏆 **Activity Ranking (`/top`):** Show the 10 most active members in the last 24 hours.
+- 👋🏻 **Custom Welcome Messages (`/welcome`):** Configure customizable welcoming greetings for new members joining the group with custom rules text and visual age badges.
+- 🔗 **Invite Link (`/invite`):** Generate a SecureJoin invite link and QR code image for the current group chat. Available to all users with an independent 1-minute cooldown (admins are exempt). For private group chats, the generated link is single-use and will be automatically deleted from the chat once a new member joins.
+- 🔍 **Member Search (`/search [email1] ...`):** Find group members by one or more email terms (case-insensitive substring matching) or by replying to a message containing email addresses. Displays user role badges (`👑`, `⭐`, `💤`), multi-chat indicators (`🟥`..`⬜`), and searches across all active transports (both primary and secondary addresses).
+- 📬 **Relay Check (`/relays`):** Scan for group members using public Russian mail providers (Yandex, Mail.ru, etc.).
+- 🏆 **Activity Ranking (`/top`):** Show the 10 most active members in the last 24 hours (independent 60s cooldown).
 - 🏓 **ChatMail Ping (`/cmping`):** Ping mail relays (transports) to/from specified target servers using the `cmping` utility. Features real-time reaction-based progress tracking (`⏳`, `☑️`, `❌`) and runs asynchronously.
 - 📡 **Server Connectivity Monitoring:** Automatic periodic monitoring of server connectivity using a round-robin algorithm. Employs an **incident-based alerting system** with in-place dynamic message editing (`🚨 Ongoing` → `⚠️ Ongoing (Partial Recovery)` → `✅ Resolved`) to prevent notification noise, along with accurate root-cause fault isolation. Configurable interval via `CMPING_MONITOR_INTERVAL` env var (default: 30 min).
-- 👤 **Contact Sharing:** Reports include `/contact<ID>` links to quickly get a contact object for any user.
+- 👤 **Contact Sharing:** Reports include `/contact<ID>` links to quickly share a contact card for any user.
 - 🔄 **Automatic Transport Failover:** Supports multiple mail servers. The bot automatically detects message delivery failures via raw core events, switches `configured_addr` to a backup transport in round-robin fashion, and schedules a resend of the message using exponential backoff (5s, 10s, 20s, 40s...) via an asynchronous timer thread (up to a maximum of 10 attempts per message) to prevent loop propagation and CPU spikes.
 - ⏳ **21-Day Grace Period:** The bot tracks group activity in the background and requires 21 days of observation before reporting "never seen" users.
 - 🛡️ **Secure Administration:** Claim ownership with `/initadmin`. Admins bypass rate limits and have exclusive control over bot settings.
@@ -60,9 +61,11 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 
 ## Commands
 
-- `/bounce [username]` — Show user activity, or check inactive members in current group (Shows warning candidates and observation progress if `/autokick` is on, otherwise 21 days).
-- `/search [email1] ...` — Search for group members by one or more emails (case-insensitive substring match) or by replying to a message containing email addresses. Searches across all active transports/secondary addresses.
-- `/relays` — Find group members using regular mail providers.
+- `/bounce [username]` — Show user activity, or check inactive members in current group (Shows warning candidates and observation progress if `/autokick` is on, otherwise 21 days; displays role badges and age indicators).
+- `/search [email1] ...` — Search for group members by one or more emails (case-insensitive substring match) or by replying to a message containing email addresses.
+- `/away [message]` — Set away status or view current away status without clearing it.
+- `/back` — Clear away status and notify users who messaged you while you were away.
+- `/relays` — Find group members using public Russian mail providers.
 - `/top` — Show the 10 most active members in the last 24 hours.
 - `/invite` — Generate an invite link and QR code for this group.
 - `/chats` — Show the catalog of registered group chats available to join.
@@ -74,7 +77,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/slap [username]` — Slap a user with a large trout (or reply to a message; 15s cooldown).
 - `/approve<ID>` — Approve a pending join request for a private group (Group chat only).
 - `/decline<ID> [reason]` — Decline a pending join request for a private group with an optional reason (Group chat only).
-- `/contact<ID>` — Get a contact object for the given ID (e.g., `/contact123`).
+- `/contact<ID>` — Share contact card for the given ID (e.g., `/contact123`).
 - `/help` — Show available commands and bot information.
 - `/donate` — Support project development ❤️
 - `/initadmin` — Claim administrative ownership (private chat only).

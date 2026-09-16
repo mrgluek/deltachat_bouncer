@@ -60,12 +60,14 @@ class TestBouncerBot(unittest.TestCase):
         database.close_db()
         database.DB_PATH = TEST_DB
         database.init_db()
+        database._transport_stats_buffer.clear()
         bot._cmping_server_status = {}
         bot._cmping_server_errors = {}
         bot._cmping_last_results = {}
 
     def tearDown(self):
         database.close_db()
+        database._transport_stats_buffer.clear()
         if os.path.exists(TEST_DB):
             try:
                 os.remove(TEST_DB)
@@ -1525,6 +1527,287 @@ class TestBouncerBot(unittest.TestCase):
             mock_send.assert_called_once()
             msg_text = mock_send.call_args[0][3]
             self.assertIn("All 2 members are active", msg_text)
+
+    def test_independent_cooldowns_bounce_top_invite(self):
+        """Verify /bounce, /top, and /invite enforce independent anti-spam cooldowns."""
+        mock_bot = MagicMock()
+        chat_id = 8100
+        user_id = 42  # non-admin
+        now = time.time()
+
+        bot._chat_bounce_anti_spam.clear()
+        bot._chat_top_anti_spam.clear()
+        bot._chat_invite_anti_spam.clear()
+
+        mock_event = MagicMock()
+        mock_event.msg.chat_id = chat_id
+        mock_event.msg.from_id = user_id
+        mock_event.msg.quote = None
+        mock_event.payload = ""
+
+        mock_contact = MagicMock()
+        mock_contact.id = user_id
+        mock_contact.name = "User42"
+        mock_contact.display_name = "User42"
+        mock_contact.address = "user42@example.com"
+        mock_contact.last_seen = now
+        mock_bot.rpc.get_contact.return_value = mock_contact
+        mock_bot.rpc.get_chat_contacts.return_value = [user_id]
+        mock_bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Group"}
+
+        with patch('bot._is_dc_admin', return_value=False), \
+             patch.object(bot, '_send') as mock_send, \
+             patch.object(bot, '_react') as mock_react:
+            # 1. Run /bounce
+            bot.bounce_command(mock_bot, 1, mock_event)
+            self.assertIn(chat_id, bot._chat_bounce_anti_spam)
+            self.assertNotIn(chat_id, bot._chat_top_anti_spam)
+            self.assertNotIn(chat_id, bot._chat_invite_anti_spam)
+
+            # Running /bounce again triggers cooldown and reacts with ⏳
+            mock_send.reset_mock()
+            mock_react.reset_mock()
+            mock_event.msg.id = 101
+            bot.bounce_command(mock_bot, 1, mock_event)
+            mock_react.assert_called_with(mock_bot, 1, 101, "⏳")
+            mock_send.assert_not_called()
+
+            # 2. Running /top is NOT blocked by /bounce cooldown
+            mock_send.reset_mock()
+            bot.top_command(mock_bot, 1, mock_event)
+            self.assertIn(chat_id, bot._chat_top_anti_spam)
+            self.assertTrue(mock_send.called)
+
+            # 3. Running /invite is NOT blocked by /bounce or /top cooldowns
+            mock_send.reset_mock()
+            mock_bot.rpc.send_msg.reset_mock()
+            mock_bot.rpc.get_chat_securejoin_qr_code.return_value = "https://i.delta.chat/#invite"
+            database.add_catalog_chat(chat_id, "Test Chat", "Desc", "https://i.delta.chat/#invite")
+            mock_event.payload = ""
+            bot.invite_command(mock_bot, 1, mock_event)
+            self.assertIn(chat_id, bot._chat_invite_anti_spam)
+            mock_bot.rpc.send_msg.assert_called()
+            sent_msg = mock_bot.rpc.send_msg.call_args[0][2]
+            self.assertIn("Invite to group", sent_msg.text)
+
+    def test_bare_away_no_op(self):
+        """Verify bare /away shows usage/status without modifying away state or sending '_is back_'."""
+        mock_bot = MagicMock()
+        mock_event = MagicMock()
+        mock_event.msg.chat_id = 9100
+        mock_event.msg.from_id = 200
+        mock_event.payload = ""
+
+        c = MagicMock()
+        c.name = "Alice"
+        c.display_name = "Alice"
+        mock_bot.rpc.get_contact.return_value = c
+
+        with patch.object(bot, '_send') as mock_send:
+            # Case 1: user is NOT away -> shows usage, remains not away
+            bot.away_command(mock_bot, 1, mock_event)
+            mock_send.assert_called_once()
+            sent = mock_send.call_args[0][3]
+            self.assertIn("You are not currently away", sent)
+            self.assertIn("Usage: `/away <message>`", sent)
+            self.assertNotIn("is back", sent)
+            self.assertIsNone(database.get_away_status(200))
+
+            # Set away status
+            mock_send.reset_mock()
+            mock_event.payload = "at lunch"
+            bot.away_command(mock_bot, 1, mock_event)
+            self.assertEqual(database.get_away_status(200), "at lunch")
+            mock_send.assert_called_once()
+            self.assertIn("is now away: at lunch", mock_send.call_args[0][3])
+
+            # Case 2: bare /away when already away -> shows current away status, does NOT clear it
+            mock_send.reset_mock()
+            mock_event.payload = ""
+            bot.away_command(mock_bot, 1, mock_event)
+            mock_send.assert_called_once()
+            sent2 = mock_send.call_args[0][3]
+            self.assertIn("You are currently away: _at lunch_", sent2)
+            self.assertNotIn("is back", sent2)
+            self.assertEqual(database.get_away_status(200), "at lunch")
+
+            # Case 3: /back clears away status
+            mock_send.reset_mock()
+            bot.back_command(mock_bot, 1, mock_event)
+            self.assertIsNone(database.get_away_status(200))
+            mock_send.assert_called()
+            self.assertIn("is back", mock_send.call_args[0][3])
+
+    def test_contact_age_indicator_circles_and_squares(self):
+        """Verify _get_contact_age_indicator returns circles for single-chat and squares for multi-chat."""
+        now = time.time()
+        # Contact 301: fresh (<1 week)
+        database.ensure_contact_first_seen(301, now - 100)
+        # Contact 302: 2 weeks old
+        database.ensure_contact_first_seen(302, now - (14 * 86400))
+        # Contact 303: 10 weeks old (max palette)
+        database.ensure_contact_first_seen(303, now - (70 * 86400))
+
+        # Single-chat (circles)
+        self.assertEqual(bot._get_contact_age_indicator(301, is_multi_chat=False), "🔴")
+        self.assertEqual(bot._get_contact_age_indicator(302, is_multi_chat=False), "🟡")
+        self.assertEqual(bot._get_contact_age_indicator(303, is_multi_chat=False), "⚪")
+
+        # Multi-chat (squares)
+        self.assertEqual(bot._get_contact_age_indicator(301, is_multi_chat=True), "🟥")
+        self.assertEqual(bot._get_contact_age_indicator(302, is_multi_chat=True), "🟨")
+        self.assertEqual(bot._get_contact_age_indicator(303, is_multi_chat=True), "⬜")
+
+    def test_away_mention_word_boundary(self):
+        """Verify away mention detection matches whole words and avoids substring false positives."""
+        mock_bot = MagicMock()
+        mock_event = MagicMock()
+        mock_event.msg.chat_id = 9200
+        mock_event.msg.id = 888
+        mock_event.msg.from_id = 401
+        mock_event.msg.is_info = False
+
+        c_dan = MagicMock()
+        c_dan.id = 402
+        c_dan.name = "Dan"
+        c_dan.display_name = "Dan"
+        c_dan.address = "dan@example.com"
+        database.set_away_status(402, "working on release")
+        database.ensure_contact_first_seen(402, time.time())
+        database.ensure_contact_first_seen(401, time.time())
+
+        c_sender = MagicMock()
+        c_sender.id = 401
+        c_sender.name = "Sender"
+        c_sender.display_name = "Sender"
+        c_sender.address = "sender@example.com"
+
+        def get_contact_mock(accid, cid):
+            if cid == 402:
+                return c_dan
+            return c_sender
+        mock_bot.rpc.get_contact.side_effect = get_contact_mock
+        mock_bot.rpc.get_chat_contacts.return_value = [1, 401, 402]
+        mock_bot.rpc.create_chat_by_contact_id.return_value = 9201
+
+        with patch.object(bot, '_send') as mock_send:
+            # 1. Message "Hello Daniel" contains substring "Dan", but should NOT trigger notification
+            mock_event.msg.text = "Hello Daniel, how are you?"
+            bot.handle_all_messages(mock_bot, 1, mock_event)
+            mock_send.assert_not_called()
+
+            # 2. Message "Hello Dan! How are you?" contains whole word "Dan" -> MUST trigger away notification
+            mock_event.msg.text = "Hello Dan! How are you?"
+            bot.handle_all_messages(mock_bot, 1, mock_event)
+            mock_send.assert_called_once()
+            notif_text = mock_send.call_args[0][3]
+            self.assertIn("Dan is away: working on release", notif_text)
+
+    def test_get_user_badges(self):
+        """Verify _get_user_badges returns correct badges for admin (👑), autokick-ignored (⭐), and away (💤)."""
+        mock_bot = MagicMock()
+        accid = 1
+        cid = 501
+
+        with patch('bot._is_dc_admin', return_value=False), \
+             patch('bot._is_contact_autokick_ignored', return_value=False):
+            # Normal user: no badges
+            self.assertEqual(bot._get_user_badges(mock_bot, accid, cid), "")
+
+            # Away user: 💤
+            database.set_away_status(cid, "afk")
+            self.assertEqual(bot._get_user_badges(mock_bot, accid, cid), "💤")
+
+        # Admin user
+        with patch('bot._is_dc_admin', return_value=True), \
+             patch('bot._is_contact_autokick_ignored', return_value=False):
+            self.assertEqual(bot._get_user_badges(mock_bot, accid, cid), "👑 💤")
+
+        # Admin + Autokick Ignored + Away
+        with patch('bot._is_dc_admin', return_value=True), \
+             patch('bot._is_contact_autokick_ignored', return_value=True):
+            self.assertEqual(bot._get_user_badges(mock_bot, accid, cid), "👑 ⭐ 💤")
+
+    def test_help_command_wording(self):
+        """Verify /contact<ID> and /relays descriptions in /help text."""
+        mock_bot = MagicMock()
+        mock_event = MagicMock()
+        mock_event.msg.chat_id = 9300
+        mock_event.msg.from_id = 10
+
+        with patch('bot._is_dc_admin', return_value=True), patch.object(bot, '_send') as mock_send:
+            bot.help_command(mock_bot, 1, mock_event)
+            mock_send.assert_called_once()
+            help_text = mock_send.call_args[0][3]
+            self.assertIn("/contact<ID> — Share contact card", help_text)
+            self.assertIn("/relays — Find group members using public Russian mail providers", help_text)
+
+    def test_database_default_limits(self):
+        """Verify database queries accept and respect limit parameter."""
+        # Catalog chats
+        for i in range(10):
+            database.add_catalog_chat(1000 + i, f"Chat {i}", f"Desc {i}", f"https://invite/{i}")
+        chats_all = database.get_all_catalog_chats()
+        self.assertEqual(len(chats_all), 10)
+        chats_limited = database.get_all_catalog_chats(limit=3)
+        self.assertEqual(len(chats_limited), 3)
+
+        # Catalog channels
+        for i in range(10):
+            database.add_catalog_channel(2000 + i, f"Channel {i}", f"Desc {i}", 0, f"https://ch/{i}", is_public=1)
+        channels_limited = database.get_all_catalog_channels(limit=4)
+        self.assertEqual(len(channels_limited), 4)
+
+        # Transport stats
+        for i in range(5):
+            database.increment_transport_sent(f"relay{i}@test.org")
+        database.flush_transport_stats()
+        stats_limited = database.get_all_transport_stats(limit=2)
+        self.assertEqual(len(stats_limited), 2)
+
+        # Active cmping incidents
+        now = int(time.time())
+        for i in range(5):
+            database.create_cmping_incident(now + i)
+        incidents_limited = database.get_all_active_cmping_incidents(limit=2)
+        self.assertEqual(len(incidents_limited), 2)
+
+        # Autokick ignored fingerprints
+        for i in range(5):
+            database.add_autokick_ignored_fingerprint(f"FP{i:04d}", f"User{i}")
+        fps_limited = database.get_all_autokick_ignored_fingerprints(limit=2)
+        self.assertEqual(len(fps_limited), 2)
+
+        # AP followers
+        for i in range(5):
+            database.add_ap_follower("channel_tok", f"https://actor{i}.test", f"https://actor{i}.test/inbox")
+        followers_limited = database.get_ap_followers("channel_tok", limit=3)
+        self.assertEqual(len(followers_limited), 3)
+        inboxes_limited = database.get_ap_follower_inboxes("channel_tok", limit=3)
+        self.assertEqual(len(inboxes_limited), 3)
+
+    def test_cmpingdel_prunes_in_memory_status_and_errors(self):
+        """Verify /cmpingdel removes domain from _cmping_server_status and _cmping_server_errors."""
+        mock_bot = MagicMock()
+        mock_event = MagicMock()
+        mock_event.msg.chat_id = 9400
+        mock_event.msg.from_id = 10
+        mock_event.msg.text = "/cmpingdel broken.server.org"
+
+        domain = "broken.server.org"
+        database.add_cmping_monitor(domain)
+        bot._cmping_server_status[domain] = False
+        bot._cmping_server_errors[domain] = "Connection timed out"
+        bot._cmping_last_results[(domain, "other.server.org")] = {"latency": 999}
+
+        with patch('bot._is_dc_admin', return_value=True), patch.object(bot, '_send') as mock_send:
+            bot.cmpingdel_command(mock_bot, 1, mock_event)
+            mock_send.assert_called_once()
+            self.assertIn("removed from monitoring", mock_send.call_args[0][3])
+            self.assertNotIn(domain, bot._cmping_server_status)
+            self.assertNotIn(domain, bot._cmping_server_errors)
+            self.assertNotIn((domain, "other.server.org"), bot._cmping_last_results)
+
 
 
 class TestPerformanceAndPooling(unittest.TestCase):

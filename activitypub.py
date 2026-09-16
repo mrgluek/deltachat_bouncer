@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import socket
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -30,7 +31,7 @@ except ImportError:
 import database
 
 logger = logging.getLogger("bouncer_bot.activitypub")
-VERSION = "2.12.9"
+VERSION = "2.13.0"
 
 # ==============================================================================
 # 1. RSA Key Management
@@ -839,7 +840,40 @@ def validate_signature_cheap(method: str, headers: dict, body: bytes) -> tuple[b
     if not is_safe:
         return False, f"Unsafe keyId URL: {reason}"
 
+    # 4. Anti-replay verification
+    sig_raw = sig_info.get('signature_b64') or ""
+    if sig_raw and not check_and_record_signature_replay(sig_raw):
+        return False, "Replay detected: duplicate request signature"
+
     return True, "OK"
+
+
+_recent_signatures: dict[str, float] = {}
+_replay_lock = threading.Lock()
+
+
+def check_and_record_signature_replay(sig_identifier: str, window_seconds: float = 300.0) -> bool:
+    """Anti-replay check: returns True if allowed (first time seen), False if replay detected."""
+    if not sig_identifier:
+        return True
+    now = time.time()
+    sig_hash = hashlib.sha256(sig_identifier.encode('utf-8')).hexdigest()
+    with _replay_lock:
+        expired = [k for k, exp in _recent_signatures.items() if exp <= now]
+        for k in expired:
+            del _recent_signatures[k]
+
+        if sig_hash in _recent_signatures:
+            return False
+
+        _recent_signatures[sig_hash] = now + window_seconds
+        return True
+
+
+def reset_signature_replay_cache():
+    """Reset signature replay cache (for test suite isolation)."""
+    with _replay_lock:
+        _recent_signatures.clear()
 
 
 _last_fetch_status: dict[str, int] = {}
