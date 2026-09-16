@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.13.3] - 2026-09-17
+
+### Tests
+- **Fix `test_handle_background` assertion** (`test_webpreview.py`): replaced the stale `resp.path` attribute check (removed from `aiohttp.web.FileResponse`) with a type assertion on the response object.
+
 ## [2.13.2] - 2026-09-17
 
 ### Security & Hardening

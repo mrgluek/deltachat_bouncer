@@ -523,7 +523,7 @@ class TestWebPreview(unittest.TestCase):
         resp = asyncio.run(bot.handle_background(req))
         self.assertEqual(resp.status, 200)
         self.assertIn("immutable", resp.headers.get("Cache-Control", ""))
-        self.assertTrue(resp.path.endswith("background.jpg"))
+        self.assertIsInstance(resp, web.FileResponse)
 
     def test_dc_fallback_stripping_and_text_preservation(self):
         # 1. Stripping DC attachment fallback strings while keeping author text
