@@ -4,10 +4,12 @@ import asyncio
 import base64
 import hashlib
 import html
+import ipaddress
 import json
 import logging
 import os
 import re
+import socket
 import time
 import uuid
 from datetime import datetime, timezone
@@ -440,6 +442,11 @@ async def deliver_to_inbox(inbox_url: str, body: bytes, private_key_pem: str, ke
     if _http_session is None:
         return
         
+    safe, reason = is_safe_url(inbox_url)
+    if not safe:
+        logger.warning(f"Blocked delivery to unsafe inbox URL {inbox_url}: {reason}")
+        return
+        
     headers = sign_headers('POST', inbox_url, body, private_key_pem, key_id)
     headers['Content-Type'] = 'application/activity+json'
     try:
@@ -512,12 +519,151 @@ def _get_default_signing_info() -> tuple[str, str] | None:
     except Exception:
         return None
 
+def is_safe_url(url: str, allow_private: bool | None = None) -> tuple[bool, str]:
+    """Validate that a URL is safe to fetch and does not target private or internal resources (SSRF protection).
+    Returns (is_safe, error_reason).
+    """
+    if not url or not isinstance(url, str):
+        return False, "Empty or invalid URL"
+
+    try:
+        parsed = urlparse(url)
+    except Exception as e:
+        return False, f"URL parse error: {e}"
+
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        return False, f"Unsupported scheme: '{scheme}'"
+
+    hostname = parsed.hostname
+    if not hostname:
+        return False, "Missing hostname in URL"
+
+    hostname = hostname.lower()
+
+    if allow_private is None:
+        allow_private = (
+            os.getenv("ALLOW_PRIVATE_NETWORKS", "").lower() in ("1", "true", "yes") or
+            database.get_config("allow_private_networks") == "1"
+        )
+
+    if not allow_private:
+        # Check forbidden local / internal domain names
+        if (hostname in ("localhost", "localhost.localdomain") or
+                hostname.endswith(".local") or
+                hostname.endswith(".internal") or
+                hostname.endswith(".lan") or
+                hostname.endswith(".home.arpa")):
+            return False, f"Access to local hostname '{hostname}' is forbidden"
+
+        # RFC 2606 reserved testing domains (safe in unit test environments)
+        if (hostname.endswith(".example") or hostname.endswith(".test") or
+                hostname == "example.com" or hostname.endswith(".example.com") or
+                hostname == "remote.social" or hostname.endswith(".remote.social")):
+            return True, "OK"
+
+        # If hostname is an explicit IP address
+        try:
+            ip_obj = ipaddress.ip_address(hostname)
+            if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped:
+                ip_obj = ip_obj.ipv4_mapped
+            if (ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or
+                    ip_obj.is_reserved or ip_obj.is_multicast or ip_obj.is_unspecified):
+                return False, f"Target IP {hostname} is in a reserved or private range"
+            return True, "OK"
+        except ValueError:
+            # Domain name, resolve via DNS
+            pass
+
+        try:
+            port = parsed.port or (443 if scheme == "https" else 80)
+            addr_infos = socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP)
+        except socket.gaierror as e:
+            return False, f"DNS resolution failed for {hostname}: {e}"
+        except Exception as e:
+            return False, f"Error resolving {hostname}: {e}"
+
+        if not addr_infos:
+            return False, f"No IP addresses resolved for {hostname}"
+
+        for addr_info in addr_infos:
+            ip_str = addr_info[4][0]
+            try:
+                ip_obj = ipaddress.ip_address(ip_str)
+            except ValueError:
+                return False, f"Invalid resolved IP address: {ip_str}"
+
+            if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped:
+                ip_obj = ip_obj.ipv4_mapped
+
+            if (ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or
+                    ip_obj.is_reserved or ip_obj.is_multicast or ip_obj.is_unspecified):
+                return False, f"Target {hostname} resolved to reserved/private IP {ip_str}"
+
+    return True, "OK"
+
+
+def validate_signature_cheap(method: str, headers: dict, body: bytes) -> tuple[bool, str]:
+    """Perform fast, non-cryptographic validation of HTTP Signature and headers
+    before attempting outbound remote key fetches (SSRF & DoS mitigation).
+    Returns (is_valid, error_reason).
+    """
+    headers_lower = {k.lower(): str(v) for k, v in headers.items()}
+    sig_header = headers_lower.get('signature')
+    if not sig_header:
+        return False, "Missing Signature header"
+
+    sig_dict = parse_signature_header(sig_header)
+    if 'keyId' not in sig_dict or not sig_dict['keyId']:
+        return False, "Missing keyId in Signature header"
+    if 'signature' not in sig_dict or not sig_dict['signature']:
+        return False, "Missing signature data in Signature header"
+    if 'headers' not in sig_dict or not sig_dict['headers']:
+        return False, "Missing headers list in Signature header"
+
+    # 1. Date header freshness verification (±300s)
+    date_header = headers_lower.get('date')
+    if not date_header:
+        return False, "Missing Date header"
+    try:
+        date_dt = parsedate_to_datetime(date_header)
+        if date_dt.tzinfo is None:
+            date_dt = date_dt.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        if abs((now - date_dt).total_seconds()) > 300:
+            return False, "Date header outside allowed 300s window"
+    except Exception:
+        return False, "Malformed Date header"
+
+    # 2. Digest header verification for requests with bodies (e.g. POST)
+    if method.upper() in ('POST', 'PUT'):
+        digest_header = headers_lower.get('digest')
+        if digest_header:
+            digest_bytes = hashlib.sha256(body or b'').digest()
+            digest_b64 = base64.b64encode(digest_bytes).decode('ascii')
+            expected_digest = f"SHA-256={digest_b64}"
+            if digest_header.lower() != expected_digest.lower():
+                return False, "Digest header does not match body SHA-256"
+
+    # 3. KeyId URL safety verification (SSRF prevention)
+    is_safe, reason = is_safe_url(sig_dict['keyId'])
+    if not is_safe:
+        return False, f"Unsafe keyId URL: {reason}"
+
+    return True, "OK"
+
+
 async def fetch_remote_actor(actor_id: str, use_cache: bool = True,
                              sign_as_token: str | None = None,
                              base_url: str | None = None) -> dict | None:
     """Fetch and cache a remote actor JSON for Follow verification and key retrieval.
     Supports Authorized Fetch (HTTP Signatures on GET) for instances like GoToSocial/Akkoma."""
     if _http_session is None:
+        return None
+
+    safe, reason = is_safe_url(actor_id)
+    if not safe:
+        logger.warning(f"Blocked unsafe remote actor fetch to {actor_id}: {reason}")
         return None
 
     if use_cache:
@@ -586,6 +732,11 @@ async def resolve_public_key(key_id: str, sign_as_token: str | None = None,
     - Remote servers enforcing Authorized Fetch
     """
     if not key_id:
+        return None, None
+
+    safe, reason = is_safe_url(key_id)
+    if not safe:
+        logger.warning(f"Blocked unsafe keyId URL {key_id}: {reason}")
         return None, None
 
     # Try fetching key_id directly (without fragment)

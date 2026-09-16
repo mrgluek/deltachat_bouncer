@@ -37,7 +37,7 @@ import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.12.5"
+VERSION = "2.12.6"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -7786,6 +7786,40 @@ async def handle_qr_png(request):
         logger.error(f"Error generating qr.png: {e}")
         return web.Response(status=500)
 
+_rate_limit_lock = threading.Lock()
+_rate_limits: dict[str, list[float]] = {}  # key -> [timestamps]
+
+def check_rate_limit(request, bucket: str, max_requests: int = 60, window_seconds: int = 60) -> bool:
+    """In-memory sliding window rate limiter per client IP and bucket.
+    Returns True if allowed, False if limit exceeded.
+    """
+    forwarded = request.headers.get("X-Forwarded-For") if hasattr(request, "headers") else None
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+    else:
+        client_ip = getattr(request, "remote", None) or "unknown"
+
+    key = f"{bucket}:{client_ip}"
+    now = time.time()
+    cutoff = now - window_seconds
+
+    with _rate_limit_lock:
+        timestamps = _rate_limits.get(key, [])
+        timestamps = [ts for ts in timestamps if ts > cutoff]
+        if len(timestamps) >= max_requests:
+            _rate_limits[key] = timestamps
+            return False
+        timestamps.append(now)
+        _rate_limits[key] = timestamps
+
+        if len(_rate_limits) > 5000:
+            keys_to_del = [k for k, v in _rate_limits.items() if not v or v[-1] <= cutoff]
+            for k in keys_to_del:
+                del _rate_limits[k]
+
+    return True
+
+
 def _get_base_url(request) -> str:
     """Resolve the base URL for web handlers."""
     base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
@@ -7797,6 +7831,9 @@ def _get_base_url(request) -> str:
 
 
 async def handle_channel_preview(request):
+    if not check_rate_limit(request, "channel_preview", max_requests=120, window_seconds=60):
+        return web.Response(status=429, text="Too Many Requests", headers={"Retry-After": "60"})
+
     # ── ActivityPub Content Negotiation ──
     accept = request.headers.get("Accept", "")
     if "application/activity+json" in accept or 'profile="https://www.w3.org/ns/activitystreams"' in accept:
@@ -7965,6 +8002,9 @@ async def handle_channel_rss_redirect(request):
 
 
 async def handle_media_file(request):
+    if not check_rate_limit(request, "media", max_requests=120, window_seconds=60):
+        return web.Response(status=429, text="Too Many Requests", headers={"Retry-After": "60"})
+
     token = request.match_info.get('token')
     msg_id = request.match_info.get('msg_id')
     filename = request.match_info.get('filename')
@@ -8052,9 +8092,15 @@ def _extract_channel_token_from_activity(activity: dict) -> str | None:
 
 async def handle_ap_inbox(request):
     """POST /c/{token}/inbox or POST /inbox (sharedInbox) — receive Follow/Undo/Delete activities."""
+    if not check_rate_limit(request, "inbox", max_requests=60, window_seconds=60):
+        return web.Response(status=429, text="Too Many Requests", headers={"Retry-After": "60"})
+
     body = await request.read()
     if not body:
         return web.Response(status=400, text="Empty request body")
+
+    if len(body) > 65536:
+        return web.Response(status=413, text="Payload Too Large")
 
     try:
         activity = json.loads(body.decode("utf-8"))
@@ -8077,16 +8123,15 @@ async def handle_ap_inbox(request):
         logger.warning(f"Could not resolve target channel token from AP activity: {activity}")
         return web.Response(status=404, text="Target channel not found")
 
-    # Verify HTTP Signature
-    sig_header = request.headers.get("Signature") or request.headers.get("signature") or ""
-    if not sig_header:
-        logger.warning(f"AP inbox request missing Signature header from {request.remote}")
-        return web.Response(status=401, text="Missing Signature header")
+    # Fast preliminary verification (Date freshness, Digest match, KeyId URL safety) before remote fetch
+    req_headers = dict(request.headers)
+    is_valid, reason = activitypub.validate_signature_cheap(request.method, req_headers, body)
+    if not is_valid:
+        logger.warning(f"AP inbox signature preliminary check failed: {reason}")
+        return web.Response(status=401, text=reason)
 
-    sig_dict = activitypub.parse_signature_header(sig_header)
+    sig_dict = activitypub.parse_signature_header(req_headers.get("Signature") or req_headers.get("signature") or "")
     key_id = sig_dict.get("keyId")
-    if not key_id:
-        return web.Response(status=401, text="Missing keyId in Signature")
 
     # Fetch remote public key with Authorized Fetch support
     pub_pem, _ = await activitypub.resolve_public_key(key_id, sign_as_token=token, base_url=base_url)
@@ -8095,7 +8140,7 @@ async def handle_ap_inbox(request):
         return web.Response(status=401, text="Could not resolve remote actor public key")
 
     req_path = getattr(request, 'raw_path', None) or getattr(request, 'path_qs', None) or request.path
-    if not activitypub.verify_http_signature(request.method, req_path, dict(request.headers), body, pub_pem):
+    if not activitypub.verify_http_signature(request.method, req_path, req_headers, body, pub_pem):
         logger.warning(f"AP signature verification failed for {key_id} on {req_path}")
         return web.Response(status=401, text="Invalid signature")
 
@@ -8400,7 +8445,7 @@ async def handle_api_v1_instance(request):
 
 
 async def _run_web_server():
-    app = web.Application()
+    app = web.Application(client_max_size=256 * 1024)
     app.router.add_get('/icon.png', handle_icon)
     app.router.add_get('/favicon.ico', handle_icon)
     app.router.add_get('/background.jpg', handle_background)

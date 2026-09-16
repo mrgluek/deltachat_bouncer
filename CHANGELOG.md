@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.12.6] - 2026-09-16
+
+### Security & Hardening
+- **SSRF Mitigation on Remote Actor and Key Resolution (`S1`)**:
+  - Added strict URL validation (`is_safe_url()`) enforcing `http`/`https` schemes and blocking private, loopback, link-local, multicast, and reserved IP addresses (`127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.169.254`, `::1`, `::ffff:...`).
+  - Blocked internal local hostnames (`localhost`, `*.local`, `*.internal`, `*.lan`, `*.home.arpa`) and resolved DNS queries to ensure target IPs are public before outbound requests.
+  - Applied SSRF checks across `fetch_remote_actor()`, `resolve_public_key()`, and `deliver_to_inbox()`.
+- **Pre-Resolution Fast Signature Validation (`S1`)**:
+  - Added `validate_signature_cheap()` to reject forged or expired requests before attempting outbound network calls for remote `keyId` resolution.
+  - Enforces `Date` header freshness window (±300 seconds) and verifies request body `Digest` (SHA-256) prior to actor fetching.
+- **Request Body Limits & Rate Limiting (`S2`)**:
+  - Configured `client_max_size = 256 KB` on `web.Application` to block oversized payloads across all web routes.
+  - Enforced 64 KB maximum request body size on ActivityPub inboxes (`POST /c/{token}/inbox`, `POST /inbox`) returning `413 Payload Too Large`.
+  - Implemented thread-safe sliding window rate limiter (`check_rate_limit`) per client IP (with `X-Forwarded-For` proxy support) returning `429 Too Many Requests` with `Retry-After: 60` headers:
+    - ActivityPub inboxes: 60 requests / minute.
+    - Web channel preview & landing page: 120 requests / minute.
+    - Media file downloads: 120 requests / minute.
+- **Dependency Version Pinning & Security Baselines (`S3`)**:
+  - Pinned CVE-free dependency floors in `requirements.txt` (`aiohttp>=3.10.5,<4.0.0`, `qrcode>=7.4.2,<8.0.0`, `pillow>=10.4.0,<11.0.0`, `cryptography>=42.0.0,<45.0.0`).
+  - Pinned `cmping` dependency to exact commit SHA `0b67259a8b057678b746797cc80fc1ee35bce9ae` (`v0.17.2`).
+
 ## [2.12.5] - 2026-09-16
 
 ### Fediverse / ActivityPub Improvements
