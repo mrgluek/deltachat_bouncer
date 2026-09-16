@@ -3,6 +3,7 @@ import sys
 import unittest
 import time
 import datetime
+import json
 from unittest.mock import MagicMock, patch
 
 # Setup test environment
@@ -1807,6 +1808,130 @@ class TestBouncerBot(unittest.TestCase):
             self.assertNotIn(domain, bot._cmping_server_status)
             self.assertNotIn(domain, bot._cmping_server_errors)
             self.assertNotIn((domain, "other.server.org"), bot._cmping_last_results)
+
+    def test_database_file_permissions_restricted(self):
+        """Verify database file has 0o600 permissions upon initialization."""
+        import stat
+        database.init_db()
+        st = os.stat(TEST_DB)
+        perms = stat.S_IMODE(st.st_mode)
+        self.assertEqual(perms, 0o600, f"Expected 0o600 permissions, got {oct(perms)}")
+
+    def test_handle_icon_and_background_whitelisting(self):
+        """Verify handle_icon and handle_background reject non-whitelisted paths with 404."""
+        import asyncio
+        req = MagicMock()
+        # Non-whitelisted paths
+        for bad_path in ["/etc/passwd", "/secret.txt", "/static/../../etc/shadow", "/avatar.webp", "/hack.png"]:
+            req.path = bad_path
+            res = asyncio.run(bot.handle_icon(req))
+            self.assertEqual(res.status, 404)
+
+            res_bg = asyncio.run(bot.handle_background(req))
+            self.assertEqual(res_bg.status, 404)
+
+    def test_rss_cdata_breakout_escaped(self):
+        """Verify ]]> in channel or post content is escaped and produces valid XML."""
+        import xml.etree.ElementTree as ET
+        ch = {"token": "testtoken123", "name": "Hack ]]> Channel", "description": "Desc with ]]> breakout"}
+        posts = [
+            {"id": 1, "msg_id": 101, "timestamp": time.time(), "text": "Hello world ]]> with CDATA breakout"},
+            {"id": 2, "msg_id": 102, "timestamp": time.time() - 60, "text": "Normal post"}
+        ]
+        xml_str = bot.get_channel_rss_xml(ch, posts, "https://example.com")
+        self.assertIn("]]]]><![CDATA[>", xml_str)
+        # Parse XML to guarantee well-formedness
+        root = ET.fromstring(xml_str)
+        self.assertEqual(root.tag, "rss")
+        titles = [e.text for e in root.findall(".//title")]
+        self.assertTrue(any("Hack ]]> Channel" in (t or "") for t in titles))
+
+    def test_rss_per_post_permalinks_and_preview_anchors(self):
+        """Verify RSS items have per-post permalink URIs and HTML preview articles have anchor IDs."""
+        ch = {"token": "anchortok123", "name": "Anchor Channel", "description": "Desc"}
+        posts = [{"id": 1, "msg_id": 777, "timestamp": time.time(), "text": "Anchor post content"}]
+        xml_str = bot.get_channel_rss_xml(ch, posts, "https://example.com")
+        self.assertIn("<link>https://example.com/c/anchortok123#post-777</link>", xml_str)
+        self.assertIn('<guid isPermaLink="true">https://example.com/c/anchortok123#post-777</guid>', xml_str)
+
+        html_out = bot.get_channel_preview_html(ch, posts, "https://example.com")
+        self.assertIn('id="post-777"', html_out)
+
+    def test_ap_follow_foreign_inbox_rejected(self):
+        """Verify handle_ap_inbox rejects delivery to an inbox whose host differs from follower actor."""
+        import asyncio
+        req = MagicMock()
+        req.match_info = {"token": "secchannel12"}
+        database.add_catalog_channel(8811, "Sec Channel", "Desc", 0, "https://invite", is_public=1, token="secchannel12")
+
+        follow_activity = {
+            "type": "Follow",
+            "actor": "https://evil.actor.org/users/alice",
+            "object": "https://mybot.org/c/secchannel12"
+        }
+        body_bytes = json.dumps(follow_activity).encode("utf-8")
+
+        async def dummy_read():
+            return body_bytes
+        req.read = dummy_read
+        req.headers = {
+            "Host": "mybot.org",
+            "Signature": 'keyId="https://evil.actor.org/users/alice#main-key",signature="dummy"'
+        }
+        req.method = "POST"
+        req.path = "/c/secchannel12/inbox"
+
+        foreign_actor_doc = {
+            "id": "https://evil.actor.org/users/alice",
+            "inbox": "https://victim-server.com/inbox",  # Foreign victim host!
+            "publicKey": {
+                "id": "https://evil.actor.org/users/alice#main-key",
+                "owner": "https://evil.actor.org/users/alice",
+                "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0\n-----END PUBLIC KEY-----"
+            }
+        }
+
+        with patch('activitypub.is_safe_url', return_value=(True, "")), \
+             patch('activitypub.validate_signature_cheap', return_value=(True, "")), \
+             patch('activitypub.resolve_public_key', return_value=(foreign_actor_doc["publicKey"]["publicKeyPem"], 200)), \
+             patch('activitypub.verify_http_signature', return_value=True), \
+             patch('activitypub.fetch_remote_actor', return_value=foreign_actor_doc), \
+             patch('activitypub.deliver_to_inbox') as mock_deliver, \
+             patch('activitypub.deliver_backfill_posts') as mock_backfill:
+            res = asyncio.run(bot.handle_ap_inbox(req))
+            self.assertEqual(res.status, 202)
+            # Crucial: deliveries to victim-server.com MUST NOT be called!
+            mock_deliver.assert_not_called()
+            mock_backfill.assert_not_called()
+
+    def test_api_v1_instance_admin_dc_email(self):
+        """Verify handle_api_v1_instance returns email from admin_dc_email."""
+        import asyncio
+        database.set_config("admin_dc_email", "admin@deltachat.org")
+        req = MagicMock()
+        req.headers = {"Host": "chat.example.org"}
+        req.host = "chat.example.org"
+        res = asyncio.run(bot.handle_api_v1_instance(req))
+        self.assertEqual(res.status, 200)
+        data = json.loads(res.text)
+        self.assertEqual(data.get("email"), "admin@deltachat.org")
+
+    def test_web_templates_light_mode_and_zero_repaint(self):
+        """Verify landing and channel preview HTML templates include light mode and zero repaint styles."""
+        bot.index_page_html_cache = None
+        landing_html = bot.get_landing_page_html()
+        self.assertIn("@media (prefers-color-scheme: light)", landing_html)
+        self.assertIn("body::before", landing_html)
+        self.assertNotIn("background-attachment: fixed", landing_html)
+        self.assertIn("minmax(min(280px, 100%), 1fr)", landing_html)
+        self.assertIn("--text-muted: #aebac1;", landing_html)
+
+        ch = {"token": "themepreview", "name": "Theme Channel", "description": "Desc"}
+        preview_html = bot.get_channel_preview_html(ch, [], "https://example.com")
+        self.assertIn("@media (prefers-color-scheme: light)", preview_html)
+        self.assertIn("body::before", preview_html)
+        self.assertNotIn("background-attachment: fixed", preview_html)
+        self.assertIn("--text-muted: #aebac1;", preview_html)
 
 
 

@@ -31,7 +31,7 @@ except ImportError:
 import database
 
 logger = logging.getLogger("bouncer_bot.activitypub")
-VERSION = "2.13.0"
+VERSION = "2.13.1"
 
 # ==============================================================================
 # 1. RSA Key Management

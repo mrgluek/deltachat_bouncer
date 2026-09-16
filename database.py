@@ -180,6 +180,19 @@ def close_db():
     _reader_pool.close_all()
 
 
+def _secure_db_file_permissions():
+    """Ensure database file and WAL sidecars have restricted 0o600 permissions."""
+    if not DB_PATH or DB_PATH == ":memory:":
+        return
+    for suffix in ("", "-wal", "-shm"):
+        path = DB_PATH + suffix
+        if os.path.exists(path):
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+
+
 def _get_writer_conn() -> sqlite3.Connection:
     """Returns a shared, persistent connection for write operations guarded by _write_lock."""
     global _writer_conn, _writer_conn_db_path
@@ -197,6 +210,7 @@ def _get_writer_conn() -> sqlite3.Connection:
         _writer_conn.execute("PRAGMA journal_mode = WAL;")
         _writer_conn.execute("PRAGMA wal_autocheckpoint = 1000;")
         _writer_conn_db_path = DB_PATH
+        _secure_db_file_permissions()
     return _writer_conn
 
 
@@ -541,7 +555,7 @@ def init_db():
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_pending_requests_chat ON pending_requests(chat_id, approved)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_away_notif_updated ON away_notifications(away_updated_at)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_cmping_history_checked ON cmping_history(checked_at)')
-
+    _secure_db_file_permissions()
 
 
 def set_config(key: str, value: str):

@@ -37,7 +37,7 @@ import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.13.0"
+VERSION = "2.13.1"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -6576,24 +6576,75 @@ def get_landing_page_html(ingress_path: str = "") -> str:
             --card-bg: #232d36;
             --card-border: rgba(255, 255, 255, 0.08);
             --text-main: #e9edef;
-            --text-muted: #8696a0;
+            --text-muted: #aebac1;
             --color-primary: #2090ea;
             --accent-blue: #53bdeb;
+            --bg-overlay: 1;
+        }}
+        @media (prefers-color-scheme: light) {{
+            :root {{
+                --bg-color: #f0f2f5;
+                --card-bg: #ffffff;
+                --card-border: rgba(0, 0, 0, 0.08);
+                --text-main: #111b21;
+                --text-muted: #54656f;
+                --color-primary: #008069;
+                --accent-blue: #0070e0;
+                --bg-overlay: 0.08;
+            }}
+            .card {{
+                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08) !important;
+            }}
+            .channel-card-item {{
+                background: rgba(0, 0, 0, 0.03) !important;
+                border-color: rgba(0, 0, 0, 0.06) !important;
+            }}
+            .channel-card-item:hover {{
+                background: rgba(0, 0, 0, 0.06) !important;
+                border-color: rgba(0, 0, 0, 0.12) !important;
+            }}
+            .logo-title, .hero h1, .card h2, .channel-card-title {{
+                color: #111b21 !important;
+            }}
+            .hero p {{
+                color: #3b4a54 !important;
+            }}
+            .modal {{
+                background: #ffffff !important;
+                color: #111b21 !important;
+            }}
+            .modal h3 {{
+                color: #111b21 !important;
+            }}
+            .modal p {{
+                color: #54656f !important;
+            }}
+            .modal-qr-container {{
+                background: #ffffff !important;
+            }}
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif;
             background-color: var(--bg-color);
-            background-image: url('{bg_url}');
-            background-repeat: repeat;
-            background-size: 430px auto;
-            background-attachment: fixed;
             color: var(--text-main);
             min-height: 100vh;
             display: flex;
             flex-direction: column;
             justify-content: space-between;
             -webkit-font-smoothing: antialiased;
+            position: relative;
+        }}
+        body::before {{
+            content: "";
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-image: url('{bg_url}');
+            background-repeat: repeat;
+            background-size: 430px auto;
+            opacity: var(--bg-overlay);
+            z-index: -1;
+            pointer-events: none;
         }}
         header {{
             padding: 1.5rem 1rem;
@@ -6703,7 +6754,7 @@ def get_landing_page_html(ingress_path: str = "") -> str:
         }}
         .channels-grid {{
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
             gap: 0.75rem;
         }}
         .channel-card-item {{
@@ -7076,8 +7127,9 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
                 elif media_type == "file":
                     media_html = f'<div class="post-media"><a href="{media_url}" download class="post-media-file">📎 Download {html.escape(media_fn)}</a></div>'
 
+            msg_anchor_attr = f'id="post-{p.get("msg_id")}" ' if p.get("msg_id") else ''
             post_card = f"""
-            <article class="post-bubble post-card">
+            <article {msg_anchor_attr}class="post-bubble post-card">
                 <div class="post-bubble-header post-header">
                     <span class="post-author">{from_name}</span>
                 </div>
@@ -7121,26 +7173,85 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
             --border-subtle: rgba(255, 255, 255, 0.08);
             --border-bubble: rgba(255, 255, 255, 0.05);
             --text-main: #e9edef;
-            --text-muted: #8696a0;
+            --text-muted: #aebac1;
             --text-secondary: #aebac1;
             --color-primary: #2090ea;
             --color-author: #53bdeb;
             --color-success: #00a884;
+            --bg-overlay: 1;
+        }}
+        @media (prefers-color-scheme: light) {{
+            :root {{
+                --bg-color: #efeae2;
+                --bubble-bg: #ffffff;
+                --border-subtle: rgba(0, 0, 0, 0.08);
+                --border-bubble: rgba(0, 0, 0, 0.05);
+                --text-main: #111b21;
+                --text-muted: #54656f;
+                --text-secondary: #54656f;
+                --color-primary: #008069;
+                --color-author: #0070e0;
+                --color-success: #008069;
+                --bg-overlay: 0.08;
+            }}
+            .channel-header-card {{
+                background: #ffffff !important;
+                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08) !important;
+            }}
+            .channel-title {{
+                color: #111b21 !important;
+            }}
+            .channel-desc {{
+                color: #3b4a54 !important;
+            }}
+            .post-bubble {{
+                background: #ffffff !important;
+                box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08) !important;
+            }}
+            .post-author {{
+                color: #0070e0 !important;
+            }}
+            .fedi-tag-btn {{
+                background: rgba(0, 0, 0, 0.05) !important;
+                color: #111b21 !important;
+                border-color: rgba(0, 0, 0, 0.1) !important;
+            }}
+            .modal {{
+                background: #ffffff !important;
+                color: #111b21 !important;
+            }}
+            .modal h3 {{
+                color: #111b21 !important;
+            }}
+            .modal p {{
+                color: #54656f !important;
+            }}
+            .modal-qr-container {{
+                background: #ffffff !important;
+            }}
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif;
             background-color: var(--bg-color);
-            background-image: url('{base_path}/background.jpg');
-            background-repeat: repeat;
-            background-size: 430px auto;
-            background-attachment: fixed;
             color: var(--text-main);
             min-height: 100vh;
             display: flex;
             flex-direction: column;
             justify-content: space-between;
             -webkit-font-smoothing: antialiased;
+            position: relative;
+        }}
+        body::before {{
+            content: "";
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-image: url('{base_path}/background.jpg');
+            background-repeat: repeat;
+            background-size: 430px auto;
+            opacity: var(--bg-overlay);
+            z-index: -1;
+            pointer-events: none;
         }}
         header {{
             max-width: 680px;
@@ -7611,7 +7722,7 @@ def get_tombstone_html(channel_name: str, ingress_path: str = "") -> str:
             --bubble-bg: #232d36;
             --border-subtle: rgba(255, 255, 255, 0.08);
             --text-main: #e9edef;
-            --text-muted: #8696a0;
+            --text-muted: #aebac1;
             --color-primary: #2090ea;
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -7621,7 +7732,6 @@ def get_tombstone_html(channel_name: str, ingress_path: str = "") -> str:
             background-image: url('{base_path}/background.jpg');
             background-repeat: repeat;
             background-size: 430px auto;
-            background-attachment: fixed;
             color: var(--text-main);
             min-height: 100vh;
             display: flex;
@@ -7691,7 +7801,7 @@ def get_404_html(ingress_path: str = "") -> str:
             --bubble-bg: #232d36;
             --border-subtle: rgba(255, 255, 255, 0.08);
             --text-main: #e9edef;
-            --text-muted: #8696a0;
+            --text-muted: #aebac1;
             --color-primary: #2090ea;
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -7701,7 +7811,6 @@ def get_404_html(ingress_path: str = "") -> str:
             background-image: url('{base_path}/background.jpg');
             background-repeat: repeat;
             background-size: 430px auto;
-            background-attachment: fixed;
             color: var(--text-main);
             min-height: 100vh;
             display: flex;
@@ -7755,12 +7864,21 @@ def get_404_html(ingress_path: str = "") -> str:
 """
 
 
+def _escape_cdata(text: str) -> str:
+    """Escape ]]> to prevent CDATA section breakout in XML generation."""
+    if not text:
+        return ""
+    return str(text).replace("]]>", "]]]]><![CDATA[>")
+
+
 def get_channel_rss_xml(channel: dict, posts: list[dict], base_url: str) -> str:
     token = channel.get("token", "")
     ch_name = channel.get("name") or "Channel"
     ch_desc = channel.get("description") or "Delta Chat Channel"
     channel_url = f"{base_url.rstrip('/')}/c/{token}"
     rss_url = f"{channel_url}/rss.xml"
+    safe_ch_name = _escape_cdata(ch_name)
+    safe_ch_desc = _escape_cdata(ch_desc)
 
     last_build = format_datetime(datetime.now(timezone.utc))
     if posts and posts[0].get("timestamp"):
@@ -7823,12 +7941,15 @@ def get_channel_rss_xml(channel: dict, posts: list[dict], base_url: str) -> str:
                 enclosure_tag = f'<enclosure url="{media_url}" length="{length_attr}" type="application/octet-stream" />'
 
         full_desc = "\n".join(desc_parts)
+        safe_post_title = _escape_cdata(post_title)
+        safe_full_desc = _escape_cdata(full_desc)
+        post_link = f"{channel_url}#post-{msg_id}" if msg_id else f"{channel_url}#{guid}"
 
         item = f"""    <item>
-      <title><![CDATA[{post_title}]]></title>
-      <description><![CDATA[{full_desc}]]></description>
-      <link>{channel_url}</link>
-      <guid isPermaLink="false">{guid}</guid>
+      <title><![CDATA[{safe_post_title}]]></title>
+      <description><![CDATA[{safe_full_desc}]]></description>
+      <link>{post_link}</link>
+      <guid isPermaLink="true">{post_link}</guid>
       <pubDate>{pub_date}</pubDate>
       {enclosure_tag}
     </item>"""
@@ -7838,9 +7959,9 @@ def get_channel_rss_xml(channel: dict, posts: list[dict], base_url: str) -> str:
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
-    <title><![CDATA[{ch_name}]]></title>
+    <title><![CDATA[{safe_ch_name}]]></title>
     <link>{channel_url}</link>
-    <description><![CDATA[{ch_desc}]]></description>
+    <description><![CDATA[{safe_ch_desc}]]></description>
     <atom:link href="{rss_url}" rel="self" type="application/rss+xml" />
     <language>en</language>
     <lastBuildDate>{last_build}</lastBuildDate>
@@ -7851,25 +7972,39 @@ def get_channel_rss_xml(channel: dict, posts: list[dict], base_url: str) -> str:
 
 # ── Web Request Handlers ──
 
+_ALLOWED_ICON_FILENAMES = {"icon.png", "favicon.ico"}
+_ALLOWED_BG_FILENAMES = {"background.jpg"}
+
 async def handle_icon(request):
-    filename = request.path.lstrip('/')
-    if filename == 'favicon.ico':
-        filename = 'icon.png'
-    if os.path.exists(filename):
-        headers = {'Cache-Control': 'public, max-age=31536000, immutable'}
-        return web.FileResponse(filename, headers=headers)
+    raw_filename = os.path.basename(getattr(request, "path", "")) if isinstance(getattr(request, "path", None), str) else "icon.png"
+    if raw_filename not in _ALLOWED_ICON_FILENAMES:
+        return web.Response(status=404)
+    filename = "icon.png"
+    base_dir = os.path.abspath(os.path.dirname(__file__) if "__file__" in globals() else ".")
+    for candidate in (
+        os.path.join(base_dir, "static", filename),
+        os.path.join(base_dir, filename),
+        os.path.join("static", filename),
+        filename,
+    ):
+        if os.path.exists(candidate) and os.path.isfile(candidate):
+            headers = {'Cache-Control': 'public, max-age=31536000, immutable'}
+            return web.FileResponse(candidate, headers=headers)
     return web.Response(status=404)
 
 
 async def handle_background(request):
-    base_dir = os.path.dirname(__file__) if "__file__" in globals() else "."
+    raw_filename = os.path.basename(getattr(request, "path", "")) if isinstance(getattr(request, "path", None), str) else "background.jpg"
+    if raw_filename not in _ALLOWED_BG_FILENAMES:
+        return web.Response(status=404)
+    base_dir = os.path.abspath(os.path.dirname(__file__) if "__file__" in globals() else ".")
     for candidate in (
-        "static/background.jpg",
-        "background.jpg",
         os.path.join(base_dir, "static", "background.jpg"),
         os.path.join(base_dir, "background.jpg"),
+        "static/background.jpg",
+        "background.jpg",
     ):
-        if os.path.exists(candidate):
+        if os.path.exists(candidate) and os.path.isfile(candidate):
             headers = {'Cache-Control': 'public, max-age=31536000, immutable'}
             return web.FileResponse(candidate, headers=headers)
     return web.Response(status=404)
@@ -8225,6 +8360,16 @@ async def handle_media_file(request):
 
 # ── ActivityPub Handlers ──
 
+_ap_backfill_semaphore: asyncio.Semaphore | None = None
+_channel_last_backfill: dict[str, float] = {}
+
+def _get_ap_backfill_semaphore() -> asyncio.Semaphore:
+    global _ap_backfill_semaphore
+    if _ap_backfill_semaphore is None:
+        _ap_backfill_semaphore = asyncio.Semaphore(2)
+    return _ap_backfill_semaphore
+
+
 async def handle_ap_actor(request):
     """GET /c/{token} with Accept: application/activity+json -> Actor JSON."""
     token = request.match_info.get('token')
@@ -8387,14 +8532,32 @@ async def handle_ap_inbox(request):
                     )
                     logger.info(f"New AP follower for channel {token}: {follower_id}")
                     # Build and send Accept activity, followed by backfilling recent posts
+                    priv_pem, _ = activitypub.get_or_create_actor_keys(token)
                     accept_act = activitypub.build_accept_follow(actor_url, activity)
                     accept_body = json.dumps(accept_act, ensure_ascii=False).encode("utf-8")
-                    priv_pem, _ = activitypub.get_or_create_actor_keys(token)
                     target_inbox = inbox or shared_inbox
+
+                    # Security check: validate that target_inbox belongs to the same host as follower_id
+                    follower_host = urllib.parse.urlparse(follower_id).netloc.lower()
+                    inbox_host = urllib.parse.urlparse(target_inbox).netloc.lower()
+                    if not follower_host or not inbox_host or follower_host != inbox_host:
+                        logger.warning(
+                            f"AP target inbox host mismatch: follower={follower_id} ({follower_host}) vs "
+                            f"target_inbox={target_inbox} ({inbox_host}). Rejecting delivery to foreign inbox."
+                        )
+                        return web.Response(status=202, text="Accepted")
 
                     async def _accept_and_backfill(t_inbox, a_body, p_pem, k_id, t_token, b_url):
                         await activitypub.deliver_to_inbox(t_inbox, a_body, p_pem, k_id)
-                        await activitypub.deliver_backfill_posts(t_token, t_inbox, b_url, limit=10)
+                        now = time.time()
+                        last_bf = _channel_last_backfill.get(t_token, 0)
+                        if now - last_bf < 10.0:
+                            logger.info(f"Skipping AP backfill for channel {t_token}: backfill cooldown active")
+                            return
+                        _channel_last_backfill[t_token] = now
+                        sem = _get_ap_backfill_semaphore()
+                        async with sem:
+                            await activitypub.deliver_backfill_posts(t_token, t_inbox, b_url, limit=10)
 
                     asyncio.create_task(_accept_and_backfill(
                         target_inbox, accept_body, priv_pem, f"{actor_url}#main-key", token, base_url
@@ -8642,7 +8805,7 @@ async def handle_api_v1_instance(request):
     domain = parsed.netloc or getattr(request, "host", "") or "localhost"
     channels = database.get_all_catalog_channels(include_deleted=False)
     posts_count = database.get_total_channel_posts_count()
-    admin_email = database.get_config("admin_email") or ""
+    admin_email = database.get_config("admin_dc_email") or database.get_config("admin_email") or ""
 
     data = {
         "uri": domain,
