@@ -30,6 +30,7 @@ except ImportError:
 import database
 
 logger = logging.getLogger("bouncer_bot.activitypub")
+VERSION = "2.12.9"
 
 # ==============================================================================
 # 1. RSA Key Management
@@ -547,7 +548,7 @@ async def init_delivery_worker(loop: asyncio.AbstractEventLoop):
     _delivery_queue = asyncio.Queue()
     _http_session = _aiohttp.ClientSession(
         timeout=_aiohttp.ClientTimeout(total=15),
-        headers={"User-Agent": "BouncerBot/2.12.8 (+https://dc.gluek.info)"}
+        headers={"User-Agent": f"BouncerBot/{VERSION} (+https://dc.gluek.info)"}
     )
     asyncio.create_task(_delivery_loop())
     logger.info("ActivityPub delivery worker started.")
@@ -870,7 +871,7 @@ async def fetch_remote_actor(actor_id: str, use_cache: bool = True,
 
     headers = {
         'Accept': 'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams"',
-        'User-Agent': 'BouncerBot/2.12.8 (+https://dc.gluek.info)',
+        'User-Agent': f'BouncerBot/{VERSION} (+https://dc.gluek.info)',
     }
 
     if sign_as_token and base_url and serialization is not None:
@@ -897,7 +898,7 @@ async def fetch_remote_actor(actor_id: str, use_cache: bool = True,
                         key_id = f"{s_base}/c/{s_tok}#main-key"
                         auth_headers = {
                             'Accept': 'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams"',
-                            'User-Agent': 'BouncerBot/2.12.8 (+https://dc.gluek.info)',
+                            'User-Agent': f'BouncerBot/{VERSION} (+https://dc.gluek.info)',
                         }
                         auth_headers.update(sign_headers('GET', actor_id, None, priv_pem, key_id))
                         async with _http_session.get(actor_id, headers=auth_headers, timeout=_aiohttp.ClientTimeout(total=10)) as resp2:

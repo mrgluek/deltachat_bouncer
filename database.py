@@ -1,5 +1,6 @@
 import contextlib
 import os
+import queue
 import secrets
 import sqlite3
 import string
@@ -13,8 +14,160 @@ _lock = _write_lock  # Backwards compatibility
 _writer_conn = None
 _writer_conn_db_path = None
 
+
+class _PooledConnection:
+    """Wrapper around a pooled sqlite3.Connection that returns itself to the pool on close()."""
+    def __init__(self, raw_conn: sqlite3.Connection, pool: "_ReaderConnectionPool | None", db_path: str):
+        self._raw_conn = raw_conn
+        self._pool = pool
+        self._db_path = db_path
+        self._closed = False
+
+    def close(self):
+        if not self._closed:
+            self._closed = True
+            if self._pool is not None:
+                self._pool.release(self)
+            else:
+                try:
+                    self._raw_conn.close()
+                except Exception:
+                    pass
+
+    def cursor(self, *args, **kwargs):
+        if self._closed:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed connection.")
+        return self._raw_conn.cursor(*args, **kwargs)
+
+    def execute(self, *args, **kwargs):
+        if self._closed:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed connection.")
+        return self._raw_conn.execute(*args, **kwargs)
+
+    def executemany(self, *args, **kwargs):
+        if self._closed:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed connection.")
+        return self._raw_conn.executemany(*args, **kwargs)
+
+    def commit(self):
+        if self._closed:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed connection.")
+        return self._raw_conn.commit()
+
+    def rollback(self):
+        if self._closed:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed connection.")
+        return self._raw_conn.rollback()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def __getattr__(self, name):
+        if self._closed:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed connection.")
+        return getattr(self._raw_conn, name)
+
+    def __setattr__(self, name, value):
+        if name in ("_raw_conn", "_pool", "_db_path", "_closed"):
+            super().__setattr__(name, value)
+        else:
+            setattr(self._raw_conn, name, value)
+
+
+class _ReaderConnectionPool:
+    """Thread-safe connection pool for SQLite reader operations in WAL mode."""
+    def __init__(self, max_size: int = 16):
+        self._max_size = max_size
+        self._pool = queue.LifoQueue(maxsize=max_size)
+        self._all_conns: list[sqlite3.Connection] = []
+        self._lock = threading.Lock()
+        self._current_db_path = None
+
+    def _create_raw_connection(self, timeout: float = 10.0) -> sqlite3.Connection:
+        conn = sqlite3.connect(DB_PATH, timeout=timeout, check_same_thread=False)
+        conn.execute("PRAGMA busy_timeout = 5000;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        return conn
+
+    def acquire(self, timeout: float = 10.0) -> _PooledConnection:
+        with self._lock:
+            # If DB_PATH has changed (e.g. in tests), reset the pool
+            if self._current_db_path != DB_PATH:
+                self._close_all_locked()
+                self._current_db_path = DB_PATH
+
+        while True:
+            try:
+                raw_conn = self._pool.get_nowait()
+                return _PooledConnection(raw_conn, self, self._current_db_path)
+            except queue.Empty:
+                break
+
+        with self._lock:
+            if len(self._all_conns) < self._max_size:
+                raw_conn = self._create_raw_connection(timeout=timeout)
+                self._all_conns.append(raw_conn)
+                return _PooledConnection(raw_conn, self, self._current_db_path)
+
+        try:
+            raw_conn = self._pool.get(timeout=timeout)
+            return _PooledConnection(raw_conn, self, self._current_db_path)
+        except queue.Empty:
+            raw_conn = self._create_raw_connection(timeout=timeout)
+            return _PooledConnection(raw_conn, None, self._current_db_path)
+
+    def release(self, pooled_conn: _PooledConnection):
+        raw_conn = pooled_conn._raw_conn
+        if pooled_conn._db_path != DB_PATH or raw_conn is None:
+            if raw_conn is not None:
+                try:
+                    raw_conn.close()
+                except Exception:
+                    pass
+            with self._lock:
+                if raw_conn in self._all_conns:
+                    self._all_conns.remove(raw_conn)
+            return
+
+        try:
+            raw_conn.row_factory = None
+            self._pool.put_nowait(raw_conn)
+        except queue.Full:
+            try:
+                raw_conn.close()
+            except Exception:
+                pass
+            with self._lock:
+                if raw_conn in self._all_conns:
+                    self._all_conns.remove(raw_conn)
+
+    def close_all(self):
+        with self._lock:
+            self._close_all_locked()
+
+    def _close_all_locked(self):
+        while not self._pool.empty():
+            try:
+                self._pool.get_nowait()
+            except queue.Empty:
+                break
+        for conn in self._all_conns:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        self._all_conns.clear()
+        self._current_db_path = DB_PATH
+
+
+_reader_pool = _ReaderConnectionPool(max_size=16)
+
+
 def close_db():
-    """Closes the shared writer connection and cleans up database state."""
+    """Closes the shared writer connection and all pooled reader connections."""
     global _writer_conn, _writer_conn_db_path
     with _write_lock:
         if _writer_conn is not None:
@@ -24,6 +177,8 @@ def close_db():
                 pass
             _writer_conn = None
             _writer_conn_db_path = None
+    _reader_pool.close_all()
+
 
 def _get_writer_conn() -> sqlite3.Connection:
     """Returns a shared, persistent connection for write operations guarded by _write_lock."""
@@ -44,6 +199,7 @@ def _get_writer_conn() -> sqlite3.Connection:
         _writer_conn_db_path = DB_PATH
     return _writer_conn
 
+
 @contextlib.contextmanager
 def _writer_transaction():
     """Context manager for write transactions reusing _writer_conn under _write_lock."""
@@ -59,11 +215,20 @@ def _writer_transaction():
                 pass
             raise
 
-def _connect(timeout: float = 10.0) -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=timeout)
-    conn.execute("PRAGMA busy_timeout = 5000;")
-    conn.execute("PRAGMA synchronous = NORMAL;")
-    return conn
+
+def _connect(timeout: float = 10.0) -> _PooledConnection:
+    """Returns a pooled reader connection. Calling .close() releases it back to the pool."""
+    return _reader_pool.acquire(timeout=timeout)
+
+
+@contextlib.contextmanager
+def _reader_connection(timeout: float = 10.0):
+    """Context manager acquiring a reader connection from the pool and returning it on exit."""
+    conn = _connect(timeout=timeout)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def generate_channel_token() -> str:
@@ -386,24 +551,18 @@ def set_config(key: str, value: str):
 
 
 def get_config(key: str) -> str:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT value FROM config WHERE key = ?", (key,))
         row = cursor.fetchone()
         return row[0] if row else None
-    finally:
-        conn.close()
 
 def get_chat_monitored_since(chat_id: int) -> float:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT monitored_since FROM chats WHERE chat_id = ?", (chat_id,))
         row = cursor.fetchone()
         return row[0] if row else None
-    finally:
-        conn.close()
 
 def set_chat_monitored_since(chat_id: int, timestamp: float):
     with _writer_transaction() as conn:
@@ -426,36 +585,27 @@ def set_chat_autokick(chat_id: int, days: int):
 
 
 def get_chat_autokick(chat_id: int) -> int:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT autokick_days FROM chats WHERE chat_id = ?", (chat_id,))
         row = cursor.fetchone()
         return row[0] if (row and row[0] is not None) else 0
-    finally:
-        conn.close()
 
 def get_all_autokick_chats() -> list[tuple[int, int]]:
     """Return list of (chat_id, autokick_days) where autokick_days > 0."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT chat_id, autokick_days FROM chats WHERE autokick_days > 0")
         rows = cursor.fetchall()
         return [(r[0], r[1]) for r in rows]
-    finally:
-        conn.close()
 
 def get_chat_last_autokick_warn_at(chat_id: int) -> float:
     """Get the timestamp of the last 24h daily autokick warning broadcast in this chat."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT last_autokick_warn_at FROM chats WHERE chat_id = ?", (chat_id,))
         row = cursor.fetchone()
         return row[0] if (row and row[0] is not None) else 0.0
-    finally:
-        conn.close()
 
 def set_chat_last_autokick_warn_at(chat_id: int, timestamp: float):
     """Set the timestamp of the last 24h daily autokick warning broadcast in this chat."""
@@ -480,14 +630,11 @@ def record_autokick_warning(chat_id: int, contact_id: int, timestamp: float):
 
 def get_autokick_warning(chat_id: int, contact_id: int) -> float | None:
     """Get the timestamp when an autokick warning was issued for a contact in a chat."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT warned_at FROM autokick_warnings WHERE chat_id = ? AND contact_id = ?", (chat_id, contact_id))
         row = cursor.fetchone()
         return row[0] if row else None
-    finally:
-        conn.close()
 
 def clear_autokick_warning(chat_id: int, contact_id: int):
     """Clear the autokick warning for a contact in a chat (e.g. if they spoke or were kicked)."""
@@ -532,25 +679,19 @@ def is_fingerprint_autokick_ignored(fingerprint: str) -> bool:
     if not fingerprint:
         return False
     clean_fp = fingerprint.strip().replace(" ", "").replace(":", "").upper()
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM autokick_ignored_fingerprints WHERE fingerprint = ?", (clean_fp,))
         row = cursor.fetchone()
         return bool(row)
-    finally:
-        conn.close()
 
 def get_all_autokick_ignored_fingerprints() -> list[tuple[str, str, float]]:
     """Return all ignored fingerprints as [(fingerprint, note, added_at), ...]."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT fingerprint, note, added_at FROM autokick_ignored_fingerprints ORDER BY added_at ASC")
         rows = cursor.fetchall()
         return [(r[0], r[1] or "", float(r[2])) for r in rows]
-    finally:
-        conn.close()
 
 def get_admin_fingerprint():
     """Get the saved admin DC fingerprint."""
@@ -564,14 +705,11 @@ def set_admin_fingerprint(fp):
 
 def get_contact_first_seen(contact_id: int) -> float:
     """Get the timestamp when the bot first saw this contact. Returns None if unknown."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT first_seen_at FROM contact_first_seen WHERE contact_id = ?", (contact_id,))
         row = cursor.fetchone()
         return row[0] if row else None
-    finally:
-        conn.close()
 
 def ensure_contact_first_seen(contact_id: int, timestamp: float):
     """Record first-seen time for a contact if not already known (INSERT OR IGNORE)."""
@@ -668,15 +806,12 @@ def flush_transport_stats():
 def get_all_transport_stats() -> list[dict]:
     """Get statistics for all tracked transports (flushes buffer first)."""
     flush_transport_stats()
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM transport_stats ORDER BY msgs_sent + msgs_received DESC")
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
-    finally:
-        conn.close()
 
 def cleanup_old_records(retention_days: int = 30) -> dict[str, int]:
     """Prune historical tables to keep database compact and performant.
@@ -722,37 +857,28 @@ def remove_catalog_chat(chat_id: int):
 
 
 def get_all_catalog_chats() -> list[dict]:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM catalog_chats ORDER BY id ASC")
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
-    finally:
-        conn.close()
 
 def get_catalog_chat_by_chat_id(chat_id: int) -> dict:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM catalog_chats WHERE chat_id = ?", (chat_id,))
         row = cursor.fetchone()
         return dict(row) if row else None
-    finally:
-        conn.close()
 
 def get_catalog_chat_by_id(catalog_id: int) -> dict:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM catalog_chats WHERE id = ?", (catalog_id,))
         row = cursor.fetchone()
         return dict(row) if row else None
-    finally:
-        conn.close()
 
 def update_catalog_chat_privacy(chat_id: int, is_private: int):
     with _writer_transaction() as conn:
@@ -773,14 +899,11 @@ def update_catalog_chat_invite_link(chat_id: int, invite_link: str, invite_msg_i
 
 
 def get_all_monitored_chats() -> list[int]:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT chat_id FROM chats")
         rows = cursor.fetchall()
         return [r[0] for r in rows]
-    finally:
-        conn.close()
 
 def add_pending_request(catalog_id: int, chat_id: int, requester_contact_id: int, requester_name: str, message: str) -> int:
     import time
@@ -795,15 +918,12 @@ def add_pending_request(catalog_id: int, chat_id: int, requester_contact_id: int
 
 
 def get_pending_request(request_id: int) -> dict:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM pending_requests WHERE id = ?", (request_id,))
         row = cursor.fetchone()
         return dict(row) if row else None
-    finally:
-        conn.close()
 
 def approve_pending_request(request_id: int):
     with _writer_transaction() as conn:
@@ -916,8 +1036,7 @@ def hard_remove_catalog_channel(chat_id: int) -> bool:
 
 
 def get_all_catalog_channels(include_deleted: bool = False, public_only: bool = False) -> list[dict]:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         if include_deleted:
@@ -932,13 +1051,10 @@ def get_all_catalog_channels(include_deleted: bool = False, public_only: bool = 
                 cursor.execute("SELECT * FROM catalog_channels WHERE is_deleted = 0 ORDER BY id ASC")
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
-    finally:
-        conn.close()
 
 
 def get_catalog_channel_by_chat_id(chat_id: int, include_deleted: bool = False) -> dict | None:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         if include_deleted:
@@ -947,13 +1063,10 @@ def get_catalog_channel_by_chat_id(chat_id: int, include_deleted: bool = False) 
             cursor.execute("SELECT * FROM catalog_channels WHERE chat_id = ? AND is_deleted = 0", (chat_id,))
         row = cursor.fetchone()
         return dict(row) if row else None
-    finally:
-        conn.close()
 
 
 def get_catalog_channel_by_id(catalog_id: int, include_deleted: bool = False) -> dict | None:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         if include_deleted:
@@ -962,20 +1075,15 @@ def get_catalog_channel_by_id(catalog_id: int, include_deleted: bool = False) ->
             cursor.execute("SELECT * FROM catalog_channels WHERE id = ? AND is_deleted = 0", (catalog_id,))
         row = cursor.fetchone()
         return dict(row) if row else None
-    finally:
-        conn.close()
 
 
 def get_catalog_channel_by_token(token: str) -> dict | None:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM catalog_channels WHERE token = ?", (token,))
         row = cursor.fetchone()
         return dict(row) if row else None
-    finally:
-        conn.close()
 
 
 def save_channel_post(chat_id: int, msg_id: int, from_name: str = "", text: str = "",
@@ -1002,8 +1110,7 @@ def save_channel_post(chat_id: int, msg_id: int, from_name: str = "", text: str 
 
 
 def get_channel_posts(chat_id: int, limit: int = 50, offset: int = 0) -> list[dict]:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute('''
@@ -1014,8 +1121,6 @@ def get_channel_posts(chat_id: int, limit: int = 50, offset: int = 0) -> list[di
         ''', (chat_id, limit, offset))
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
-    finally:
-        conn.close()
 
 
 def prune_channel_posts(chat_id: int, keep_count: int = 100):
@@ -1041,14 +1146,11 @@ def update_catalog_chat_description(catalog_id: int, description: str):
 
 def get_total_channel_posts_count() -> int:
     """Get total count of all posts stored in the catalog_channel_posts table."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM catalog_channel_posts")
         row = cursor.fetchone()
         return row[0] if row else 0
-    finally:
-        conn.close()
 # --- CMPing monitoring functions ---
 
 
@@ -1075,25 +1177,19 @@ def remove_cmping_monitor(domain: str) -> bool:
 
 def get_all_cmping_monitors() -> list[str]:
     """Get all monitored server domains."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT domain FROM cmping_monitors ORDER BY added_at ASC")
         rows = cursor.fetchall()
         return [r[0] for r in rows]
-    finally:
-        conn.close()
 
 def is_cmping_monitor(domain: str) -> bool:
     """Check if a domain is in cmping monitoring."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM cmping_monitors WHERE domain = ?", (domain.strip().lower(),))
         row = cursor.fetchone()
         return row is not None
-    finally:
-        conn.close()
 
 def add_cmping_report_chat(chat_id: int):
     """Subscribe a chat to cmping monitoring alerts."""
@@ -1117,38 +1213,29 @@ def remove_cmping_report_chat(chat_id: int) -> bool:
 
 def get_all_cmping_report_chats() -> list[int]:
     """Get all chat IDs subscribed to cmping monitoring alerts."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT chat_id FROM cmping_report_chats")
         rows = cursor.fetchall()
         return [r[0] for r in rows]
-    finally:
-        conn.close()
 
 def is_cmping_report_chat(chat_id: int) -> bool:
     """Check if a chat is subscribed to cmping monitoring alerts."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM cmping_report_chats WHERE chat_id = ?", (chat_id,))
         row = cursor.fetchone()
         return row is not None
-    finally:
-        conn.close()
 
 def get_cmping_report_chat_enabled_at(chat_id: int) -> float:
     """Get the timestamp when a chat was subscribed to cmping monitoring."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT enabled_at FROM cmping_report_chats WHERE chat_id = ?", (chat_id,))
         row = cursor.fetchone()
         return row[0] if row else None
 
 # --- CMPing results persistence ---
-    finally:
-        conn.close()
 
 def save_cmping_result(src: str, dst: str, success: bool, error: str, avg: float, checked_at: float):
     """Save or update a cmping test result in the database."""
@@ -1165,8 +1252,7 @@ def save_cmping_result(src: str, dst: str, success: bool, error: str, avg: float
 
 def get_all_cmping_results() -> dict:
     """Load all cmping results from the database."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT src, dst, success, error, avg, checked_at FROM cmping_results")
         rows = cursor.fetchall()
@@ -1181,8 +1267,6 @@ def get_all_cmping_results() -> dict:
                 "checked_at": checked_at
             }
         return results
-    finally:
-        conn.close()
 
 def delete_cmping_results_for_domain(domain: str):
     """Delete all results involving a specific domain."""
@@ -1217,8 +1301,7 @@ def get_average_ping_for_server(domain: str, limit: int = 100) -> tuple:
     """Calculate the average ping in ms for a server based on its last N measurements.
     Returns a tuple (avg_ping_ms, count). If no measurements, returns (None, 0).
     """
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         # Find latest N measurements where server was src or dst
         cursor.execute(
@@ -1237,8 +1320,6 @@ def get_average_ping_for_server(domain: str, limit: int = 100) -> tuple:
             
         pings = [r[0] for r in rows]
         return sum(pings) / len(pings), len(pings)
-    finally:
-        conn.close()
 
 def delete_cmping_history_for_domain(domain: str):
     """Delete all history records involving a specific domain."""
@@ -1265,8 +1346,7 @@ def create_cmping_incident(started_at: int = None) -> int:
 
 
 def get_active_cmping_incident() -> dict | None:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
@@ -1274,23 +1354,17 @@ def get_active_cmping_incident() -> dict | None:
         )
         row = cursor.fetchone()
         return dict(row) if row else None
-    finally:
-        conn.close()
 
 def get_all_active_cmping_incidents() -> list[dict]:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM cmping_incidents WHERE status = 'ongoing' ORDER BY id ASC")
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
-    finally:
-        conn.close()
 
 def get_active_cmping_incident_for_outage(outage_time: int, max_gap_seconds: int = 3600, allow_reopen: bool = True) -> dict | None:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         if allow_reopen:
@@ -1317,8 +1391,6 @@ def get_active_cmping_incident_for_outage(outage_time: int, max_gap_seconds: int
             ''', (outage_time, max_gap_seconds, outage_time))
         row = cursor.fetchone()
         return dict(row) if row else None
-    finally:
-        conn.close()
 
 def reopen_cmping_incident(incident_id: int):
     with _writer_transaction() as conn:
@@ -1330,8 +1402,7 @@ def reopen_cmping_incident(incident_id: int):
 
 
 def get_cmping_incident_downtime_events(incident_id: int) -> list[dict]:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
@@ -1340,12 +1411,9 @@ def get_cmping_incident_downtime_events(incident_id: int) -> list[dict]:
         )
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
-    finally:
-        conn.close()
 
 def get_cmping_incident_affected_servers(incident_id: int, fallback_started_at: int = None) -> list[str]:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT DISTINCT server FROM cmping_downtime_events WHERE incident_id = ?", (incident_id,))
         rows = cursor.fetchall()
@@ -1358,12 +1426,9 @@ def get_cmping_incident_affected_servers(incident_id: int, fallback_started_at: 
             rows = cursor.fetchall()
             servers = [r[0] for r in rows if r[0]]
         return servers
-    finally:
-        conn.close()
 
 def get_cmping_incident_by_id(incident_id: int) -> dict | None:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
@@ -1372,12 +1437,9 @@ def get_cmping_incident_by_id(incident_id: int) -> dict | None:
         )
         row = cursor.fetchone()
         return dict(row) if row else None
-    finally:
-        conn.close()
 
 def get_recent_cmping_incidents(limit: int = 10) -> list[dict]:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
@@ -1386,8 +1448,6 @@ def get_recent_cmping_incidents(limit: int = 10) -> list[dict]:
         )
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
-    finally:
-        conn.close()
 
 def resolve_cmping_incident(incident_id: int, resolved_at: int = None, summary: str = ""):
     if resolved_at is None:
@@ -1410,8 +1470,7 @@ def set_cmping_incident_msg_id(incident_id: int, chat_id: int, msg_id: int):
 
 
 def get_cmping_incident_msg_ids(incident_id: int) -> dict[int, int]:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT chat_id, msg_id FROM cmping_incident_messages WHERE incident_id = ?",
@@ -1419,8 +1478,6 @@ def get_cmping_incident_msg_ids(incident_id: int) -> dict[int, int]:
         )
         rows = cursor.fetchall()
         return {r[0]: r[1] for r in rows}
-    finally:
-        conn.close()
 
 def record_cmping_server_down(server: str, went_down_at: int = None, error_msg: str = ""):
     if went_down_at is None:
@@ -1480,8 +1537,7 @@ def record_cmping_server_up(server: str, went_up_at: int = None):
 
 def get_server_cmping_downtime_events(server: str, limit: int = 10) -> list[dict]:
     server_norm = server.strip().lower()
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
@@ -1490,12 +1546,9 @@ def get_server_cmping_downtime_events(server: str, limit: int = 10) -> list[dict
         )
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
-    finally:
-        conn.close()
 
 def get_all_cmping_downtime_events(limit: int = 10) -> list[dict]:
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
@@ -1504,8 +1557,6 @@ def get_all_cmping_downtime_events(limit: int = 10) -> list[dict]:
         )
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
-    finally:
-        conn.close()
 
 def set_away_status(contact_id: int, away_text: str):
     """Set the away status text for a contact."""
@@ -1533,8 +1584,7 @@ def remove_away_status(contact_id: int):
 
 def get_away_status(contact_id: int) -> str | None:
     """Get the away status text for a contact, or None if not away."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT away_text FROM away_status WHERE contact_id = ?",
@@ -1542,13 +1592,10 @@ def get_away_status(contact_id: int) -> str | None:
         )
         row = cursor.fetchone()
         return row[0] if row else None
-    finally:
-        conn.close()
 
 def get_away_status_details(contact_id: int) -> tuple[str, float] | None:
     """Get the away status text and updated_at timestamp for a contact, or None if not away."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT away_text, updated_at FROM away_status WHERE contact_id = ?",
@@ -1556,13 +1603,10 @@ def get_away_status_details(contact_id: int) -> tuple[str, float] | None:
         )
         row = cursor.fetchone()
         return (row[0], row[1]) if row else None
-    finally:
-        conn.close()
 
 def has_notified_away(away_user_id: int, recipient_id: int, away_updated_at: float) -> bool:
     """Check if a recipient has already been notified about this specific away status."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT 1 FROM away_notifications WHERE away_user_id = ? AND recipient_id = ? AND away_updated_at = ?",
@@ -1570,8 +1614,6 @@ def has_notified_away(away_user_id: int, recipient_id: int, away_updated_at: flo
         )
         row = cursor.fetchone()
         return row is not None
-    finally:
-        conn.close()
 
 def mark_notified_away(away_user_id: int, recipient_id: int, away_updated_at: float):
     """Mark that a recipient has been notified about this specific away status."""
@@ -1585,8 +1627,7 @@ def mark_notified_away(away_user_id: int, recipient_id: int, away_updated_at: fl
 
 def get_notified_recipients(away_user_id: int) -> list[int]:
     """Get all recipient IDs who were notified about this user's away status."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT recipient_id FROM away_notifications WHERE away_user_id = ?",
@@ -1594,8 +1635,6 @@ def get_notified_recipients(away_user_id: int) -> list[int]:
         )
         rows = cursor.fetchall()
         return [r[0] for r in rows]
-    finally:
-        conn.close()
 
 def delete_cmping_result(src: str, dst: str):
     """Delete a specific cmping result from the database."""
@@ -1610,15 +1649,12 @@ def delete_cmping_result(src: str, dst: str):
 
 def get_ap_actor_keys(token: str) -> dict | None:
     """Get RSA keypair for an ActivityPub actor by channel token."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM ap_actor_keys WHERE token = ?", (token,))
         row = cursor.fetchone()
         return dict(row) if row else None
-    finally:
-        conn.close()
 
 
 def save_ap_actor_keys(token: str, private_key_pem: str, public_key_pem: str):
@@ -1651,8 +1687,7 @@ def add_ap_follower(actor_token: str, follower_actor_id: str,
 
 def get_follower_public_key(follower_actor_id: str) -> str | None:
     """Get stored public key PEM for a follower actor ID."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT follower_public_key FROM ap_followers WHERE follower_actor_id = ? AND follower_public_key IS NOT NULL LIMIT 1",
@@ -1660,8 +1695,6 @@ def get_follower_public_key(follower_actor_id: str) -> str | None:
         )
         row = cursor.fetchone()
         return row[0] if row and row[0] else None
-    finally:
-        conn.close()
 
 
 def remove_ap_follower(actor_token: str, follower_actor_id: str) -> bool:
@@ -1688,8 +1721,7 @@ def remove_ap_followers_by_actor(follower_actor_id: str) -> int:
 
 def get_ap_followers(actor_token: str) -> list[dict]:
     """Get all followers for a channel."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
@@ -1697,14 +1729,11 @@ def get_ap_followers(actor_token: str) -> list[dict]:
             (actor_token,)
         )
         return [dict(r) for r in cursor.fetchall()]
-    finally:
-        conn.close()
 
 
 def get_ap_follower_inboxes(actor_token: str) -> list[dict]:
     """Get deduplicated inbox URLs for delivery. Returns list of {follower_inbox, follower_shared_inbox}."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
@@ -1712,22 +1741,17 @@ def get_ap_follower_inboxes(actor_token: str) -> list[dict]:
             (actor_token,)
         )
         return [dict(r) for r in cursor.fetchall()]
-    finally:
-        conn.close()
 
 
 def get_ap_followers_count(actor_token: str) -> int:
     """Get the number of ActivityPub followers for a channel."""
-    conn = _connect()
-    try:
+    with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT COUNT(*) FROM ap_followers WHERE actor_token = ?",
             (actor_token,)
         )
         return cursor.fetchone()[0]
-    finally:
-        conn.close()
 
 
 def delete_ap_actor_keys(token: str) -> bool:

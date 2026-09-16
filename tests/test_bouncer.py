@@ -1527,6 +1527,146 @@ class TestBouncerBot(unittest.TestCase):
             self.assertIn("All 2 members are active", msg_text)
 
 
+class TestPerformanceAndPooling(unittest.TestCase):
+    def setUp(self):
+        database.close_db()
+        for suffix in ["", "-wal", "-shm"]:
+            path = TEST_DB + suffix
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        database.init_db()
+
+    def tearDown(self):
+        database.close_db()
+        for suffix in ["", "-wal", "-shm"]:
+            path = TEST_DB + suffix
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+    def test_reader_pool_connection_reuse(self):
+        """Verify that sequential reads reuse the same underlying connection from the pool."""
+        with database._reader_connection() as conn1:
+            raw_conn1 = conn1._raw_conn
+            cur = conn1.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchone()
+
+        with database._reader_connection() as conn2:
+            raw_conn2 = conn2._raw_conn
+            cur = conn2.cursor()
+            cur.execute("SELECT 2")
+            cur.fetchone()
+
+        self.assertIs(raw_conn1, raw_conn2, "Reader pool should reuse the underlying connection")
+
+    def test_reader_pool_context_manager_exception_safety(self):
+        """Verify that connection returns to pool even when an exception is raised."""
+        try:
+            with database._reader_connection() as conn:
+                raise ValueError("Deliberate error inside context manager")
+        except ValueError:
+            pass
+
+        # Connection should be back in pool
+        self.assertGreaterEqual(database._reader_pool._pool.qsize(), 1)
+
+    def test_reader_pool_close_db_drains_pool(self):
+        """Verify that close_db closes and clears all pooled reader connections."""
+        with database._reader_connection() as conn:
+            pass
+        self.assertGreaterEqual(database._reader_pool._pool.qsize(), 1)
+        database.close_db()
+        self.assertEqual(database._reader_pool._pool.qsize(), 0)
+
+    def test_reader_pool_concurrent_reads(self):
+        """Verify that multiple concurrent threads can read simultaneously using pooled connections."""
+        import threading
+        results = []
+        errors = []
+
+        def worker(idx):
+            try:
+                with database._reader_connection() as conn:
+                    cur = conn.cursor()
+                    cur.execute("SELECT ?", (idx,))
+                    val = cur.fetchone()[0]
+                    results.append(val)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(errors), 0, f"Concurrent reads had errors: {errors}")
+        self.assertEqual(len(results), 10)
+        self.assertEqual(set(results), set(range(10)))
+
+    def test_handle_all_messages_ingest_channel_post_dispatched_in_thread(self):
+        """Verify _ingest_channel_post is dispatched asynchronously on a daemon thread."""
+        mock_bot = MagicMock()
+        mock_event = MagicMock()
+        mock_event.msg.chat_id = 1234
+        mock_event.msg.id = 5678
+        mock_event.msg.from_id = 999
+        mock_event.msg.is_info = False
+        mock_event.msg.text = "Hello channel post"
+
+        database.add_catalog_channel(1234, "Test Channel", "Desc", 0, "http://example.com/ch", is_public=1)
+
+        with patch('threading.Thread') as mock_thread_cls:
+            mock_thread_instance = MagicMock()
+            mock_thread_cls.return_value = mock_thread_instance
+
+            bot.handle_all_messages(mock_bot, 1, mock_event)
+
+            mock_thread_cls.assert_called()
+            called_targets = [c.kwargs.get('target') for c in mock_thread_cls.call_args_list if 'target' in c.kwargs]
+            self.assertIn(bot._ingest_channel_post, called_targets)
+            mock_thread_instance.start.assert_called()
+
+    def test_cmping_bounded_thread_pool(self):
+        """Verify _bg_cmping_worker_inner bounds ThreadPoolExecutor to min(4, len(bot_domains))."""
+        import concurrent.futures
+        bot_domains = [f"domain{i}.org" for i in range(10)]
+        with patch('concurrent.futures.ThreadPoolExecutor') as mock_executor, \
+             patch('shutil.which', return_value="/usr/bin/cmping"):
+            mock_exec_instance = MagicMock()
+            mock_exec_instance.__enter__.return_value = mock_exec_instance
+            mock_exec_instance.__exit__.return_value = False
+            mock_exec_instance.submit.return_value = MagicMock()
+            mock_executor.return_value = mock_exec_instance
+
+            with patch('concurrent.futures.as_completed', return_value=[]):
+                bot._bg_cmping_worker_inner(MagicMock(), 1, 100, 200, bot_domains, ["target.org"])
+                mock_executor.assert_called_once_with(max_workers=4)
+
+    def test_qr_web_handlers_use_asyncio_to_thread(self):
+        """Verify QR web handlers offload image generation using asyncio.to_thread."""
+        import asyncio
+        mock_web = MagicMock()
+        mock_web.Response = MagicMock(side_effect=lambda *args, **kwargs: MagicMock(status=200, **kwargs))
+        with patch.object(bot, 'web', mock_web), \
+             patch('asyncio.to_thread') as mock_to_thread, \
+             patch.object(bot, 'get_bot_invite_link', return_value="https://i.delta.chat/#invite"):
+            mock_to_thread.return_value = (b"<svg></svg>", "image/svg+xml")
+
+            req = MagicMock()
+            req.headers = {}
+            res = asyncio.run(bot.handle_qr_svg(req))
+            mock_to_thread.assert_called_once()
+            self.assertEqual(mock_to_thread.call_args[0][0], bot._generate_qr_bytes)
+            self.assertEqual(res.status, 200)
+
+
 if __name__ == '__main__':
     unittest.main()
 

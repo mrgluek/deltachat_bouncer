@@ -37,7 +37,7 @@ import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.12.8"
+VERSION = "2.12.9"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -4065,7 +4065,7 @@ def _bg_cmping_worker_inner(bot, accid, chat_id, msg_id, bot_domains, specified_
             relay_results.append((h2, res))
         return h1, relay_results
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(bot_domains)) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(bot_domains)) if bot_domains else 1) as executor:
         futures = {executor.submit(run_relay_pings, host1): host1 for host1 in bot_domains}
         
         for f in concurrent.futures.as_completed(futures):
@@ -5395,13 +5395,56 @@ def _scan_file_virustotal(bot, accid, chat_id, msg_id, file_info: dict, vt_key: 
     return f"❌ VirusTotal API error: {err or f'Status {status}'}", "❌"
 
 
-def bg_virus_worker(bot, accid, chat_id, msg_id, target_type, target_data, vt_key):
+def bg_virus_worker(bot, accid, chat_id, msg_id, target_type, target_data, vt_key, msg=None, payload=None):
     """Background worker for VirusTotal checks with global lock and FIFO queueing."""
     if not _vt_global_lock.acquire(blocking=False):
         _send(bot, accid, chat_id, "⏳ Another VirusTotal check is in progress, your request is queued...", reply_to_id=msg_id)
         _vt_global_lock.acquire()
 
     try:
+        # Resolve target if not already resolved synchronously
+        if not target_type and msg:
+            # Check quote / reply
+            if hasattr(msg, "quote") and msg.quote and isinstance(msg.quote, dict):
+                quote_msg_id = msg.quote.get("message_id") or msg.quote.get("messageId")
+                if quote_msg_id:
+                    try:
+                        quoted_msg = bot.rpc.get_message(accid, quote_msg_id)
+                        q_file = _get_msg_file_info(bot, accid, quoted_msg)
+                        if q_file:
+                            target_type = "file"
+                            target_data = q_file
+                        else:
+                            raw_text = getattr(quoted_msg, "text", "") if not isinstance(quoted_msg, dict) else quoted_msg.get("text", "")
+                            q_text = raw_text if isinstance(raw_text, str) else ""
+                            if not q_text and isinstance(msg.quote, dict):
+                                raw_qt = msg.quote.get("text", "")
+                                q_text = raw_qt if isinstance(raw_qt, str) else ""
+                            url = _extract_first_url(q_text)
+                            if url:
+                                target_type = "url"
+                                target_data = url
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch quoted message for /virus: {e}")
+
+            # If still not found, check if message itself has an attached file
+            if not target_type:
+                m_file = _get_msg_file_info(bot, accid, msg)
+                if m_file:
+                    target_type = "file"
+                    target_data = m_file
+
+        if not target_type:
+            _react(bot, accid, msg_id, "❓")
+            _send(
+                bot, accid, chat_id,
+                "Usage:\n"
+                "• `/virus <url>` — Scan a URL with VirusTotal\n"
+                "• Reply to a message containing a link or attached file with `/virus`",
+                reply_to_id=msg_id,
+            )
+            return
+
         if target_type == "url":
             report_text, reaction = _scan_url_virustotal(bot, accid, chat_id, msg_id, target_data, vt_key)
         else:
@@ -5442,37 +5485,27 @@ def virus_command(bot, accid, event):
             target_type = "url"
             target_data = url
 
-    # If no URL in payload, check quote / reply
-    if not target_type and hasattr(msg, "quote") and msg.quote and isinstance(msg.quote, dict):
-        quote_msg_id = msg.quote.get("message_id") or msg.quote.get("messageId")
-        if quote_msg_id:
-            try:
-                quoted_msg = bot.rpc.get_message(accid, quote_msg_id)
-                q_file = _get_msg_file_info(bot, accid, quoted_msg)
-                if q_file:
-                    target_type = "file"
-                    target_data = q_file
-                else:
-                    raw_text = getattr(quoted_msg, "text", "") if not isinstance(quoted_msg, dict) else quoted_msg.get("text", "")
-                    q_text = raw_text if isinstance(raw_text, str) else ""
-                    if not q_text and isinstance(msg.quote, dict):
-                        raw_qt = msg.quote.get("text", "")
-                        q_text = raw_qt if isinstance(raw_qt, str) else ""
-                    url = _extract_first_url(q_text)
-                    if url:
-                        target_type = "url"
-                        target_data = url
-            except Exception as e:
-                logger.warning(f"Failed to fetch quoted message for /virus: {e}")
+    has_quote = bool(
+        hasattr(msg, "quote")
+        and msg.quote
+        and isinstance(msg.quote, dict)
+        and (msg.quote.get("message_id") or msg.quote.get("messageId") or msg.quote.get("text"))
+    )
+    raw_file = getattr(msg, "file", None) if not isinstance(msg, dict) else msg.get("file")
+    raw_filename = getattr(msg, "filename", None) if not isinstance(msg, dict) else msg.get("filename")
+    raw_bytes = getattr(msg, "file_bytes", None) if not isinstance(msg, dict) else msg.get("file_bytes")
+    raw_vt = getattr(msg, "view_type", None) if not isinstance(msg, dict) else msg.get("view_type")
+    raw_ds = getattr(msg, "download_state", None) if not isinstance(msg, dict) else msg.get("download_state")
 
-    # If still not found, check if message itself has an attached file
-    if not target_type:
-        m_file = _get_msg_file_info(bot, accid, msg)
-        if m_file:
-            target_type = "file"
-            target_data = m_file
+    has_attachment_fast = bool(
+        raw_file
+        or raw_filename
+        or (isinstance(raw_bytes, int) and not isinstance(raw_bytes, bool) and raw_bytes > 0)
+        or any(t in str(raw_vt).lower() for t in ("file", "image", "audio", "video", "voice", "gif", "sticker"))
+        or any(s in str(raw_ds).lower() for s in ("available", "inprogress", "10", "100", "1000"))
+    )
 
-    if not target_type:
+    if not target_type and not has_quote and not has_attachment_fast:
         _send(
             bot, accid, msg.chat_id,
             "Usage:\n"
@@ -5486,7 +5519,7 @@ def virus_command(bot, accid, event):
 
     threading.Thread(
         target=bg_virus_worker,
-        args=(bot, accid, msg.chat_id, msg.id, target_type, target_data, vt_key),
+        args=(bot, accid, msg.chat_id, msg.id, target_type, target_data, vt_key, msg, payload),
         daemon=True,
     ).start()
 
@@ -5749,7 +5782,11 @@ def handle_all_messages(bot, accid, event):
             token = catalog_channel.get("token")
             if not token:
                 token = database.get_or_create_channel_token(msg.chat_id)
-            _ingest_channel_post(bot, accid, msg, catalog_channel, token)
+            threading.Thread(
+                target=_ingest_channel_post,
+                args=(bot, accid, msg, catalog_channel, token),
+                daemon=True,
+            ).start()
     except Exception as e:
         logger.error(f"Error ingesting channel post for chat {msg.chat_id}: {e}")
         
@@ -7830,7 +7867,7 @@ async def handle_qr_svg(request):
     if not link:
         return web.Response(status=404)
     try:
-        body, content_type = _generate_qr_bytes(link, fmt="svg")
+        body, content_type = await asyncio.to_thread(_generate_qr_bytes, link, fmt="svg")
         headers = {"Cache-Control": "public, max-age=86400, immutable", "Content-Type": content_type}
         return web.Response(body=body, headers=headers)
     except Exception as e:
@@ -7843,7 +7880,7 @@ async def handle_qr_png(request):
     if not link:
         return web.Response(status=404)
     try:
-        body, content_type = _generate_qr_bytes(link, fmt="png", box_size=6)
+        body, content_type = await asyncio.to_thread(_generate_qr_bytes, link, fmt="png", box_size=6)
         headers = {"Cache-Control": "public, max-age=86400, immutable", "Content-Type": content_type}
         return web.Response(body=body, headers=headers)
     except Exception as e:
@@ -7956,7 +7993,7 @@ async def handle_channel_qr_png(request):
         link = raw_link
 
     try:
-        body, content_type = _generate_qr_bytes(link, fmt="png", box_size=6)
+        body, content_type = await asyncio.to_thread(_generate_qr_bytes, link, fmt="png", box_size=6)
         headers = {"Cache-Control": "public, max-age=86400, immutable", "Content-Type": content_type}
         return web.Response(body=body, headers=headers)
     except Exception as e:
@@ -7981,7 +8018,7 @@ async def handle_channel_qr_svg(request):
         link = raw_link
 
     try:
-        body, content_type = _generate_qr_bytes(link, fmt="svg")
+        body, content_type = await asyncio.to_thread(_generate_qr_bytes, link, fmt="svg")
         headers = {"Cache-Control": "public, max-age=86400, immutable", "Content-Type": content_type}
         return web.Response(body=body, headers=headers)
     except Exception as e:
