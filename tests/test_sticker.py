@@ -81,6 +81,7 @@ class TestStickerCommands(unittest.TestCase):
         self.mock_bot.logger = MagicMock()
         self.accid = 1
         bot._chat_sticker_anti_spam.clear()
+        bot._chat_stickernobg_anti_spam.clear()
 
         self.temp_test_dir = tempfile.mkdtemp(prefix="dc_test_sticker_")
 
@@ -336,6 +337,8 @@ class TestStickerCommands(unittest.TestCase):
         mock_raw_img.is_animated = False
 
         mock_resized_img = MagicMock()
+        mock_resized_img.size = (512, 256)
+        mock_resized_img.mode = "RGBA"
         mock_raw_img.resize.return_value = mock_resized_img
 
         mock_pil = MagicMock()
@@ -381,6 +384,129 @@ class TestStickerCommands(unittest.TestCase):
             self.assertFalse(success)
             self.assertIn("rembg", err)
             self.assertIn("/sticker", err)
+
+
+    def test_stickernobg_anti_spam_cooldown(self):
+        """Verify 15-second cooldown triggers delayed execution for /stickernobg."""
+        dummy_img = os.path.join(self.temp_test_dir, "spam_nobg.jpg")
+        with open(dummy_img, "wb") as f:
+            f.write(b"spam nobg image")
+
+        event = MagicMock()
+        event.msg.id = 107
+        event.msg.chat_id = 207
+        event.msg.from_id = 100
+        event.msg.text = "/stickernobg"
+        event.msg.file = dummy_img
+        event.msg.filename = "spam_nobg.jpg"
+        event.msg.file_bytes = 90
+        event.msg.view_type = "Image"
+        event.msg.download_state = None
+        event.msg.quote = None
+        event.payload = ""
+
+        # First call records timestamp
+        with patch("bot._is_dc_admin", return_value=False), \
+             patch("bot.convert_to_sticker_webp", return_value=(True, "")), \
+             patch("bot._send_sticker"), \
+             patch("threading.Thread", side_effect=_make_sync_thread):
+
+            bot.stickernobg_command(self.mock_bot, self.accid, event)
+
+        self.assertIn(207, bot._chat_stickernobg_anti_spam)
+        self.assertNotIn(207, bot._chat_sticker_anti_spam)
+
+        # Immediate second call should trigger _queue_delayed_command with stickernobg key
+        with patch("bot._is_dc_admin", return_value=False), \
+             patch("bot._queue_delayed_command") as mock_queue:
+
+            bot.stickernobg_command(self.mock_bot, self.accid, event)
+            mock_queue.assert_called_once()
+            self.assertEqual(mock_queue.call_args[0][3], "stickernobg")
+
+    def test_convert_to_sticker_webp_prescale_before_rembg(self):
+        """Verify image is pre-scaled to 512px before calling rembg.remove."""
+        mock_raw_img = MagicMock()
+        mock_raw_img.size = (4000, 2000)
+        mock_raw_img.mode = "RGB"
+        mock_raw_img.is_animated = False
+
+        mock_prescaled_img = MagicMock()
+        mock_prescaled_img.size = (512, 256)
+        mock_prescaled_img.mode = "RGBA"
+        mock_prescaled_img.convert.return_value = mock_prescaled_img
+
+        mock_nobg_img = MagicMock()
+        mock_nobg_img.size = (512, 256)
+
+        mock_raw_img.resize.return_value = mock_prescaled_img
+
+        mock_pil = MagicMock()
+        mock_pil_image = MagicMock()
+        mock_pil_imageops = MagicMock()
+        mock_pil_imageops.exif_transpose.side_effect = lambda im: im
+        mock_pil.Image = mock_pil_image
+        mock_pil.ImageOps = mock_pil_imageops
+        mock_pil_image.open.return_value.__enter__.return_value = mock_raw_img
+
+        mock_rembg = MagicMock()
+        mock_rembg.remove.return_value = mock_nobg_img
+        mock_session = MagicMock()
+
+        with patch.dict("sys.modules", {"PIL": mock_pil, "PIL.Image": mock_pil_image, "PIL.ImageOps": mock_pil_imageops, "rembg": mock_rembg}), \
+             patch("bot._get_rembg_session", return_value=mock_session):
+            dest_file = os.path.join(self.temp_test_dir, "nobg_out.webp")
+            success, err = bot.convert_to_sticker_webp("big.jpg", dest_file, remove_bg=True, max_dim=512)
+
+            self.assertTrue(success, f"Error was: {err}")
+            # Verify pre-scale resize was called on raw_img BEFORE rembg
+            mock_raw_img.resize.assert_called_once_with((512, 256), mock_pil_image.Resampling.LANCZOS)
+            # Verify rembg.remove was called with the pre-scaled image and session
+            mock_rembg.remove.assert_called_once_with(mock_prescaled_img, session=mock_session)
+            mock_nobg_img.save.assert_called_once()
+
+    def test_convert_to_sticker_webp_enable_rembg_disabled(self):
+        """When ENABLE_REMBG=false, return error message indicating background removal is disabled."""
+        mock_raw_img = MagicMock()
+        mock_raw_img.size = (500, 500)
+        mock_raw_img.mode = "RGB"
+        mock_raw_img.is_animated = False
+
+        mock_pil = MagicMock()
+        mock_pil_image = MagicMock()
+        mock_pil_imageops = MagicMock()
+        mock_pil_imageops.exif_transpose.side_effect = lambda im: im
+        mock_pil.Image = mock_pil_image
+        mock_pil.ImageOps = mock_pil_imageops
+        mock_pil_image.open.return_value.__enter__.return_value = mock_raw_img
+
+        with patch.dict("sys.modules", {"PIL": mock_pil, "PIL.Image": mock_pil_image, "PIL.ImageOps": mock_pil_imageops}), \
+             patch.dict(os.environ, {"ENABLE_REMBG": "false"}):
+            dest_file = os.path.join(self.temp_test_dir, "out_disabled.webp")
+            success, err = bot.convert_to_sticker_webp("photo.jpg", dest_file, remove_bg=True)
+
+            self.assertFalse(success)
+            self.assertIn("Background removal is disabled", err)
+
+    def test_get_rembg_session_caching(self):
+        """Verify _get_rembg_session lazily initializes and caches the session."""
+        bot._rembg_session = None
+        mock_rembg = MagicMock()
+        mock_session_obj = MagicMock()
+        mock_rembg.new_session.return_value = mock_session_obj
+
+        with patch.dict("sys.modules", {"rembg": mock_rembg}), \
+             patch.dict(os.environ, {"REMBG_MODEL": "u2netp"}):
+            sess1 = bot._get_rembg_session()
+            self.assertEqual(sess1, mock_session_obj)
+            mock_rembg.new_session.assert_called_once_with("u2netp")
+
+            # Second call should return cached session without calling new_session again
+            sess2 = bot._get_rembg_session()
+            self.assertEqual(sess2, mock_session_obj)
+            mock_rembg.new_session.assert_called_once()
+
+        bot._rembg_session = None
 
 
 if __name__ == "__main__":

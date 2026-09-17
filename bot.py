@@ -38,7 +38,7 @@ import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.14.0"
+VERSION = "2.14.1"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -99,10 +99,18 @@ _chat_search_anti_spam: dict[int, float] = {}
 _chat_cmping_anti_spam: dict[int, float] = {}
 _chat_slap_anti_spam: dict[int, float] = {}
 _chat_sticker_anti_spam: dict[int, float] = {}
+_chat_stickernobg_anti_spam: dict[int, float] = {}
+_rembg_global_lock = threading.Lock()
 _domain_locks: dict[str, threading.Lock] = {}
 _domain_locks_lock = threading.Lock()
 _cmping_global_lock = threading.Lock()
 resilient_lock = threading.Lock()
+
+# Persistent rembg / u2net models storage
+if os.getenv("DC_DB_DIR"):
+    _default_u2net_dir = os.path.join(os.getenv("DC_DB_DIR"), "u2net")
+    os.environ.setdefault("U2NET_HOME", _default_u2net_dir)
+    os.environ.setdefault("REMBG_HOME", _default_u2net_dir)
 
 CHANNEL_MEDIA_DIR = os.path.join(os.getenv("DC_DB_DIR", "data"), "channel_media")
 os.makedirs(CHANNEL_MEDIA_DIR, exist_ok=True)
@@ -205,7 +213,7 @@ def _prune_anti_spam_dicts():
     """Prune anti-spam entries older than 3600 seconds to prevent memory growth."""
     now = time.time()
     cutoff = now - 3600
-    for spam_dict in (_chat_bounce_anti_spam, _chat_top_anti_spam, _chat_invite_anti_spam, _chat_relays_anti_spam, _chat_search_anti_spam, _chat_cmping_anti_spam, _chat_slap_anti_spam, _chat_sticker_anti_spam):
+    for spam_dict in (_chat_bounce_anti_spam, _chat_top_anti_spam, _chat_invite_anti_spam, _chat_relays_anti_spam, _chat_search_anti_spam, _chat_cmping_anti_spam, _chat_slap_anti_spam, _chat_sticker_anti_spam, _chat_stickernobg_anti_spam):
         expired = [cid for cid, ts in list(spam_dict.items()) if ts < cutoff]
         for cid in expired:
             spam_dict.pop(cid, None)
@@ -222,6 +230,7 @@ SEARCH_COOLDOWN_SECONDS = 10   # 10 seconds for /search command
 CMPING_COOLDOWN_SECONDS = 15   # 15 seconds for /cmping command
 SLAP_COOLDOWN_SECONDS = 15     # 15 seconds for /slap command
 STICKER_COOLDOWN_SECONDS = 5   # 5 seconds for /sticker commands
+STICKER_NOBG_COOLDOWN_SECONDS = 15 # 15 seconds for /stickernobg commands
 
 DOMAIN_REGEX = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)+$')
 
@@ -2995,7 +3004,7 @@ def help_command(bot, accid, event):
         f"/sticker — Convert replied or attached image to a WebP sticker.\n"
         f"/stickernobg — Convert image to a sticker with background removed.\n\n"
         f"/donate — Support development ❤️\n\n"
-        f"💡 _Commands have a 1-minute cooldown per group (15s for cmping/slap, 10s for search, 5s for sticker; admins are exempt)._\n\n"
+        f"💡 _Commands have a 1-minute cooldown per group (15s for cmping/slap/stickernobg, 10s for search, 5s for sticker; admins are exempt)._\n\n"
         f"🤖 **Source:** Run your own bot: https://git.gluek.info/gluek/deltachat_bouncer"
     )
     
@@ -5558,8 +5567,8 @@ def virus_command(bot, accid, event):
         (isinstance(raw_file, str) and raw_file)
         or (isinstance(raw_filename, str) and raw_filename)
         or (isinstance(raw_bytes, int) and not isinstance(raw_bytes, bool) and raw_bytes > 0)
-        or any(t in str(raw_vt).lower() for t in ("file", "image", "audio", "video", "voice", "gif", "sticker"))
-        or any(s in str(raw_ds).lower() for s in ("available", "inprogress", "10", "100", "1000"))
+        or (isinstance(raw_vt, (str, int)) and any(t in str(raw_vt).lower() for t in ("file", "image", "audio", "video", "voice", "gif", "sticker")))
+        or (isinstance(raw_ds, (str, int)) and any(s in str(raw_ds).lower() for s in ("available", "inprogress", "10", "100", "1000")))
     )
 
     if not target_type and not has_quote and not has_attachment_fast:
@@ -5587,7 +5596,11 @@ def _bg_sticker_worker(bot, accid, chat_id, msg_id, file_info, remove_bg):
     try:
         src_path = file_info["path"]
         dest_path = os.path.join(temp_dir, "sticker.webp")
-        success, err_msg = convert_to_sticker_webp(src_path, dest_path, remove_bg=remove_bg)
+        if remove_bg:
+            with _rembg_global_lock:
+                success, err_msg = convert_to_sticker_webp(src_path, dest_path, remove_bg=True)
+        else:
+            success, err_msg = convert_to_sticker_webp(src_path, dest_path, remove_bg=False)
         if not success:
             _react(bot, accid, msg_id, "❌")
             _send(bot, accid, chat_id, f"❌ {err_msg}", reply_to_id=msg_id)
@@ -5606,20 +5619,24 @@ def _bg_sticker_worker(bot, accid, chat_id, msg_id, file_info, remove_bg):
 def handle_sticker_command(bot, accid, event, remove_bg: bool = False, skip_cooldown: bool = False):
     """Handle /sticker and /stickernobg commands (reply or caption)."""
     msg = event.msg
-    now = time.time()
-    if not _is_dc_admin(bot, accid, msg.from_id) and not skip_cooldown:
-        last_sticker = _chat_sticker_anti_spam.get(msg.chat_id, 0)
-        diff = now - last_sticker
-        if diff < STICKER_COOLDOWN_SECONDS:
-            remaining_sec = max(1, int(STICKER_COOLDOWN_SECONDS - diff))
-            _queue_delayed_command(bot, accid, msg, "sticker", remaining_sec, handle_sticker_command, bot, accid, event, remove_bg=remove_bg, skip_cooldown=True)
-            return
-
-    _chat_sticker_anti_spam[msg.chat_id] = now
-
     payload = (event.payload or "").strip().lower()
     if payload in ("nobg", "--nobg", "-nobg", "removebg", "no-bg"):
         remove_bg = True
+
+    cmd_key = "stickernobg" if remove_bg else "sticker"
+    cooldown_sec = STICKER_NOBG_COOLDOWN_SECONDS if remove_bg else STICKER_COOLDOWN_SECONDS
+    anti_spam_dict = _chat_stickernobg_anti_spam if remove_bg else _chat_sticker_anti_spam
+
+    now = time.time()
+    if not _is_dc_admin(bot, accid, msg.from_id) and not skip_cooldown:
+        last_sticker = anti_spam_dict.get(msg.chat_id, 0)
+        diff = now - last_sticker
+        if diff < cooldown_sec:
+            remaining_sec = max(1, int(cooldown_sec - diff))
+            _queue_delayed_command(bot, accid, msg, cmd_key, remaining_sec, handle_sticker_command, bot, accid, event, remove_bg=remove_bg, skip_cooldown=True)
+            return
+
+    anti_spam_dict[msg.chat_id] = now
 
     # 1. Check if message itself has an attached file (e.g. image sent with caption /sticker)
     file_info = _get_msg_file_info(bot, accid, msg)
@@ -6456,6 +6473,30 @@ def _optimize_image_to_webp(src_path: str, dest_path: str, max_dim: int = 1600, 
         return False
 
 
+_rembg_session = None
+_rembg_session_lock = threading.Lock()
+
+
+def _get_rembg_session():
+    """Lazily load and cache the rembg ONNX session."""
+    global _rembg_session
+    if _rembg_session is not None:
+        return _rembg_session
+    with _rembg_session_lock:
+        if _rembg_session is None:
+            from rembg import new_session
+            model_name = os.getenv("REMBG_MODEL", "u2netp").strip() or "u2netp"
+            u2net_dir = os.getenv("U2NET_HOME") or os.getenv("REMBG_HOME")
+            if u2net_dir:
+                try:
+                    os.makedirs(u2net_dir, exist_ok=True)
+                except Exception:
+                    pass
+            logger.info(f"Initializing rembg session with model '{model_name}' (storage={u2net_dir or 'default'})...")
+            _rembg_session = new_session(model_name)
+    return _rembg_session
+
+
 def convert_to_sticker_webp(src_path: str, dest_path: str, remove_bg: bool = False, max_dim: int = 512) -> tuple[bool, str]:
     """Convert an image to a WebP sticker with standard sizing (max 512px).
     Optionally removes background using rembg if remove_bg=True.
@@ -6480,7 +6521,23 @@ def convert_to_sticker_webp(src_path: str, dest_path: str, remove_bg: bool = Fal
                 except Exception:
                     pass
 
+            w, h = img.size
+            if w <= 0 or h <= 0:
+                return False, "Invalid image dimensions."
+
+            # Pre-scale so longest side is max_dim (standard sticker 512px)
+            # Scaling down BEFORE background removal dramatically saves CPU and RAM!
+            if max(w, h) != max_dim:
+                scale = float(max_dim) / max(w, h)
+                new_w = max(1, int(round(w * scale)))
+                new_h = max(1, int(round(h * scale)))
+                img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
             if remove_bg:
+                enable_rembg = os.getenv("ENABLE_REMBG", "true").strip().lower()
+                if enable_rembg in ("0", "false", "off", "no", "disabled"):
+                    return False, "Background removal is disabled on this server. Use /sticker to create a sticker with the background preserved."
+
                 try:
                     from rembg import remove as rembg_remove
                 except ImportError:
@@ -6489,7 +6546,8 @@ def convert_to_sticker_webp(src_path: str, dest_path: str, remove_bg: bool = Fal
                 try:
                     if img.mode not in ("RGB", "RGBA"):
                         img = img.convert("RGBA")
-                    img = rembg_remove(img)
+                    session = _get_rembg_session()
+                    img = rembg_remove(img, session=session)
                 except Exception as e:
                     logger.error(f"rembg background removal failed: {e}", exc_info=True)
                     return False, f"Background removal failed: {e}"
@@ -6500,15 +6558,13 @@ def convert_to_sticker_webp(src_path: str, dest_path: str, remove_bg: bool = Fal
                 elif img.mode != "RGB":
                     img = img.convert("RGBA")
 
+            # Final check to guarantee sticker dimensions do not exceed max_dim
             w, h = img.size
-            if w <= 0 or h <= 0:
-                return False, "Invalid image dimensions."
-
-            # Scale so the longest side is max_dim (standard sticker 512px)
-            scale = float(max_dim) / max(w, h)
-            new_w = max(1, int(round(w * scale)))
-            new_h = max(1, int(round(h * scale)))
-            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            if max(w, h) > max_dim:
+                scale = float(max_dim) / max(w, h)
+                new_w = max(1, int(round(w * scale)))
+                new_h = max(1, int(round(h * scale)))
+                img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
             # Save as WebP
             try:

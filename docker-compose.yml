@@ -26,6 +26,10 @@ services:
       - AVATAR_PATH
       - CMPING_MONITOR_INTERVAL
       - VIRUSTOTAL_API_KEY
+      - U2NET_HOME=/app/data/u2net
+      - REMBG_HOME=/app/data/u2net
+      - ENABLE_REMBG
+      - REMBG_MODEL
     deploy:
       resources:
         limits:
