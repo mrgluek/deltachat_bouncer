@@ -360,31 +360,38 @@ class TestStickerCommands(unittest.TestCase):
             mock_raw_img.resize.assert_called_once_with((512, 256), mock_pil_image.Resampling.LANCZOS)
             mock_resized_img.save.assert_called_once()
 
-    def test_convert_to_sticker_webp_missing_rembg(self):
-        """When remove_bg=True but rembg is not installed, return clear error message."""
-        mock_raw_img = MagicMock()
-        mock_raw_img.size = (500, 500)
-        mock_raw_img.mode = "RGBA"
-        mock_raw_img.is_animated = False
+    def test_convert_to_sticker_webp_subprocess_nobg(self):
+        """When remove_bg=True, convert_to_sticker_webp invokes sticker_tool.py via subprocess."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = ""
+        mock_proc.stderr = ""
 
-        mock_pil = MagicMock()
-        mock_pil_image = MagicMock()
-        mock_pil_imageops = MagicMock()
-        mock_pil_imageops.exif_transpose.side_effect = lambda im: im
-        mock_pil.Image = mock_pil_image
-        mock_pil.ImageOps = mock_pil_imageops
+        with patch("subprocess.run", return_value=mock_proc) as mock_run:
+            dest_file = os.path.join(self.temp_test_dir, "out_nobg.webp")
+            success, err = bot.convert_to_sticker_webp("input.jpg", dest_file, remove_bg=True, max_dim=512)
 
-        mock_pil_image.open.return_value.__enter__.return_value = mock_raw_img
+            self.assertTrue(success)
+            self.assertEqual(err, "")
+            mock_run.assert_called_once()
+            cmd = mock_run.call_args[0][0]
+            self.assertTrue(any("sticker_tool.py" in str(arg) for arg in cmd))
+            self.assertIn("--nobg", cmd)
+            self.assertIn("--max-dim=512", cmd)
 
-        # Hide rembg from imports
-        with patch.dict("sys.modules", {"PIL": mock_pil, "PIL.Image": mock_pil_image, "PIL.ImageOps": mock_pil_imageops, "rembg": None}):
-            dest_file = os.path.join(self.temp_test_dir, "out.webp")
-            success, err = bot.convert_to_sticker_webp("dummy.jpg", dest_file, remove_bg=True, max_dim=512)
+    def test_convert_to_sticker_webp_subprocess_error(self):
+        """When subprocess fails, return False with stderr error message."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 5
+        mock_proc.stdout = ""
+        mock_proc.stderr = "Background removal requires the 'rembg' package."
+
+        with patch("subprocess.run", return_value=mock_proc):
+            dest_file = os.path.join(self.temp_test_dir, "out_err.webp")
+            success, err = bot.convert_to_sticker_webp("input.jpg", dest_file, remove_bg=True, max_dim=512)
 
             self.assertFalse(success)
             self.assertIn("rembg", err)
-            self.assertIn("/sticker", err)
-
 
     def test_stickernobg_anti_spam_cooldown(self):
         """Verify 15-second cooldown triggers delayed execution for /stickernobg."""
@@ -424,8 +431,19 @@ class TestStickerCommands(unittest.TestCase):
             mock_queue.assert_called_once()
             self.assertEqual(mock_queue.call_args[0][3], "stickernobg")
 
-    def test_convert_to_sticker_webp_prescale_before_rembg(self):
-        """Verify image is pre-scaled to 512px before calling rembg.remove."""
+    def test_convert_to_sticker_webp_enable_rembg_disabled(self):
+        """When ENABLE_REMBG=false, return error message indicating background removal is disabled."""
+        with patch.dict(os.environ, {"ENABLE_REMBG": "false"}):
+            dest_file = os.path.join(self.temp_test_dir, "out_disabled.webp")
+            success, err = bot.convert_to_sticker_webp("photo.jpg", dest_file, remove_bg=True)
+
+            self.assertFalse(success)
+            self.assertIn("Background removal is disabled", err)
+
+    def test_sticker_tool_cli_prescale_and_nobg(self):
+        """Verify sticker_tool.py pre-scales to 512px before rembg and applies memory-safe session options."""
+        import sticker_tool
+
         mock_raw_img = MagicMock()
         mock_raw_img.size = (4000, 2000)
         mock_raw_img.mode = "RGB"
@@ -452,61 +470,31 @@ class TestStickerCommands(unittest.TestCase):
         mock_rembg = MagicMock()
         mock_rembg.remove.return_value = mock_nobg_img
         mock_session = MagicMock()
+        mock_rembg.new_session.return_value = mock_session
 
-        with patch.dict("sys.modules", {"PIL": mock_pil, "PIL.Image": mock_pil_image, "PIL.ImageOps": mock_pil_imageops, "rembg": mock_rembg}), \
-             patch("bot._get_rembg_session", return_value=mock_session):
-            dest_file = os.path.join(self.temp_test_dir, "nobg_out.webp")
-            success, err = bot.convert_to_sticker_webp("big.jpg", dest_file, remove_bg=True, max_dim=512)
+        mock_ort = MagicMock()
+        mock_opts = MagicMock()
+        mock_ort.SessionOptions.return_value = mock_opts
 
-            self.assertTrue(success, f"Error was: {err}")
-            # Verify pre-scale resize was called on raw_img BEFORE rembg
+        with patch.dict("sys.modules", {
+            "PIL": mock_pil,
+            "PIL.Image": mock_pil_image,
+            "PIL.ImageOps": mock_pil_imageops,
+            "rembg": mock_rembg,
+            "onnxruntime": mock_ort,
+        }), patch.object(sys, "argv", ["sticker_tool.py", "in.jpg", "out.webp", "--nobg", "--max-dim=512"]):
+            with self.assertRaises(SystemExit) as cm:
+                sticker_tool.main()
+            self.assertEqual(cm.exception.code, 0)
+
+            # Check pre-scaling before rembg
             mock_raw_img.resize.assert_called_once_with((512, 256), mock_pil_image.Resampling.LANCZOS)
-            # Verify rembg.remove was called with the pre-scaled image and session
+            # Check arena disabled for memory optimization
+            self.assertFalse(mock_opts.enable_cpu_mem_arena)
+            self.assertFalse(mock_opts.enable_mem_pattern)
+            # Check rembg called with prescaled img and session
             mock_rembg.remove.assert_called_once_with(mock_prescaled_img, session=mock_session)
             mock_nobg_img.save.assert_called_once()
-
-    def test_convert_to_sticker_webp_enable_rembg_disabled(self):
-        """When ENABLE_REMBG=false, return error message indicating background removal is disabled."""
-        mock_raw_img = MagicMock()
-        mock_raw_img.size = (500, 500)
-        mock_raw_img.mode = "RGB"
-        mock_raw_img.is_animated = False
-
-        mock_pil = MagicMock()
-        mock_pil_image = MagicMock()
-        mock_pil_imageops = MagicMock()
-        mock_pil_imageops.exif_transpose.side_effect = lambda im: im
-        mock_pil.Image = mock_pil_image
-        mock_pil.ImageOps = mock_pil_imageops
-        mock_pil_image.open.return_value.__enter__.return_value = mock_raw_img
-
-        with patch.dict("sys.modules", {"PIL": mock_pil, "PIL.Image": mock_pil_image, "PIL.ImageOps": mock_pil_imageops}), \
-             patch.dict(os.environ, {"ENABLE_REMBG": "false"}):
-            dest_file = os.path.join(self.temp_test_dir, "out_disabled.webp")
-            success, err = bot.convert_to_sticker_webp("photo.jpg", dest_file, remove_bg=True)
-
-            self.assertFalse(success)
-            self.assertIn("Background removal is disabled", err)
-
-    def test_get_rembg_session_caching(self):
-        """Verify _get_rembg_session lazily initializes and caches the session."""
-        bot._rembg_session = None
-        mock_rembg = MagicMock()
-        mock_session_obj = MagicMock()
-        mock_rembg.new_session.return_value = mock_session_obj
-
-        with patch.dict("sys.modules", {"rembg": mock_rembg}), \
-             patch.dict(os.environ, {"REMBG_MODEL": "u2netp"}):
-            sess1 = bot._get_rembg_session()
-            self.assertEqual(sess1, mock_session_obj)
-            mock_rembg.new_session.assert_called_once_with("u2netp")
-
-            # Second call should return cached session without calling new_session again
-            sess2 = bot._get_rembg_session()
-            self.assertEqual(sess2, mock_session_obj)
-            mock_rembg.new_session.assert_called_once()
-
-        bot._rembg_session = None
 
 
 if __name__ == "__main__":

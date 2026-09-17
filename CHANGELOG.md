@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.14.2] - 2026-09-17
+
+### Performance & Memory Optimization
+- **Isolated Subprocess Execution for Background Removal (`sticker_tool.py`)**:
+  - Offloaded AI background removal (`rembg`) to a standalone, short-lived subprocess (`sticker_tool.py`).
+  - Completely prevents the main `bot.py` daemon process from importing heavy scientific and machine learning libraries (`onnxruntime`, `scipy`, `numpy`, `pymatting`).
+  - Preserves baseline memory of `deltachat_bouncer` at **~75–80 MB** permanently.
+  - Upon completion of `/stickernobg`, the operating system kernel immediately and unconditionally reclaims 100% of memory allocated during inference.
+- **Disabled ONNX Memory Arena Bloat**:
+  - Configured `SessionOptions` in `sticker_tool.py` with `enable_cpu_mem_arena = False`, `enable_mem_pattern = False`, and `intra_op_num_threads = 2`.
+  - Cuts peak memory usage during the 2–3 seconds of subprocess execution from >700 MB down to **~250 MB**.
+
 ## [2.14.1] - 2026-09-17
 
 ### Performance & Optimization

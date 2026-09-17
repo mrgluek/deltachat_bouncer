@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import os
+import sys
 import re
 import signal
 import threading
@@ -38,7 +39,7 @@ import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.14.1"
+VERSION = "2.14.2"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -6473,35 +6474,41 @@ def _optimize_image_to_webp(src_path: str, dest_path: str, max_dim: int = 1600, 
         return False
 
 
-_rembg_session = None
-_rembg_session_lock = threading.Lock()
-
-
-def _get_rembg_session():
-    """Lazily load and cache the rembg ONNX session."""
-    global _rembg_session
-    if _rembg_session is not None:
-        return _rembg_session
-    with _rembg_session_lock:
-        if _rembg_session is None:
-            from rembg import new_session
-            model_name = os.getenv("REMBG_MODEL", "u2netp").strip() or "u2netp"
-            u2net_dir = os.getenv("U2NET_HOME") or os.getenv("REMBG_HOME")
-            if u2net_dir:
-                try:
-                    os.makedirs(u2net_dir, exist_ok=True)
-                except Exception:
-                    pass
-            logger.info(f"Initializing rembg session with model '{model_name}' (storage={u2net_dir or 'default'})...")
-            _rembg_session = new_session(model_name)
-    return _rembg_session
-
-
 def convert_to_sticker_webp(src_path: str, dest_path: str, remove_bg: bool = False, max_dim: int = 512) -> tuple[bool, str]:
     """Convert an image to a WebP sticker with standard sizing (max 512px).
-    Optionally removes background using rembg if remove_bg=True.
+    Optionally removes background using rembg in an isolated subprocess if remove_bg=True.
     Returns (success: bool, error_message: str).
     """
+    if remove_bg:
+        enable_rembg = os.getenv("ENABLE_REMBG", "true").strip().lower()
+        if enable_rembg in ("0", "false", "off", "no", "disabled"):
+            return False, "Background removal is disabled on this server. Use /sticker to create a sticker with the background preserved."
+
+        tool_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sticker_tool.py")
+        if os.path.exists(tool_path):
+            try:
+                cmd = [
+                    sys.executable,
+                    tool_path,
+                    src_path,
+                    dest_path,
+                    "--nobg",
+                    f"--max-dim={max_dim}",
+                ]
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+                if res.returncode == 0:
+                    return True, ""
+                err = (res.stderr or res.stdout or "").strip()
+                if not err:
+                    err = f"Subprocess exited with code {res.returncode}"
+                return False, err
+            except subprocess.TimeoutExpired:
+                return False, "Sticker generation timed out (90s)."
+            except Exception as e:
+                logger.error(f"Failed to run sticker_tool subprocess: {e}", exc_info=True)
+                return False, f"Failed to generate sticker: {e}"
+
+    # In-process handling (default for /sticker without bg removal)
     try:
         from PIL import Image, ImageOps
     except ImportError:
@@ -6526,37 +6533,17 @@ def convert_to_sticker_webp(src_path: str, dest_path: str, remove_bg: bool = Fal
                 return False, "Invalid image dimensions."
 
             # Pre-scale so longest side is max_dim (standard sticker 512px)
-            # Scaling down BEFORE background removal dramatically saves CPU and RAM!
             if max(w, h) != max_dim:
                 scale = float(max_dim) / max(w, h)
                 new_w = max(1, int(round(w * scale)))
                 new_h = max(1, int(round(h * scale)))
                 img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
-            if remove_bg:
-                enable_rembg = os.getenv("ENABLE_REMBG", "true").strip().lower()
-                if enable_rembg in ("0", "false", "off", "no", "disabled"):
-                    return False, "Background removal is disabled on this server. Use /sticker to create a sticker with the background preserved."
-
-                try:
-                    from rembg import remove as rembg_remove
-                except ImportError:
-                    return False, "Background removal requires the 'rembg' package. Use /sticker to create a sticker with the background preserved."
-
-                try:
-                    if img.mode not in ("RGB", "RGBA"):
-                        img = img.convert("RGBA")
-                    session = _get_rembg_session()
-                    img = rembg_remove(img, session=session)
-                except Exception as e:
-                    logger.error(f"rembg background removal failed: {e}", exc_info=True)
-                    return False, f"Background removal failed: {e}"
-            else:
-                if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in getattr(img, "info", {})):
-                    if img.mode != "RGBA":
-                        img = img.convert("RGBA")
-                elif img.mode != "RGB":
+            if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in getattr(img, "info", {})):
+                if img.mode != "RGBA":
                     img = img.convert("RGBA")
+            elif img.mode != "RGB":
+                img = img.convert("RGBA")
 
             # Final check to guarantee sticker dimensions do not exceed max_dim
             w, h = img.size
