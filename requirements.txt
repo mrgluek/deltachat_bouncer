@@ -2,6 +2,7 @@ deltabot-cli==8.1.2
 deltachat2[full]<1.0.0
 aiohttp>=3.10.5,<4.0.0
 qrcode>=7.4.2,<8.0.0
-pillow>=10.4.0,<11.0.0
+pillow>=10.4.0
 cmping @ git+https://github.com/mrgluek/cmping.git@0b67259a8b057678b746797cc80fc1ee35bce9ae
 cryptography>=42.0.0,<45.0.0
+rembg[cpu]>=2.0.50

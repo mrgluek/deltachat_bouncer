@@ -38,7 +38,7 @@ import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.13.2"
+VERSION = "2.14.0"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -98,6 +98,7 @@ _chat_relays_anti_spam: dict[int, float] = {}
 _chat_search_anti_spam: dict[int, float] = {}
 _chat_cmping_anti_spam: dict[int, float] = {}
 _chat_slap_anti_spam: dict[int, float] = {}
+_chat_sticker_anti_spam: dict[int, float] = {}
 _domain_locks: dict[str, threading.Lock] = {}
 _domain_locks_lock = threading.Lock()
 _cmping_global_lock = threading.Lock()
@@ -204,7 +205,7 @@ def _prune_anti_spam_dicts():
     """Prune anti-spam entries older than 3600 seconds to prevent memory growth."""
     now = time.time()
     cutoff = now - 3600
-    for spam_dict in (_chat_bounce_anti_spam, _chat_top_anti_spam, _chat_invite_anti_spam, _chat_relays_anti_spam, _chat_search_anti_spam, _chat_cmping_anti_spam, _chat_slap_anti_spam):
+    for spam_dict in (_chat_bounce_anti_spam, _chat_top_anti_spam, _chat_invite_anti_spam, _chat_relays_anti_spam, _chat_search_anti_spam, _chat_cmping_anti_spam, _chat_slap_anti_spam, _chat_sticker_anti_spam):
         expired = [cid for cid, ts in list(spam_dict.items()) if ts < cutoff]
         for cid in expired:
             spam_dict.pop(cid, None)
@@ -220,6 +221,7 @@ BOUNCE_COOLDOWN_SECONDS = 60   # 1 minute for general commands (/bounce, /top, /
 SEARCH_COOLDOWN_SECONDS = 10   # 10 seconds for /search command
 CMPING_COOLDOWN_SECONDS = 15   # 15 seconds for /cmping command
 SLAP_COOLDOWN_SECONDS = 15     # 15 seconds for /slap command
+STICKER_COOLDOWN_SECONDS = 5   # 5 seconds for /sticker commands
 
 DOMAIN_REGEX = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)+$')
 
@@ -2989,9 +2991,11 @@ def help_command(bot, accid, event):
         f"/cmpingevents [id] — Show CMPing incident log or incident details.\n"
         f"/cmpinghistory [server] — Show downtime history for monitored servers.\n"
         f"/cmping <server1> ... — Ping relays to/from specified servers.\n"
-        f"/virus <url> — Scan URL or replied file/link with VirusTotal.\n\n"
+        f"/virus <url> — Scan URL or replied file/link with VirusTotal.\n"
+        f"/sticker — Convert replied or attached image to a WebP sticker.\n"
+        f"/stickernobg — Convert image to a sticker with background removed.\n\n"
         f"/donate — Support development ❤️\n\n"
-        f"💡 _Commands have a 1-minute cooldown per group (15s for cmping/slap, 10s for search; admins are exempt)._\n\n"
+        f"💡 _Commands have a 1-minute cooldown per group (15s for cmping/slap, 10s for search, 5s for sticker; admins are exempt)._\n\n"
         f"🤖 **Source:** Run your own bot: https://git.gluek.info/gluek/deltachat_bouncer"
     )
     
@@ -5551,8 +5555,8 @@ def virus_command(bot, accid, event):
     raw_ds = getattr(msg, "download_state", None) if not isinstance(msg, dict) else msg.get("download_state")
 
     has_attachment_fast = bool(
-        raw_file
-        or raw_filename
+        (isinstance(raw_file, str) and raw_file)
+        or (isinstance(raw_filename, str) and raw_filename)
         or (isinstance(raw_bytes, int) and not isinstance(raw_bytes, bool) and raw_bytes > 0)
         or any(t in str(raw_vt).lower() for t in ("file", "image", "audio", "video", "voice", "gif", "sticker"))
         or any(s in str(raw_ds).lower() for s in ("available", "inprogress", "10", "100", "1000"))
@@ -5576,6 +5580,89 @@ def virus_command(bot, accid, event):
         daemon=True,
     ).start()
 
+
+def _bg_sticker_worker(bot, accid, chat_id, msg_id, file_info, remove_bg):
+    """Background worker for sticker creation."""
+    temp_dir = tempfile.mkdtemp(prefix="dc_sticker_")
+    try:
+        src_path = file_info["path"]
+        dest_path = os.path.join(temp_dir, "sticker.webp")
+        success, err_msg = convert_to_sticker_webp(src_path, dest_path, remove_bg=remove_bg)
+        if not success:
+            _react(bot, accid, msg_id, "❌")
+            _send(bot, accid, chat_id, f"❌ {err_msg}", reply_to_id=msg_id)
+            return
+
+        _send_sticker(bot, accid, chat_id, dest_path, reply_to_id=msg_id)
+        _react(bot, accid, msg_id, "☑️")
+    except Exception as e:
+        logger.error(f"Error in _bg_sticker_worker: {e}", exc_info=True)
+        _react(bot, accid, msg_id, "❌")
+        _send(bot, accid, chat_id, f"❌ Failed to create sticker: {e}", reply_to_id=msg_id)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def handle_sticker_command(bot, accid, event, remove_bg: bool = False, skip_cooldown: bool = False):
+    """Handle /sticker and /stickernobg commands (reply or caption)."""
+    msg = event.msg
+    now = time.time()
+    if not _is_dc_admin(bot, accid, msg.from_id) and not skip_cooldown:
+        last_sticker = _chat_sticker_anti_spam.get(msg.chat_id, 0)
+        diff = now - last_sticker
+        if diff < STICKER_COOLDOWN_SECONDS:
+            remaining_sec = max(1, int(STICKER_COOLDOWN_SECONDS - diff))
+            _queue_delayed_command(bot, accid, msg, "sticker", remaining_sec, handle_sticker_command, bot, accid, event, remove_bg=remove_bg, skip_cooldown=True)
+            return
+
+    _chat_sticker_anti_spam[msg.chat_id] = now
+
+    payload = (event.payload or "").strip().lower()
+    if payload in ("nobg", "--nobg", "-nobg", "removebg", "no-bg"):
+        remove_bg = True
+
+    # 1. Check if message itself has an attached file (e.g. image sent with caption /sticker)
+    file_info = _get_msg_file_info(bot, accid, msg)
+
+    # 2. Check if this is a reply to another message with an image
+    if not file_info and hasattr(msg, "quote") and msg.quote and isinstance(msg.quote, dict):
+        quote_msg_id = msg.quote.get("message_id") or msg.quote.get("messageId")
+        if quote_msg_id:
+            try:
+                quoted_msg = bot.rpc.get_message(accid, quote_msg_id)
+                file_info = _get_msg_file_info(bot, accid, quoted_msg)
+            except Exception as e:
+                logger.warning(f"Failed to fetch quoted message for sticker: {e}")
+
+    if not file_info:
+        usage = (
+            "ℹ️ **Sticker Generator Usage**:\n"
+            "• Reply to any image with `/sticker` or `/stickernobg`\n"
+            "• Or send an image with `/sticker` or `/stickernobg` in the caption\n\n"
+            "Commands:\n"
+            "• `/sticker` — Convert image to a sticker (preserves original image/background)\n"
+            "• `/stickernobg` — Convert image to a sticker with background removed"
+        )
+        _send(bot, accid, msg.chat_id, usage, reply_to_id=msg.id)
+        return
+
+    _react(bot, accid, msg.id, "⏳")
+
+    threading.Thread(
+        target=_bg_sticker_worker,
+        args=(bot, accid, msg.chat_id, msg.id, file_info, remove_bg),
+        daemon=True,
+    ).start()
+
+
+@dc_cli.on(events.NewMessage(command="/sticker"))
+def sticker_command(bot, accid, event, skip_cooldown: bool = False):
+    handle_sticker_command(bot, accid, event, remove_bg=False, skip_cooldown=skip_cooldown)
+
+
+@dc_cli.on(events.NewMessage(command="/stickernobg"))
+def stickernobg_command(bot, accid, event, skip_cooldown: bool = False):
+    handle_sticker_command(bot, accid, event, remove_bg=True, skip_cooldown=skip_cooldown)
 
 
 @dc_cli.on(events.NewMessage(is_info=True, is_bot=None, is_outgoing=None))
@@ -6367,6 +6454,102 @@ def _optimize_image_to_webp(src_path: str, dest_path: str, max_dim: int = 1600, 
     except Exception as e:
         logger.warning(f"Failed to convert image {src_path} to webp: {e}")
         return False
+
+
+def convert_to_sticker_webp(src_path: str, dest_path: str, remove_bg: bool = False, max_dim: int = 512) -> tuple[bool, str]:
+    """Convert an image to a WebP sticker with standard sizing (max 512px).
+    Optionally removes background using rembg if remove_bg=True.
+    Returns (success: bool, error_message: str).
+    """
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return False, "Pillow library is not installed."
+
+    try:
+        with Image.open(src_path) as raw_img:
+            try:
+                img = ImageOps.exif_transpose(raw_img)
+            except Exception:
+                img = raw_img
+
+            # Handle animated images (extract first frame)
+            if getattr(img, "is_animated", False):
+                try:
+                    img.seek(0)
+                except Exception:
+                    pass
+
+            if remove_bg:
+                try:
+                    from rembg import remove as rembg_remove
+                except ImportError:
+                    return False, "Background removal requires the 'rembg' package. Use /sticker to create a sticker with the background preserved."
+
+                try:
+                    if img.mode not in ("RGB", "RGBA"):
+                        img = img.convert("RGBA")
+                    img = rembg_remove(img)
+                except Exception as e:
+                    logger.error(f"rembg background removal failed: {e}", exc_info=True)
+                    return False, f"Background removal failed: {e}"
+            else:
+                if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in getattr(img, "info", {})):
+                    if img.mode != "RGBA":
+                        img = img.convert("RGBA")
+                elif img.mode != "RGB":
+                    img = img.convert("RGBA")
+
+            w, h = img.size
+            if w <= 0 or h <= 0:
+                return False, "Invalid image dimensions."
+
+            # Scale so the longest side is max_dim (standard sticker 512px)
+            scale = float(max_dim) / max(w, h)
+            new_w = max(1, int(round(w * scale)))
+            new_h = max(1, int(round(h * scale)))
+            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+            # Save as WebP
+            try:
+                img.save(dest_path, format="WEBP", quality=90, method=6)
+            except Exception as e:
+                logger.warning(f"Failed to save as WEBP ({e}), falling back to PNG...")
+                png_path = os.path.splitext(dest_path)[0] + ".png"
+                img.save(png_path, format="PNG")
+                if os.path.exists(png_path):
+                    shutil.move(png_path, dest_path)
+            return True, ""
+    except Exception as e:
+        logger.warning(f"Failed to convert image {src_path} to sticker: {e}")
+        return False, f"Invalid or unsupported image file: {e}"
+
+
+def _send_sticker(bot, accid, chat_id, sticker_path, reply_to_id=None):
+    """Send a sticker message to a chat, falling back to send_msg with viewtype=Sticker or send_sticker RPC."""
+    sent_msg_id = None
+    try:
+        sent_msg_id = bot.rpc.send_msg(accid, chat_id, MsgData(file=sticker_path, viewtype="Sticker", quoted_message_id=reply_to_id))
+    except Exception as e:
+        logger.warning(f"Failed to send sticker via send_msg: {e}. Trying send_sticker RPC...")
+        if hasattr(bot.rpc, "send_sticker"):
+            try:
+                sent_msg_id = bot.rpc.send_sticker(accid, chat_id, sticker_path)
+            except Exception as e2:
+                logger.error(f"Failed to send sticker via send_sticker RPC: {e2}")
+                raise
+        else:
+            raise
+
+    # Track transport stats
+    try:
+        addr = bot.rpc.get_config(accid, "configured_addr") or bot.rpc.get_config(accid, "addr") or "unknown"
+        if addr and isinstance(addr, str) and addr != "unknown":
+            database.increment_transport_sent(addr)
+    except Exception:
+        pass
+
+    return sent_msg_id
 
 
 def format_markdown_html(text: str) -> str:
