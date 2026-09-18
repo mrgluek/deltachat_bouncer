@@ -236,6 +236,11 @@ class TestWebPreview(unittest.TestCase):
         # Landing page HTML
         landing_html = bot.get_landing_page_html()
         self.assertIn("Delta Chat Bouncer", landing_html)
+        self.assertIn("🛡️ Delta Chat Bouncer Bot", landing_html)
+        self.assertIn("top-qr-btn", landing_html)
+        self.assertIn("📱 QR Code", landing_html)
+        self.assertIn("--color-primary: #415e6b;", landing_html)
+        self.assertIn("background-light.png", landing_html)
 
         # Channel preview HTML
         posts = [
@@ -272,6 +277,8 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn('href="/"', preview_html)
         self.assertIn("https://git.gluek.info/gluek/deltachat_bouncer", preview_html)
         self.assertIn("Forgejo Mirror", preview_html)
+        self.assertIn("--color-primary: #415e6b;", preview_html)
+        self.assertIn("background-light.png", preview_html)
 
         # Channel preview with 1 member (shows Channel badge)
         channel_single = dict(channel)
@@ -299,6 +306,7 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn(f"{ingress}/icon.png", landing_ingress)
         self.assertIn(f"{ingress}/qr.png", landing_ingress)
         self.assertIn("Add Bouncer Bot", landing_ingress)
+        self.assertIn("Copy Link", landing_ingress)
 
         # Tombstone HTML
         tombstone_html = bot.get_tombstone_html(channel["name"], ingress_path=ingress)
@@ -307,12 +315,16 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn("has been removed from the public catalog", tombstone_html)
         self.assertIn(f'href="{ingress}/"', tombstone_html)
         self.assertIn(f'{ingress}/icon.png', tombstone_html)
+        self.assertIn("--color-primary: #415e6b;", tombstone_html)
+        self.assertIn(f"{ingress}/background-light.png", tombstone_html)
 
         # 404 HTML
         not_found_html = bot.get_404_html(ingress_path=ingress)
         self.assertIn("Channel Not Found", not_found_html)
         self.assertIn(f'href="{ingress}/"', not_found_html)
         self.assertIn(f'{ingress}/icon.png', not_found_html)
+        self.assertIn("--color-primary: #415e6b;", not_found_html)
+        self.assertIn(f"{ingress}/background-light.png", not_found_html)
 
     def test_channel_preview_without_invite_link(self):
         """Verify channel preview disables action button and omits QR modal when invite link is empty."""
@@ -520,10 +532,18 @@ class TestWebPreview(unittest.TestCase):
     def test_handle_background(self):
         import asyncio
         req = MagicMock()
+        req.path = "/background.jpg"
         resp = asyncio.run(bot.handle_background(req))
         self.assertEqual(resp.status, 200)
         self.assertIn("immutable", resp.headers.get("Cache-Control", ""))
         self.assertIsInstance(resp, web.FileResponse)
+
+        req_light = MagicMock()
+        req_light.path = "/background-light.png"
+        resp_light = asyncio.run(bot.handle_background(req_light))
+        self.assertEqual(resp_light.status, 200)
+        self.assertIn("immutable", resp_light.headers.get("Cache-Control", ""))
+        self.assertIsInstance(resp_light, web.FileResponse)
 
     def test_dc_fallback_stripping_and_text_preservation(self):
         # 1. Stripping DC attachment fallback strings while keeping author text

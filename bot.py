@@ -39,7 +39,7 @@ import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.14.2"
+VERSION = "2.14.3"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -6730,6 +6730,22 @@ def get_landing_page_html(ingress_path: str = "") -> str:
         deep_link = "https://i.delta.chat/#" + invite_link[10:]
 
     base_path = ingress_path.rstrip("/")
+    bg_url = f"{base_path}/background.jpg"
+    bg_light_url = f"{base_path}/background-light.png"
+    home_url = f"{base_path}/" if base_path else "/"
+    channels = database.get_all_catalog_channels(public_only=True)
+
+    base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
+    instance_domain = ""
+    if base_url:
+        try:
+            parsed = urllib.parse.urlparse(base_url)
+            instance_domain = parsed.netloc or parsed.path
+        except Exception:
+            pass
+    if not instance_domain:
+        instance_domain = "dc.gluek.info"
+
     if invite_link:
         hero_btn_html = """<button class="btn btn-primary" onclick="openQrModal()">
                 <span>📱</span> Add Bot to Delta Chat
@@ -6741,6 +6757,7 @@ def get_landing_page_html(ingress_path: str = "") -> str:
             <img src="{base_path}/qr.png" alt="Bot QR Code" />
             <div style="display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap;">
                 <a href="{deep_link}" class="btn btn-primary" style="padding: 0.5rem 1rem; font-size: 0.9rem;">Open in Delta Chat</a>
+                <button class="close-btn" id="qr-copy-btn" onclick="copyJoinLink(this, '{deep_link}')">Copy Link</button>
                 <button class="close-btn" id="qr-close-btn" onclick="closeQrModal()">Close</button>
             </div>
         </div>
@@ -6756,10 +6773,6 @@ def get_landing_page_html(ingress_path: str = "") -> str:
             <button class="close-btn" id="qr-close-btn" onclick="closeQrModal()">Close</button>
         </div>
     </div>"""
-
-    bg_url = f"{base_path}/background.jpg"
-    home_url = f"{base_path}/" if base_path else "/"
-    channels = database.get_all_catalog_channels(public_only=True)
 
     channel_items = []
     for ch in channels:
@@ -6822,14 +6835,30 @@ def get_landing_page_html(ingress_path: str = "") -> str:
         }}
         @media (prefers-color-scheme: light) {{
             :root {{
-                --bg-color: #f0f2f5;
+                --bg-color: #efeae2;
                 --card-bg: #ffffff;
                 --card-border: rgba(0, 0, 0, 0.08);
                 --text-main: #111b21;
                 --text-muted: #54656f;
-                --color-primary: #008069;
+                --color-primary: #415e6b;
                 --accent-blue: #0070e0;
-                --bg-overlay: 0.08;
+                --bg-overlay: 1;
+            }}
+            body::before {{
+                background-image: url('{bg_light_url}') !important;
+                opacity: 1 !important;
+            }}
+            .btn-primary:hover {{
+                background: #354e59 !important;
+            }}
+            .top-qr-btn {{
+                background: rgba(0, 0, 0, 0.05) !important;
+                color: #111b21 !important;
+                border-color: rgba(0, 0, 0, 0.1) !important;
+            }}
+            .top-qr-btn:hover {{
+                background: rgba(0, 0, 0, 0.08) !important;
+                border-color: rgba(0, 0, 0, 0.16) !important;
             }}
             .card {{
                 box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08) !important;
@@ -6860,6 +6889,14 @@ def get_landing_page_html(ingress_path: str = "") -> str:
             }}
             .modal-qr-container {{
                 background: #ffffff !important;
+            }}
+            .close-btn {{
+                background: rgba(0, 0, 0, 0.06) !important;
+                border-color: rgba(0, 0, 0, 0.12) !important;
+                color: #111b21 !important;
+            }}
+            .close-btn:hover {{
+                background: rgba(0, 0, 0, 0.1) !important;
             }}
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -6901,11 +6938,31 @@ def get_landing_page_html(ingress_path: str = "") -> str:
             text-decoration: none;
             color: var(--text-main);
         }}
-        .logo-img {{ width: 32px; height: 32px; border-radius: 8px; object-fit: cover; }}
         .logo-title {{
             font-size: 1.25rem;
             font-weight: 700;
             color: #ffffff;
+        }}
+        .top-qr-btn {{
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid var(--card-border);
+            color: var(--text-muted);
+            padding: 0.35rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            font-family: inherit;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            text-decoration: none;
+        }}
+        .top-qr-btn:hover {{
+            background: rgba(255, 255, 255, 0.12);
+            color: var(--text-main);
+            border-color: rgba(255, 255, 255, 0.18);
         }}
         .header-links a {{
             color: var(--text-muted);
@@ -7131,24 +7188,29 @@ def get_landing_page_html(ingress_path: str = "") -> str:
             border-radius: 6px;
             cursor: pointer;
             font-family: inherit;
+            transition: all 0.15s ease;
         }}
         .close-btn:hover {{ background: rgba(255, 255, 255, 0.14); }}
+        .close-btn.copied {{
+            background: rgba(0, 168, 132, 0.2) !important;
+            border-color: #00a884 !important;
+            color: #25d366 !important;
+        }}
     </style>
 </head>
 <body>
     <header>
         <a href="{home_url}" class="logo-container">
-            <img src="{base_path}/icon.png" alt="Bouncer Bot Logo" class="logo-img" onerror="this.style.display='none'" />
-            <span class="logo-title">Delta Chat Bouncer</span>
+            <span class="logo-title">{instance_domain}</span>
         </a>
         <div class="header-links">
-            <a href="https://github.com/mrgluek/deltachat_bouncer" target="_blank" rel="noopener noreferrer">GitHub</a>
+            <button class="top-qr-btn" onclick="openQrModal()" title="Show Delta Chat QR Code">📱 QR Code</button>
         </div>
     </header>
 
     <main>
         <section class="hero">
-            <div class="hero-badge">🛡️ Group Quality & Channel Gateway</div>
+            <div class="hero-badge">🛡️ Delta Chat Bouncer Bot</div>
             <h1>Maintain Group Quality & Channel Web Previews</h1>
             <p>Bouncer bot maintains group quality by monitoring inactivity and saving server resources by pruning stale users. It features inactivity reports, automatic two-stage warnings & kicks, VirusTotal security inspection, CMPing server monitoring, and clean web previews & RSS feeds for public channels.</p>
             {hero_btn_html}
@@ -7291,6 +7353,25 @@ def get_landing_page_html(ingress_path: str = "") -> str:
             }}
         }}
     }});
+    function copyJoinLink(btn, link) {{
+        var orig = btn.innerHTML;
+        if (navigator.clipboard && navigator.clipboard.writeText) {{
+            navigator.clipboard.writeText(link).then(function() {{
+                btn.innerHTML = '✓ Copied!';
+                btn.classList.add('copied');
+                setTimeout(function() {{ btn.innerHTML = orig; btn.classList.remove('copied'); }}, 2000);
+            }}).catch(function() {{ fallbackCopy(btn, link, orig); }});
+        }} else {{
+            fallbackCopy(btn, link, orig);
+        }}
+    }}
+    function fallbackCopy(btn, link, orig) {{
+        var ta = document.createElement('textarea');
+        ta.value = link; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        try {{ document.execCommand('copy'); btn.innerHTML = '✓ Copied!'; btn.classList.add('copied'); setTimeout(function() {{ btn.innerHTML = orig; btn.classList.remove('copied'); }}, 2000); }} catch(e) {{}}
+        document.body.removeChild(ta);
+    }}
     </script>
 </body>
 </html>
@@ -7456,10 +7537,34 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
                 --text-main: #111b21;
                 --text-muted: #54656f;
                 --text-secondary: #54656f;
-                --color-primary: #008069;
+                --color-primary: #415e6b;
                 --color-author: #0070e0;
                 --color-success: #008069;
-                --bg-overlay: 0.08;
+                --bg-overlay: 1;
+            }}
+            body::before {{
+                background-image: url('{base_path}/background-light.png') !important;
+                opacity: 1 !important;
+            }}
+            .btn-primary:hover {{
+                background: #354e59 !important;
+            }}
+            .btn-secondary {{
+                background: rgba(0, 0, 0, 0.05) !important;
+                border-color: rgba(0, 0, 0, 0.1) !important;
+                color: #111b21 !important;
+            }}
+            .btn-secondary:hover {{
+                background: rgba(0, 0, 0, 0.08) !important;
+                border-color: rgba(0, 0, 0, 0.15) !important;
+            }}
+            .close-btn {{
+                background: rgba(0, 0, 0, 0.06) !important;
+                border-color: rgba(0, 0, 0, 0.12) !important;
+                color: #111b21 !important;
+            }}
+            .close-btn:hover {{
+                background: rgba(0, 0, 0, 0.1) !important;
             }}
             .channel-header-card {{
                 background: #ffffff !important;
@@ -8039,6 +8144,25 @@ def get_tombstone_html(channel_name: str, ingress_path: str = "") -> str:
             --text-muted: #aebac1;
             --color-primary: #2090ea;
         }}
+        @media (prefers-color-scheme: light) {{
+            :root {{
+                --bg-color: #efeae2;
+                --bubble-bg: #ffffff;
+                --border-subtle: rgba(0, 0, 0, 0.08);
+                --text-main: #111b21;
+                --text-muted: #54656f;
+                --color-primary: #415e6b;
+            }}
+            body {{
+                background-image: url('{base_path}/background-light.png') !important;
+            }}
+            .card {{
+                box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08) !important;
+            }}
+            .btn:hover {{
+                background: #354e59 !important;
+            }}
+        }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif;
@@ -8117,6 +8241,25 @@ def get_404_html(ingress_path: str = "") -> str:
             --text-main: #e9edef;
             --text-muted: #aebac1;
             --color-primary: #2090ea;
+        }}
+        @media (prefers-color-scheme: light) {{
+            :root {{
+                --bg-color: #efeae2;
+                --bubble-bg: #ffffff;
+                --border-subtle: rgba(0, 0, 0, 0.08);
+                --text-main: #111b21;
+                --text-muted: #54656f;
+                --color-primary: #415e6b;
+            }}
+            body {{
+                background-image: url('{base_path}/background-light.png') !important;
+            }}
+            .card {{
+                box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08) !important;
+            }}
+            .btn:hover {{
+                background: #354e59 !important;
+            }}
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
@@ -8344,7 +8487,7 @@ def rate_limited(bucket: str, max_requests: int = 60, window_seconds: int = 60):
     return decorator
 
 _ALLOWED_ICON_FILENAMES = {"icon.png", "favicon.ico"}
-_ALLOWED_BG_FILENAMES = {"background.jpg"}
+_ALLOWED_BG_FILENAMES = {"background.jpg", "background-light.png"}
 
 @rate_limited("assets", max_requests=120, window_seconds=60)
 async def handle_icon(request):
@@ -8370,12 +8513,13 @@ async def handle_background(request):
     raw_filename = os.path.basename(getattr(request, "path", "")) if isinstance(getattr(request, "path", None), str) else "background.jpg"
     if raw_filename not in _ALLOWED_BG_FILENAMES:
         return web.Response(status=404)
+    bg_file = raw_filename if raw_filename in _ALLOWED_BG_FILENAMES else "background.jpg"
     base_dir = os.path.abspath(os.path.dirname(__file__) if "__file__" in globals() else ".")
     for candidate in (
-        os.path.join(base_dir, "static", "background.jpg"),
-        os.path.join(base_dir, "background.jpg"),
-        "static/background.jpg",
-        "background.jpg",
+        os.path.join(base_dir, "static", bg_file),
+        os.path.join(base_dir, bg_file),
+        f"static/{bg_file}",
+        bg_file,
     ):
         if os.path.exists(candidate) and os.path.isfile(candidate):
             headers = {'Cache-Control': 'public, max-age=31536000, immutable'}
@@ -9205,6 +9349,8 @@ async def _run_web_server():
     app.router.add_get('/favicon.ico', handle_icon)
     app.router.add_get('/background.jpg', handle_background)
     app.router.add_get('/static/background.jpg', handle_background)
+    app.router.add_get('/background-light.png', handle_background)
+    app.router.add_get('/static/background-light.png', handle_background)
     app.router.add_get('/robots.txt', handle_robots_txt)
     app.router.add_get('/health', handle_health)
     app.router.add_get('/qr.svg', handle_qr_svg)
