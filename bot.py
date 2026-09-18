@@ -59,7 +59,7 @@ import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.14.5"
+VERSION = "2.14.6"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -6859,16 +6859,16 @@ def get_landing_page_html(ingress_path: str = "") -> str:
         instance_domain = "dc.gluek.info"
 
     if invite_link:
-        hero_btn_html = """<button class="btn btn-primary" onclick="openQrModal()">
-                <span>📱</span> Add Bot to Delta Chat
-            </button>"""
+        hero_btn_html = f"""<a href="{deep_link}" class="btn btn-primary">
+                <span>🗨️</span> Add Bot to Delta Chat
+            </a>"""
         qr_modal_html = f"""<div id="qr-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="qr-modal-title" onclick="if(event.target === this) closeQrModal()">
         <div class="modal-content">
             <h3 id="qr-modal-title">Add Bouncer Bot</h3>
             <p style="font-size: 0.9rem; color: var(--text-muted);">Scan this QR code with your Delta Chat mobile app or click the link below.</p>
             <img src="{base_path}/qr.png" alt="Bot QR Code" />
             <div style="display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap;">
-                <a href="{deep_link}" class="btn btn-primary" style="padding: 0.5rem 1rem; font-size: 0.9rem;">Open in Delta Chat</a>
+                <a href="{deep_link}" class="btn btn-primary" style="padding: 0.5rem 1rem; font-size: 0.9rem;"><span>🗨️</span> Open in Delta Chat</a>
                 <button class="close-btn" id="qr-copy-btn" onclick="copyJoinLink(this, '{deep_link}')">Copy Link</button>
                 <button class="close-btn" id="qr-close-btn" onclick="closeQrModal()">Close</button>
             </div>
@@ -6876,7 +6876,7 @@ def get_landing_page_html(ingress_path: str = "") -> str:
     </div>"""
     else:
         hero_btn_html = """<button class="btn btn-primary" disabled style="opacity: 0.55; cursor: not-allowed;" title="Bot invite link not yet configured">
-                <span>📱</span> Bot Link Unavailable
+                <span>🗨️</span> Bot Link Unavailable
             </button>"""
         qr_modal_html = """<div id="qr-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="qr-modal-title" onclick="if(event.target === this) closeQrModal()">
         <div class="modal-content">
@@ -6999,25 +6999,40 @@ def get_landing_page_html(ingress_path: str = "") -> str:
                 color: #3b4a54 !important;
             }}
             :root:not([data-theme="dark"]) .modal {{
+                background: rgba(17, 27, 33, 0.55) !important;
+                backdrop-filter: blur(6px) !important;
+                -webkit-backdrop-filter: blur(6px) !important;
+            }}
+            :root:not([data-theme="dark"]) .modal-content {{
                 background: #ffffff !important;
+                border: 1px solid rgba(0, 0, 0, 0.08) !important;
+                box-shadow: 0 20px 48px rgba(0, 0, 0, 0.22), 0 4px 12px rgba(0, 0, 0, 0.08) !important;
                 color: #111b21 !important;
             }}
-            :root:not([data-theme="dark"]) .modal h3 {{
+            :root:not([data-theme="dark"]) .modal-content h3 {{
                 color: #111b21 !important;
             }}
-            :root:not([data-theme="dark"]) .modal p {{
+            :root:not([data-theme="dark"]) .modal-content p {{
                 color: #54656f !important;
             }}
-            :root:not([data-theme="dark"]) .modal-qr-container {{
+            :root:not([data-theme="dark"]) .modal-content img {{
                 background: #ffffff !important;
+                border: 1px solid rgba(0, 0, 0, 0.08) !important;
+                border-radius: 12px !important;
+                box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06) !important;
             }}
             :root:not([data-theme="dark"]) .close-btn {{
-                background: rgba(0, 0, 0, 0.06) !important;
-                border-color: rgba(0, 0, 0, 0.12) !important;
+                background: #f0f2f5 !important;
+                border-color: rgba(0, 0, 0, 0.1) !important;
                 color: #111b21 !important;
             }}
             :root:not([data-theme="dark"]) .close-btn:hover {{
-                background: rgba(0, 0, 0, 0.1) !important;
+                background: #e4e6eb !important;
+            }}
+            :root:not([data-theme="dark"]) .close-btn.copied {{
+                background: rgba(0, 128, 105, 0.12) !important;
+                border-color: #008069 !important;
+                color: #008069 !important;
             }}
             :root:not([data-theme="dark"]) .theme-switcher {{
                 background: rgba(0, 0, 0, 0.05) !important;
@@ -7085,25 +7100,40 @@ def get_landing_page_html(ingress_path: str = "") -> str:
             color: #3b4a54 !important;
         }}
         :root[data-theme="light"] .modal {{
+            background: rgba(17, 27, 33, 0.55) !important;
+            backdrop-filter: blur(6px) !important;
+            -webkit-backdrop-filter: blur(6px) !important;
+        }}
+        :root[data-theme="light"] .modal-content {{
             background: #ffffff !important;
+            border: 1px solid rgba(0, 0, 0, 0.08) !important;
+            box-shadow: 0 20px 48px rgba(0, 0, 0, 0.22), 0 4px 12px rgba(0, 0, 0, 0.08) !important;
             color: #111b21 !important;
         }}
-        :root[data-theme="light"] .modal h3 {{
+        :root[data-theme="light"] .modal-content h3 {{
             color: #111b21 !important;
         }}
-        :root[data-theme="light"] .modal p {{
+        :root[data-theme="light"] .modal-content p {{
             color: #54656f !important;
         }}
-        :root[data-theme="light"] .modal-qr-container {{
+        :root[data-theme="light"] .modal-content img {{
             background: #ffffff !important;
+            border: 1px solid rgba(0, 0, 0, 0.08) !important;
+            border-radius: 12px !important;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06) !important;
         }}
         :root[data-theme="light"] .close-btn {{
-            background: rgba(0, 0, 0, 0.06) !important;
-            border-color: rgba(0, 0, 0, 0.12) !important;
+            background: #f0f2f5 !important;
+            border-color: rgba(0, 0, 0, 0.1) !important;
             color: #111b21 !important;
         }}
         :root[data-theme="light"] .close-btn:hover {{
-            background: rgba(0, 0, 0, 0.1) !important;
+            background: #e4e6eb !important;
+        }}
+        :root[data-theme="light"] .close-btn.copied {{
+            background: rgba(0, 128, 105, 0.12) !important;
+            border-color: #008069 !important;
+            color: #008069 !important;
         }}
         :root[data-theme="light"] .theme-switcher {{
             background: rgba(0, 0, 0, 0.05) !important;
@@ -7157,6 +7187,40 @@ def get_landing_page_html(ingress_path: str = "") -> str:
         :root[data-theme="dark"] .theme-btn.active {{
             background: rgba(255, 255, 255, 0.14) !important;
             color: var(--text-main) !important;
+        }}
+        :root[data-theme="dark"] .modal {{
+            background: rgba(0, 0, 0, 0.75) !important;
+            backdrop-filter: blur(6px) !important;
+            -webkit-backdrop-filter: blur(6px) !important;
+        }}
+        :root[data-theme="dark"] .modal-content {{
+            background: #232d36 !important;
+            border: 1px solid rgba(255, 255, 255, 0.08) !important;
+            box-shadow: 0 20px 48px rgba(0, 0, 0, 0.6) !important;
+            color: #e9edef !important;
+        }}
+        :root[data-theme="dark"] .modal-content h3 {{
+            color: #e9edef !important;
+        }}
+        :root[data-theme="dark"] .modal-content p {{
+            color: #aebac1 !important;
+        }}
+        :root[data-theme="dark"] .modal-content img {{
+            background: #ffffff !important;
+            border-radius: 12px !important;
+        }}
+        :root[data-theme="dark"] .close-btn {{
+            background: rgba(255, 255, 255, 0.08) !important;
+            border: 1px solid rgba(255, 255, 255, 0.1) !important;
+            color: var(--text-main) !important;
+        }}
+        :root[data-theme="dark"] .close-btn:hover {{
+            background: rgba(255, 255, 255, 0.14) !important;
+        }}
+        :root[data-theme="dark"] .close-btn.copied {{
+            background: rgba(0, 168, 132, 0.2) !important;
+            border-color: #00a884 !important;
+            color: #25d366 !important;
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
@@ -7472,6 +7536,7 @@ def get_landing_page_html(ingress_path: str = "") -> str:
             top: 0; left: 0; width: 100%; height: 100%;
             background: rgba(0, 0, 0, 0.75);
             backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
             z-index: 1000;
             justify-content: center;
             align-items: center;
@@ -7479,7 +7544,7 @@ def get_landing_page_html(ingress_path: str = "") -> str:
         .modal-content {{
             background: var(--card-bg);
             border: 1px solid var(--card-border);
-            border-radius: 14px;
+            border-radius: 16px;
             padding: 1.75rem;
             text-align: center;
             max-width: 380px;
@@ -7487,13 +7552,13 @@ def get_landing_page_html(ingress_path: str = "") -> str:
             display: flex;
             flex-direction: column;
             gap: 1rem;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
         }}
         .modal-content img {{
             width: 220px;
             height: 220px;
             margin: 0 auto;
-            border-radius: 8px;
+            border-radius: 12px;
             background: #ffffff;
             padding: 8px;
         }}
@@ -7881,12 +7946,17 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
                 border-color: rgba(0, 0, 0, 0.15) !important;
             }}
             :root:not([data-theme="dark"]) .close-btn {{
-                background: rgba(0, 0, 0, 0.06) !important;
-                border-color: rgba(0, 0, 0, 0.12) !important;
+                background: #f0f2f5 !important;
+                border-color: rgba(0, 0, 0, 0.1) !important;
                 color: #111b21 !important;
             }}
             :root:not([data-theme="dark"]) .close-btn:hover {{
-                background: rgba(0, 0, 0, 0.1) !important;
+                background: #e4e6eb !important;
+            }}
+            :root:not([data-theme="dark"]) .close-btn.copied {{
+                background: rgba(0, 128, 105, 0.12) !important;
+                border-color: #008069 !important;
+                color: #008069 !important;
             }}
             :root:not([data-theme="dark"]) .channel-header-card {{
                 background: #ffffff !important;
@@ -7911,17 +7981,27 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
                 border-color: rgba(0, 0, 0, 0.1) !important;
             }}
             :root:not([data-theme="dark"]) .modal {{
+                background: rgba(17, 27, 33, 0.55) !important;
+                backdrop-filter: blur(6px) !important;
+                -webkit-backdrop-filter: blur(6px) !important;
+            }}
+            :root:not([data-theme="dark"]) .modal-content {{
                 background: #ffffff !important;
+                border: 1px solid rgba(0, 0, 0, 0.08) !important;
+                box-shadow: 0 20px 48px rgba(0, 0, 0, 0.22), 0 4px 12px rgba(0, 0, 0, 0.08) !important;
                 color: #111b21 !important;
             }}
-            :root:not([data-theme="dark"]) .modal h3 {{
+            :root:not([data-theme="dark"]) .modal-content h3 {{
                 color: #111b21 !important;
             }}
-            :root:not([data-theme="dark"]) .modal p {{
+            :root:not([data-theme="dark"]) .modal-content p {{
                 color: #54656f !important;
             }}
-            :root:not([data-theme="dark"]) .modal-qr-container {{
+            :root:not([data-theme="dark"]) .modal-content img {{
                 background: #ffffff !important;
+                border: 1px solid rgba(0, 0, 0, 0.08) !important;
+                border-radius: 12px !important;
+                box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06) !important;
             }}
             :root:not([data-theme="dark"]) .theme-switcher {{
                 background: rgba(0, 0, 0, 0.05) !important;
@@ -7969,12 +8049,17 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
             border-color: rgba(0, 0, 0, 0.15) !important;
         }}
         :root[data-theme="light"] .close-btn {{
-            background: rgba(0, 0, 0, 0.06) !important;
-            border-color: rgba(0, 0, 0, 0.12) !important;
+            background: #f0f2f5 !important;
+            border-color: rgba(0, 0, 0, 0.1) !important;
             color: #111b21 !important;
         }}
         :root[data-theme="light"] .close-btn:hover {{
-            background: rgba(0, 0, 0, 0.1) !important;
+            background: #e4e6eb !important;
+        }}
+        :root[data-theme="light"] .close-btn.copied {{
+            background: rgba(0, 128, 105, 0.12) !important;
+            border-color: #008069 !important;
+            color: #008069 !important;
         }}
         :root[data-theme="light"] .channel-header-card {{
             background: #ffffff !important;
@@ -7999,17 +8084,27 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
             border-color: rgba(0, 0, 0, 0.1) !important;
         }}
         :root[data-theme="light"] .modal {{
+            background: rgba(17, 27, 33, 0.55) !important;
+            backdrop-filter: blur(6px) !important;
+            -webkit-backdrop-filter: blur(6px) !important;
+        }}
+        :root[data-theme="light"] .modal-content {{
             background: #ffffff !important;
+            border: 1px solid rgba(0, 0, 0, 0.08) !important;
+            box-shadow: 0 20px 48px rgba(0, 0, 0, 0.22), 0 4px 12px rgba(0, 0, 0, 0.08) !important;
             color: #111b21 !important;
         }}
-        :root[data-theme="light"] .modal h3 {{
+        :root[data-theme="light"] .modal-content h3 {{
             color: #111b21 !important;
         }}
-        :root[data-theme="light"] .modal p {{
+        :root[data-theme="light"] .modal-content p {{
             color: #54656f !important;
         }}
-        :root[data-theme="light"] .modal-qr-container {{
+        :root[data-theme="light"] .modal-content img {{
             background: #ffffff !important;
+            border: 1px solid rgba(0, 0, 0, 0.08) !important;
+            border-radius: 12px !important;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06) !important;
         }}
         :root[data-theme="light"] .theme-switcher {{
             background: rgba(0, 0, 0, 0.05) !important;
@@ -8061,6 +8156,40 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
         :root[data-theme="dark"] .theme-btn.active {{
             background: rgba(255, 255, 255, 0.14) !important;
             color: var(--text-main) !important;
+        }}
+        :root[data-theme="dark"] .modal {{
+            background: rgba(0, 0, 0, 0.75) !important;
+            backdrop-filter: blur(6px) !important;
+            -webkit-backdrop-filter: blur(6px) !important;
+        }}
+        :root[data-theme="dark"] .modal-content {{
+            background: #232d36 !important;
+            border: 1px solid rgba(255, 255, 255, 0.08) !important;
+            box-shadow: 0 20px 48px rgba(0, 0, 0, 0.6) !important;
+            color: #e9edef !important;
+        }}
+        :root[data-theme="dark"] .modal-content h3 {{
+            color: #e9edef !important;
+        }}
+        :root[data-theme="dark"] .modal-content p {{
+            color: #aebac1 !important;
+        }}
+        :root[data-theme="dark"] .modal-content img {{
+            background: #ffffff !important;
+            border-radius: 12px !important;
+        }}
+        :root[data-theme="dark"] .close-btn {{
+            background: rgba(255, 255, 255, 0.08) !important;
+            border: 1px solid rgba(255, 255, 255, 0.1) !important;
+            color: var(--text-main) !important;
+        }}
+        :root[data-theme="dark"] .close-btn:hover {{
+            background: rgba(255, 255, 255, 0.14) !important;
+        }}
+        :root[data-theme="dark"] .close-btn.copied {{
+            background: rgba(0, 168, 132, 0.2) !important;
+            border-color: #00a884 !important;
+            color: #25d366 !important;
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
@@ -8470,7 +8599,8 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
             position: fixed;
             top: 0; left: 0; width: 100%; height: 100%;
             background: rgba(0, 0, 0, 0.75);
-            backdrop-filter: blur(4px);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
             z-index: 1000;
             justify-content: center;
             align-items: center;
@@ -8478,7 +8608,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
         .modal-content {{
             background: var(--bubble-bg);
             border: 1px solid var(--border-subtle);
-            border-radius: 14px;
+            border-radius: 16px;
             padding: 1.75rem;
             text-align: center;
             max-width: 380px;
@@ -8486,21 +8616,34 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
             display: flex;
             flex-direction: column;
             gap: 1rem;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
         }}
-        .modal-content img {{ width: 200px; height: 200px; margin: 0 auto; border-radius: 8px; }}
+        .modal-content img {{
+            width: 200px;
+            height: 200px;
+            margin: 0 auto;
+            border-radius: 12px;
+            background: #ffffff;
+            padding: 8px;
+        }}
         .close-btn {{
             background: rgba(255, 255, 255, 0.08);
             color: var(--text-main);
             border: 1px solid var(--border-subtle);
             padding: 0.5rem 1rem;
-            border-radius: 6px;
+            border-radius: 8px;
             cursor: pointer;
             font-family: inherit;
             font-size: 0.88rem;
-            transition: background 0.15s;
+            font-weight: 500;
+            transition: all 0.15s ease;
         }}
         .close-btn:hover {{ background: rgba(255, 255, 255, 0.14); }}
+        .close-btn.copied {{
+            background: rgba(0, 168, 132, 0.2) !important;
+            border-color: #00a884 !important;
+            color: #25d366 !important;
+        }}
     </style>
 </head>
 <body>

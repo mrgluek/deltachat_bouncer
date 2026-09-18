@@ -292,6 +292,7 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn("onerror=\"this.src='/channel-default.svg'\"", preview_html)
         self.assertIn("theme-switcher", preview_html)
         self.assertIn("light-theme-button", preview_html)
+        self.assertIn("rgba(17, 27, 33, 0.55)", preview_html)
 
         # Channel preview with 1 member (shows Channel badge)
         channel_single = dict(channel)
@@ -321,6 +322,9 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn(f"{ingress}/qr.png", landing_ingress)
         self.assertIn("Add Bouncer Bot", landing_ingress)
         self.assertIn("Copy Link", landing_ingress)
+        self.assertIn('href="https://i.delta.chat/#botinvite"', landing_ingress)
+        self.assertIn("<span>🗨️</span> Add Bot to Delta Chat", landing_ingress)
+        self.assertIn("rgba(17, 27, 33, 0.55)", landing_ingress)
 
         # Tombstone HTML
         tombstone_html = bot.get_tombstone_html(channel["name"], ingress_path=ingress)
