@@ -61,12 +61,14 @@ except ImportError:
         def __init__(self, path, headers=None, status=200):
             self.path = path
             self.headers = headers or {}
+            self.content_type = self.headers.get("Content-Type", "")
             self.status = status
     mock_web.Response = MockResponse
     mock_web.FileResponse = MockFileResponse
     mock_aiohttp.web = mock_web
     sys.modules['aiohttp'] = mock_aiohttp
     sys.modules['aiohttp.web'] = mock_web
+    web = mock_web
 
 try:
     import qrcode
@@ -276,9 +278,11 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn("15 subscribers", preview_html)
         self.assertIn('href="/"', preview_html)
         self.assertIn("https://git.gluek.info/gluek/deltachat_bouncer", preview_html)
-        self.assertIn("Forgejo Mirror", preview_html)
         self.assertIn("--color-primary: #415e6b;", preview_html)
         self.assertIn("background-light.png", preview_html)
+        self.assertIn("<span>🗨️</span>", preview_html)
+        self.assertIn("channel-default.svg", preview_html)
+        self.assertIn("onerror=\"this.src='/channel-default.svg'\"", preview_html)
 
         # Channel preview with 1 member (shows Channel badge)
         channel_single = dict(channel)
@@ -293,6 +297,7 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn(f"{ingress}/c/{token}/qr.png", preview_ingress)
         self.assertIn(f"{ingress}/media/{token}/2/photo.jpg", preview_ingress)
         self.assertIn(f'href="{ingress}/"', preview_ingress)
+        self.assertIn(f"onerror=\"this.src='{ingress}/channel-default.svg'\"", preview_ingress)
 
         # Landing page with ingress (no invite link configured)
         landing_ingress_no_link = bot.get_landing_page_html(ingress_path=ingress)
@@ -582,12 +587,14 @@ class TestWebPreview(unittest.TestCase):
         req_webp.match_info = {"token": token, "msg_id": "100", "filename": "photo.webp"}
         resp = asyncio.run(bot.handle_media_file(req_webp))
         self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.headers.get("Content-Type"), "image/webp")
 
         # 2. When .jpg requested, falls back to .webp if .webp exists
         req_jpg = MagicMock()
         req_jpg.match_info = {"token": token, "msg_id": "100", "filename": "photo.jpg"}
         resp_fallback = asyncio.run(bot.handle_media_file(req_jpg))
         self.assertEqual(resp_fallback.status, 200)
+        self.assertEqual(resp_fallback.headers.get("Content-Type"), "image/webp")
 
         # 3. Original file served when no .webp exists
         png_path = os.path.join(ch_dir, "101_graphic.png")
@@ -598,6 +605,7 @@ class TestWebPreview(unittest.TestCase):
         req_png.match_info = {"token": token, "msg_id": "101", "filename": "graphic.png"}
         resp_png = asyncio.run(bot.handle_media_file(req_png))
         self.assertEqual(resp_png.status, 200)
+        self.assertEqual(resp_png.headers.get("Content-Type"), "image/png")
 
     def test_handle_dc_info_message_removes_channel_when_bot_removed(self):
         token = database.add_catalog_channel(
@@ -866,6 +874,161 @@ class TestWebPreview(unittest.TestCase):
         self.assertIsNotNone(ch_unlisted)
         preview_html = bot.get_channel_preview_html(ch_unlisted, [], "https://example.com")
         self.assertIn("Hidden Unlisted", preview_html)
+
+    def test_guess_media_content_type(self):
+        import tempfile
+        # Test extension mappings
+        self.assertEqual(bot._guess_media_content_type("photo.webp"), "image/webp")
+        self.assertEqual(bot._guess_media_content_type("photo.jpg"), "image/jpeg")
+        self.assertEqual(bot._guess_media_content_type("photo.jpeg"), "image/jpeg")
+        self.assertEqual(bot._guess_media_content_type("photo.png"), "image/png")
+        self.assertEqual(bot._guess_media_content_type("clip.mp4"), "video/mp4")
+        self.assertEqual(bot._guess_media_content_type("audio.ogg"), "audio/ogg")
+        self.assertEqual(bot._guess_media_content_type("icon.svg"), "image/svg+xml")
+
+        # Test magic bytes inspection for extensionless or unknown files
+        with tempfile.NamedTemporaryFile(delete=False) as tf:
+            tf.write(b"RIFF\x00\x00\x00\x00WEBPVP8 ")
+            tf_webp = tf.name
+        try:
+            self.assertEqual(bot._guess_media_content_type(tf_webp), "image/webp")
+        finally:
+            os.remove(tf_webp)
+
+        with tempfile.NamedTemporaryFile(delete=False) as tf:
+            tf.write(b"\x89PNG\r\n\x1a\n")
+            tf_png = tf.name
+        try:
+            self.assertEqual(bot._guess_media_content_type(tf_png), "image/png")
+        finally:
+            os.remove(tf_png)
+
+    def test_channel_avatar_default_svg_when_no_avatar(self):
+        import asyncio
+        token = database.add_catalog_channel(
+            chat_id=9901,
+            name="No Avatar Channel",
+            description="A channel without an avatar",
+            member_count=7,
+            invite_link="https://i.delta.chat/#noavatar"
+        )
+        # Ensure cached avatar does not exist
+        cached_avatar = os.path.join(bot.CHANNEL_MEDIA_DIR, token, "avatar.png")
+        if os.path.exists(cached_avatar):
+            os.remove(cached_avatar)
+
+        mock_bot = MagicMock()
+        mock_bot.rpc.get_basic_chat_info.return_value = {"id": 9901, "name": "No Avatar Channel"}
+        mock_bot.rpc.get_full_chat_by_id.return_value = {"id": 9901, "name": "No Avatar Channel"}
+        mock_bot.rpc.get_chat_contacts.return_value = []
+
+        with patch.object(bot, "dc_bot_instance", mock_bot), patch.object(bot, "dc_accid", 1):
+            req = MagicMock()
+            req.match_info = {"token": token}
+            resp = asyncio.run(bot.handle_channel_avatar(req))
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.content_type, "image/svg+xml")
+            self.assertIn(b"<svg", resp.body)
+            # Must NOT return bot's icon.png
+            self.assertFalse(isinstance(resp, web.FileResponse))
+
+    def test_channel_avatar_fetches_profile_image_camelcase_and_snake_case(self):
+        import asyncio
+        import tempfile
+
+        # 1. camelCase profileImage in get_basic_chat_info
+        token_camel = database.add_catalog_channel(
+            chat_id=9902,
+            name="CamelCase Avatar",
+            description="Uses profileImage",
+            member_count=3,
+            invite_link="https://i.delta.chat/#camel"
+        )
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+            tf.write(b"\xff\xd8\xff\xe0dummyjpg")
+            camel_avatar_file = tf.name
+
+        try:
+            mock_bot = MagicMock()
+            mock_bot.rpc.get_basic_chat_info.return_value = {
+                "id": 9902,
+                "profileImage": camel_avatar_file
+            }
+            with patch.object(bot, "dc_bot_instance", mock_bot), patch.object(bot, "dc_accid", 1):
+                req = MagicMock()
+                req.match_info = {"token": token_camel}
+                resp = asyncio.run(bot.handle_channel_avatar(req))
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.headers.get("Content-Type"), "image/jpeg")
+        finally:
+            if os.path.exists(camel_avatar_file):
+                os.remove(camel_avatar_file)
+
+        # 2. snake_case profile_image in get_full_chat_by_id fallback
+        token_snake = database.add_catalog_channel(
+            chat_id=9903,
+            name="SnakeCase Avatar",
+            description="Uses profile_image in full chat",
+            member_count=4,
+            invite_link="https://i.delta.chat/#snake"
+        )
+        with tempfile.NamedTemporaryFile(suffix=".webp", delete=False) as tf:
+            tf.write(b"RIFF\x00\x00\x00\x00WEBPVP8 ")
+            snake_avatar_file = tf.name
+
+        try:
+            mock_bot = MagicMock()
+            mock_bot.rpc.get_basic_chat_info.return_value = {"id": 9903}  # No profile image here
+            mock_bot.rpc.get_full_chat_by_id.return_value = {
+                "id": 9903,
+                "profile_image": snake_avatar_file
+            }
+            with patch.object(bot, "dc_bot_instance", mock_bot), patch.object(bot, "dc_accid", 1):
+                req = MagicMock()
+                req.match_info = {"token": token_snake}
+                resp = asyncio.run(bot.handle_channel_avatar(req))
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.headers.get("Content-Type"), "image/webp")
+        finally:
+            if os.path.exists(snake_avatar_file):
+                os.remove(snake_avatar_file)
+
+    def test_handle_icon_and_avatar_path_customization(self):
+        import asyncio
+        import tempfile
+
+        # Create temporary custom avatar image
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+            tf.write(b"\xff\xd8\xff\xe0customavatar")
+            custom_avatar = tf.name
+
+        old_avatar_env = os.environ.get("AVATAR_PATH")
+        try:
+            os.environ["AVATAR_PATH"] = custom_avatar
+            resolved = bot.get_bot_avatar_file_path()
+            self.assertEqual(resolved, custom_avatar)
+
+            req = MagicMock()
+            req.path = "/icon.png"
+            resp = asyncio.run(bot.handle_icon(req))
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.path, custom_avatar)
+            self.assertEqual(resp.headers.get("Content-Type"), "image/jpeg")
+
+            # Route by custom filename directly
+            req_custom = MagicMock()
+            req_custom.path = f"/{os.path.basename(custom_avatar)}"
+            resp_custom = asyncio.run(bot.handle_icon(req_custom))
+            self.assertEqual(resp_custom.status, 200)
+            self.assertEqual(resp_custom.path, custom_avatar)
+            self.assertEqual(resp_custom.headers.get("Content-Type"), "image/jpeg")
+        finally:
+            if old_avatar_env is not None:
+                os.environ["AVATAR_PATH"] = old_avatar_env
+            else:
+                os.environ.pop("AVATAR_PATH", None)
+            if os.path.exists(custom_avatar):
+                os.remove(custom_avatar)
 
 
 if __name__ == "__main__":

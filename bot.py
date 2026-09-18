@@ -19,8 +19,28 @@ import urllib.error
 import urllib.parse
 import uuid
 import html
+import mimetypes
 from datetime import datetime, timezone
 from email.utils import format_datetime
+
+for _ext, _mt in (
+    ('.webp', 'image/webp'),
+    ('.png', 'image/png'),
+    ('.jpg', 'image/jpeg'),
+    ('.jpeg', 'image/jpeg'),
+    ('.gif', 'image/gif'),
+    ('.svg', 'image/svg+xml'),
+    ('.ico', 'image/x-icon'),
+    ('.mp4', 'video/mp4'),
+    ('.webm', 'video/webm'),
+    ('.mp3', 'audio/mpeg'),
+    ('.ogg', 'audio/ogg'),
+    ('.wav', 'audio/wav'),
+    ('.aac', 'audio/aac'),
+    ('.m4a', 'audio/m4a'),
+    ('.pdf', 'application/pdf'),
+):
+    mimetypes.add_type(_mt, _ext)
 
 try:
     import aiohttp
@@ -39,7 +59,7 @@ import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.14.3"
+VERSION = "2.14.4"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -6788,7 +6808,7 @@ def get_landing_page_html(ingress_path: str = "") -> str:
         c_avatar = f"{base_path}/c/{t}/avatar.png"
         channel_items.append(f"""
             <a href="{c_url}" class="channel-card-item">
-                <img src="{c_avatar}" alt="{c_name}" class="channel-card-avatar" onerror="this.src='{base_path}/icon.png'" />
+                <img src="{c_avatar}" alt="{c_name}" class="channel-card-avatar" onerror="this.src='{base_path}/channel-default.svg'" />
                 <div class="channel-card-content">
                     <div class="channel-card-title">{c_name}</div>
                     <div class="channel-card-meta">{c_mem_str}</div>
@@ -7411,7 +7431,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
     home_url = f"{base_path}/" if base_path else "/"
 
     if join_link:
-        actions_buttons_html = f"""<a href="{join_link}" class="btn btn-primary"><span>✈️</span> Open in Delta Chat</a>
+        actions_buttons_html = f"""<a href="{join_link}" class="btn btn-primary"><span>🗨️</span> Open in Delta Chat</a>
                 <button onclick="openQrModal()" class="btn btn-secondary"><span>📱</span> Show QR Code</button>"""
         qr_modal_html = f"""
     <div id="qr-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="qr-modal-title" onclick="if(event.target === this) closeQrModal()">
@@ -7426,7 +7446,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
         </div>
     </div>"""
     else:
-        actions_buttons_html = """<button class="btn btn-primary" disabled style="opacity: 0.55; cursor: not-allowed;" title="Invite link not available"><span>✈️</span> Invite Link Unavailable</button>"""
+        actions_buttons_html = """<button class="btn btn-primary" disabled style="opacity: 0.55; cursor: not-allowed;" title="Invite link not available"><span>🗨️</span> Invite Link Unavailable</button>"""
         qr_modal_html = ""
 
     fedi_domain = ""
@@ -8007,7 +8027,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
 
     <main>
         <section class="channel-card">
-            <img src="{avatar_url}" alt="{ch_name_esc} Avatar" class="channel-avatar" onerror="this.src='{base_path}/icon.png'" />
+            <img src="{avatar_url}" alt="{ch_name_esc} Avatar" class="channel-avatar" onerror="this.src='{base_path}/channel-default.svg'" />
             <div class="channel-info">
                 <h1>{ch_name_esc}</h1>
                 {subscribers_pill}
@@ -8486,25 +8506,126 @@ def rate_limited(bucket: str, max_requests: int = 60, window_seconds: int = 60):
         return wrapped
     return decorator
 
-_ALLOWED_ICON_FILENAMES = {"icon.png", "favicon.ico"}
+_EXTENSION_MIME_MAP = {
+    ".webp": "image/webp",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mp3": "audio/mpeg",
+    ".ogg": "audio/ogg",
+    ".wav": "audio/wav",
+    ".aac": "audio/aac",
+    ".m4a": "audio/m4a",
+    ".pdf": "application/pdf",
+}
+
+def _guess_media_content_type(filepath: str) -> str:
+    if os.path.isfile(filepath):
+        try:
+            with open(filepath, "rb") as f:
+                header = f.read(16)
+            if header.startswith(b"RIFF") and len(header) >= 12 and header[8:12] == b"WEBP":
+                return "image/webp"
+            if header.startswith(b"\x89PNG\r\n\x1a\n"):
+                return "image/png"
+            if header.startswith(b"\xff\xd8\xff"):
+                return "image/jpeg"
+            if header.startswith(b"GIF87a") or header.startswith(b"GIF89a"):
+                return "image/gif"
+        except Exception:
+            pass
+    _, ext = os.path.splitext(filepath.lower())
+    if ext in _EXTENSION_MIME_MAP:
+        return _EXTENSION_MIME_MAP[ext]
+    guessed, _ = mimetypes.guess_type(filepath)
+    return guessed or "application/octet-stream"
+
+def get_bot_avatar_file_path() -> str | None:
+    base_dir = os.path.abspath(os.path.dirname(__file__) if "__file__" in globals() else ".")
+    avatar_env = os.environ.get("AVATAR_PATH") or database.get_config("bot_avatar_path")
+    candidates = []
+    if avatar_env:
+        if os.path.isabs(avatar_env):
+            candidates.append(avatar_env)
+        else:
+            candidates.append(os.path.join(base_dir, avatar_env))
+            candidates.append(os.path.join(base_dir, "static", avatar_env))
+            candidates.append(os.path.join(base_dir, "data", avatar_env))
+            candidates.append(os.path.abspath(avatar_env))
+            candidates.append(avatar_env)
+
+    if dc_bot_instance and dc_accid:
+        try:
+            selfavatar = dc_bot_instance.rpc.get_config(dc_accid, "selfavatar")
+            if selfavatar and os.path.exists(selfavatar):
+                candidates.append(selfavatar)
+        except Exception:
+            pass
+
+    candidates.extend([
+        os.path.join(base_dir, "static", "icon.png"),
+        os.path.join(base_dir, "icon.png"),
+        os.path.join(base_dir, "data", "icon.png"),
+        "static/icon.png",
+        "icon.png",
+    ])
+
+    for c in candidates:
+        if c and os.path.exists(c) and os.path.isfile(c):
+            return c
+    return None
+
+def _get_allowed_icon_filenames() -> set[str]:
+    names = {"icon.png", "favicon.ico"}
+    avatar_env = os.environ.get("AVATAR_PATH") or database.get_config("bot_avatar_path")
+    if avatar_env:
+        names.add(os.path.basename(avatar_env))
+    return names
+
 _ALLOWED_BG_FILENAMES = {"background.jpg", "background-light.png"}
+
+_DEFAULT_CHANNEL_AVATAR_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">'
+    '<defs>'
+    '<linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">'
+    '<stop offset="0%" stop-color="#4a6977"/>'
+    '<stop offset="100%" stop-color="#344c56"/>'
+    '</linearGradient>'
+    '</defs>'
+    '<circle cx="50" cy="50" r="50" fill="url(#bg)"/>'
+    '<path d="M32 42 h8 l16 -12 v40 l-16 -12 h-8 a2 2 0 0 1 -2 -2 v-12 a2 2 0 0 1 2 -2 z M40 56 v8 a2 2 0 0 0 2 2 h4 a2 2 0 0 0 2 -2 v-8 M62 38 a14 14 0 0 1 0 24 M67 31 a22 22 0 0 1 0 38" '
+    'fill="none" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>'
+    '</svg>'
+)
+
+def get_default_channel_avatar_response():
+    return web.Response(
+        text=_DEFAULT_CHANNEL_AVATAR_SVG,
+        content_type="image/svg+xml",
+        headers={'Cache-Control': 'public, max-age=3600'}
+    )
+
+async def handle_channel_default_avatar(request):
+    return get_default_channel_avatar_response()
 
 @rate_limited("assets", max_requests=120, window_seconds=60)
 async def handle_icon(request):
     raw_filename = os.path.basename(getattr(request, "path", "")) if isinstance(getattr(request, "path", None), str) else "icon.png"
-    if raw_filename not in _ALLOWED_ICON_FILENAMES:
+    if raw_filename not in _get_allowed_icon_filenames():
         return web.Response(status=404)
-    filename = "icon.png"
-    base_dir = os.path.abspath(os.path.dirname(__file__) if "__file__" in globals() else ".")
-    for candidate in (
-        os.path.join(base_dir, "static", filename),
-        os.path.join(base_dir, filename),
-        os.path.join("static", filename),
-        filename,
-    ):
-        if os.path.exists(candidate) and os.path.isfile(candidate):
-            headers = {'Cache-Control': 'public, max-age=31536000, immutable'}
-            return web.FileResponse(candidate, headers=headers)
+    target = get_bot_avatar_file_path()
+    if target and os.path.exists(target) and os.path.isfile(target):
+        content_type = _guess_media_content_type(target)
+        headers = {
+            'Cache-Control': 'public, max-age=3600',
+            'Content-Type': content_type,
+        }
+        return web.FileResponse(target, headers=headers)
     return web.Response(status=404)
 
 
@@ -8522,7 +8643,11 @@ async def handle_background(request):
         bg_file,
     ):
         if os.path.exists(candidate) and os.path.isfile(candidate):
-            headers = {'Cache-Control': 'public, max-age=31536000, immutable'}
+            content_type = _guess_media_content_type(candidate)
+            headers = {
+                'Cache-Control': 'public, max-age=31536000, immutable',
+                'Content-Type': content_type,
+            }
             return web.FileResponse(candidate, headers=headers)
     return web.Response(status=404)
 
@@ -8751,28 +8876,64 @@ async def handle_channel_avatar(request):
 
     avatar_cache_path = os.path.join(CHANNEL_MEDIA_DIR, token, "avatar.png")
     if os.path.exists(avatar_cache_path):
-        return web.FileResponse(avatar_cache_path, headers={'Cache-Control': 'public, max-age=3600'})
+        content_type = _guess_media_content_type(avatar_cache_path)
+        return web.FileResponse(avatar_cache_path, headers={'Cache-Control': 'public, max-age=3600', 'Content-Type': content_type})
 
     if dc_bot_instance and dc_accid:
+        chat_id = channel.get('chat_id')
         try:
-            chat_info = dc_bot_instance.rpc.get_basic_chat_info(dc_accid, channel['chat_id'])
-            prof_img = chat_info.get("profile_image") if isinstance(chat_info, dict) else getattr(chat_info, "profile_image", None)
+            prof_img = None
+            # 1. Check get_basic_chat_info (supporting camelCase profileImage and snake_case profile_image)
+            try:
+                chat_info = dc_bot_instance.rpc.get_basic_chat_info(dc_accid, chat_id)
+                if chat_info:
+                    prof_img = (
+                        chat_info.get("profileImage") or chat_info.get("profile_image")
+                        if isinstance(chat_info, dict)
+                        else (getattr(chat_info, "profile_image", None) or getattr(chat_info, "profileImage", None))
+                    )
+            except Exception:
+                pass
+
+            # 2. Check get_full_chat_by_id
             if not prof_img:
-                contacts = dc_bot_instance.rpc.get_chat_contacts(dc_accid, channel['chat_id'])
-                other_contacts = [c for c in contacts if c != 1]
-                if other_contacts:
-                    contact = dc_bot_instance.rpc.get_contact(dc_accid, other_contacts[0])
-                    prof_img = contact.get("profile_image") if isinstance(contact, dict) else getattr(contact, "profile_image", None)
+                try:
+                    full_chat = dc_bot_instance.rpc.get_full_chat_by_id(dc_accid, chat_id)
+                    if full_chat:
+                        prof_img = (
+                            full_chat.get("profileImage") or full_chat.get("profile_image")
+                            if isinstance(full_chat, dict)
+                            else (getattr(full_chat, "profile_image", None) or getattr(full_chat, "profileImage", None))
+                        )
+                except Exception:
+                    pass
+
+            # 3. Check contacts in chat
+            if not prof_img:
+                try:
+                    contacts = dc_bot_instance.rpc.get_chat_contacts(dc_accid, chat_id)
+                    other_contacts = [c for c in contacts if c != 1]
+                    if other_contacts:
+                        contact = dc_bot_instance.rpc.get_contact(dc_accid, other_contacts[0])
+                        if contact:
+                            prof_img = (
+                                contact.get("profileImage") or contact.get("profile_image")
+                                if isinstance(contact, dict)
+                                else (getattr(contact, "profile_image", None) or getattr(contact, "profileImage", None))
+                            )
+                except Exception:
+                    pass
+
             if prof_img and os.path.exists(prof_img):
                 os.makedirs(os.path.join(CHANNEL_MEDIA_DIR, token), exist_ok=True)
                 shutil.copy2(prof_img, avatar_cache_path)
-                return web.FileResponse(avatar_cache_path, headers={'Cache-Control': 'public, max-age=3600'})
+                content_type = _guess_media_content_type(avatar_cache_path)
+                return web.FileResponse(avatar_cache_path, headers={'Cache-Control': 'public, max-age=3600', 'Content-Type': content_type})
         except Exception as e:
             logger.debug(f"Failed to fetch avatar for channel {token}: {e}")
 
-    if os.path.exists("icon.png"):
-        return web.FileResponse("icon.png", headers={'Cache-Control': 'public, max-age=3600'})
-    return web.Response(status=404)
+    # For channels without an avatar, serve the default channel avatar SVG (NOT the bot's icon!)
+    return get_default_channel_avatar_response()
 
 
 @rate_limited("rss", max_requests=60, window_seconds=60)
@@ -8843,7 +9004,14 @@ async def handle_media_file(request):
             else:
                 return web.Response(status=404, text="Media not found")
 
-    return web.FileResponse(target_path, headers={'Cache-Control': 'public, max-age=86400'})
+    content_type = _guess_media_content_type(target_path)
+    return web.FileResponse(
+        target_path,
+        headers={
+            'Cache-Control': 'public, max-age=86400',
+            'Content-Type': content_type,
+        }
+    )
 
 
 # ── ActivityPub Handlers ──
@@ -9359,6 +9527,13 @@ async def _run_web_server():
     app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}', handle_channel_preview)
     app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}/qr.png', handle_channel_qr_png)
     app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}/qr.svg', handle_channel_qr_svg)
+    app.router.add_get('/channel-default.svg', handle_channel_default_avatar)
+    app.router.add_get(r'/{slash:/*}channel-default.svg', handle_channel_default_avatar)
+    avatar_env = os.environ.get("AVATAR_PATH") or database.get_config("bot_avatar_path")
+    if avatar_env:
+        fn = os.path.basename(avatar_env)
+        if fn and fn not in ('icon.png', 'favicon.ico'):
+            app.router.add_get(f'/{fn}', handle_icon)
     app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}/avatar.png', handle_channel_avatar)
     app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}/rss.xml', handle_channel_rss)
     app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}/rss', handle_channel_rss_redirect)
