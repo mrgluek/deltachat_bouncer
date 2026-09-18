@@ -59,7 +59,7 @@ import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.14.4"
+VERSION = "2.14.5"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -6739,6 +6739,98 @@ def _format_post_time(ts: float) -> str:
         return ""
 
 
+_THEME_PRELOAD_SCRIPT = """<script>
+(function() {
+    try {
+        var t = localStorage.getItem('theme');
+        if (t === 'light' || t === 'dark') {
+            document.documentElement.setAttribute('data-theme', t);
+        } else {
+            document.documentElement.setAttribute('data-theme', 'system');
+        }
+    } catch (e) {}
+})();
+</script>"""
+
+_THEME_SWITCHER_HTML = """<div class="theme-switcher" role="radiogroup" aria-label="Theme selection">
+    <button id="light-theme-button" class="theme-btn" aria-label="Light theme" title="Light theme" onclick="setTheme('light')">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="5"></circle>
+            <line x1="12" y1="1" x2="12" y2="3"></line>
+            <line x1="12" y1="21" x2="12" y2="23"></line>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+            <line x1="1" y1="12" x2="3" y2="12"></line>
+            <line x1="21" y1="12" x2="23" y2="12"></line>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+        </svg>
+    </button>
+    <button id="dark-theme-button" class="theme-btn" aria-label="Dark theme" title="Dark theme" onclick="setTheme('dark')">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+        </svg>
+    </button>
+    <button id="system-theme-button" class="theme-btn" aria-label="System theme" title="System theme" onclick="setTheme('system')">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+            <line x1="8" y1="21" x2="16" y2="21"></line>
+            <line x1="12" y1="17" x2="12" y2="21"></line>
+        </svg>
+    </button>
+</div>"""
+
+_THEME_CONTROLLER_SCRIPT = """<script>
+function updateThemeButtons(theme) {
+    var btns = {
+        'light': document.getElementById('light-theme-button'),
+        'dark': document.getElementById('dark-theme-button'),
+        'system': document.getElementById('system-theme-button')
+    };
+    for (var k in btns) {
+        if (btns[k]) {
+            if (k === theme) {
+                btns[k].classList.add('active');
+                btns[k].setAttribute('aria-pressed', 'true');
+            } else {
+                btns[k].classList.remove('active');
+                btns[k].setAttribute('aria-pressed', 'false');
+            }
+        }
+    }
+}
+function setTheme(theme) {
+    var css = document.createElement('style');
+    css.appendChild(document.createTextNode('* { transition: none !important; }'));
+    document.head.appendChild(css);
+    try {
+        if (theme === 'light' || theme === 'dark') {
+            localStorage.setItem('theme', theme);
+            document.documentElement.setAttribute('data-theme', theme);
+        } else {
+            localStorage.setItem('theme', 'system');
+            document.documentElement.setAttribute('data-theme', 'system');
+        }
+    } catch (e) {}
+    window.getComputedStyle(css).opacity;
+    document.head.removeChild(css);
+    updateThemeButtons(theme);
+}
+(function initTheme() {
+    var current = 'system';
+    try { current = localStorage.getItem('theme') || 'system'; } catch (e) {}
+    updateThemeButtons(current);
+    if (window.matchMedia) {
+        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function() {
+            var t = 'system';
+            try { t = localStorage.getItem('theme') || 'system'; } catch (e) {}
+            if (t === 'system') updateThemeButtons('system');
+        });
+    }
+})();
+</script>"""
+
+
 def get_landing_page_html(ingress_path: str = "") -> str:
     global index_page_html_cache
     if not ingress_path and index_page_html_cache is not None:
@@ -6842,6 +6934,7 @@ def get_landing_page_html(ingress_path: str = "") -> str:
     <meta name="twitter:card" content="summary" />
     <link rel="icon" type="image/png" href="{base_path}/icon.png" />
     <link rel="shortcut icon" href="{base_path}/favicon.ico" />
+    {_THEME_PRELOAD_SCRIPT}
     <style>
         :root {{
             --bg-color: #19232b;
@@ -6851,10 +6944,12 @@ def get_landing_page_html(ingress_path: str = "") -> str:
             --text-muted: #aebac1;
             --color-primary: #2090ea;
             --accent-blue: #53bdeb;
+            --code-bg: rgba(0, 0, 0, 0.25);
+            --code-border: rgba(255, 255, 255, 0.06);
             --bg-overlay: 1;
         }}
         @media (prefers-color-scheme: light) {{
-            :root {{
+            :root:not([data-theme="dark"]) {{
                 --bg-color: #efeae2;
                 --card-bg: #ffffff;
                 --card-border: rgba(0, 0, 0, 0.08);
@@ -6862,62 +6957,206 @@ def get_landing_page_html(ingress_path: str = "") -> str:
                 --text-muted: #54656f;
                 --color-primary: #415e6b;
                 --accent-blue: #0070e0;
+                --code-bg: rgba(0, 0, 0, 0.05);
+                --code-border: rgba(0, 0, 0, 0.08);
                 --bg-overlay: 1;
             }}
-            body::before {{
+            :root:not([data-theme="dark"]) body::before {{
                 background-image: url('{bg_light_url}') !important;
                 opacity: 1 !important;
             }}
-            .btn-primary:hover {{
+            :root:not([data-theme="dark"]) .btn-primary:hover {{
                 background: #354e59 !important;
             }}
-            .top-qr-btn {{
+            :root:not([data-theme="dark"]) .top-qr-btn {{
                 background: rgba(0, 0, 0, 0.05) !important;
                 color: #111b21 !important;
                 border-color: rgba(0, 0, 0, 0.1) !important;
             }}
-            .top-qr-btn:hover {{
+            :root:not([data-theme="dark"]) .top-qr-btn:hover {{
                 background: rgba(0, 0, 0, 0.08) !important;
                 border-color: rgba(0, 0, 0, 0.16) !important;
             }}
-            .card {{
+            :root:not([data-theme="dark"]) .card {{
                 box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08) !important;
             }}
-            .channel-card-item {{
+            :root:not([data-theme="dark"]) .channel-card-item {{
                 background: rgba(0, 0, 0, 0.03) !important;
                 border-color: rgba(0, 0, 0, 0.06) !important;
             }}
-            .channel-card-item:hover {{
+            :root:not([data-theme="dark"]) .channel-card-item:hover {{
                 background: rgba(0, 0, 0, 0.06) !important;
                 border-color: rgba(0, 0, 0, 0.12) !important;
             }}
-            .logo-title, .hero h1, .card h2, .channel-card-title {{
+            :root:not([data-theme="dark"]) .logo-title,
+            :root:not([data-theme="dark"]) .hero h1,
+            :root:not([data-theme="dark"]) .card h2,
+            :root:not([data-theme="dark"]) .channel-card-title,
+            :root:not([data-theme="dark"]) .feature-text h3 {{
                 color: #111b21 !important;
             }}
-            .hero p {{
+            :root:not([data-theme="dark"]) .hero p {{
                 color: #3b4a54 !important;
             }}
-            .modal {{
+            :root:not([data-theme="dark"]) .modal {{
                 background: #ffffff !important;
                 color: #111b21 !important;
             }}
-            .modal h3 {{
+            :root:not([data-theme="dark"]) .modal h3 {{
                 color: #111b21 !important;
             }}
-            .modal p {{
+            :root:not([data-theme="dark"]) .modal p {{
                 color: #54656f !important;
             }}
-            .modal-qr-container {{
+            :root:not([data-theme="dark"]) .modal-qr-container {{
                 background: #ffffff !important;
             }}
-            .close-btn {{
+            :root:not([data-theme="dark"]) .close-btn {{
                 background: rgba(0, 0, 0, 0.06) !important;
                 border-color: rgba(0, 0, 0, 0.12) !important;
                 color: #111b21 !important;
             }}
-            .close-btn:hover {{
+            :root:not([data-theme="dark"]) .close-btn:hover {{
                 background: rgba(0, 0, 0, 0.1) !important;
             }}
+            :root:not([data-theme="dark"]) .theme-switcher {{
+                background: rgba(0, 0, 0, 0.05) !important;
+                border-color: rgba(0, 0, 0, 0.1) !important;
+            }}
+            :root:not([data-theme="dark"]) .theme-btn {{
+                color: #54656f !important;
+            }}
+            :root:not([data-theme="dark"]) .theme-btn:hover {{
+                background: rgba(0, 0, 0, 0.06) !important;
+                color: #111b21 !important;
+            }}
+            :root:not([data-theme="dark"]) .theme-btn.active {{
+                background: rgba(0, 0, 0, 0.1) !important;
+                color: #111b21 !important;
+            }}
+        }}
+        :root[data-theme="light"] {{
+            --bg-color: #efeae2;
+            --card-bg: #ffffff;
+            --card-border: rgba(0, 0, 0, 0.08);
+            --text-main: #111b21;
+            --text-muted: #54656f;
+            --color-primary: #415e6b;
+            --accent-blue: #0070e0;
+            --code-bg: rgba(0, 0, 0, 0.05);
+            --code-border: rgba(0, 0, 0, 0.08);
+            --bg-overlay: 1;
+        }}
+        :root[data-theme="light"] body::before {{
+            background-image: url('{bg_light_url}') !important;
+            opacity: 1 !important;
+        }}
+        :root[data-theme="light"] .btn-primary:hover {{
+            background: #354e59 !important;
+        }}
+        :root[data-theme="light"] .top-qr-btn {{
+            background: rgba(0, 0, 0, 0.05) !important;
+            color: #111b21 !important;
+            border-color: rgba(0, 0, 0, 0.1) !important;
+        }}
+        :root[data-theme="light"] .top-qr-btn:hover {{
+            background: rgba(0, 0, 0, 0.08) !important;
+            border-color: rgba(0, 0, 0, 0.16) !important;
+        }}
+        :root[data-theme="light"] .card {{
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08) !important;
+        }}
+        :root[data-theme="light"] .channel-card-item {{
+            background: rgba(0, 0, 0, 0.03) !important;
+            border-color: rgba(0, 0, 0, 0.06) !important;
+        }}
+        :root[data-theme="light"] .channel-card-item:hover {{
+            background: rgba(0, 0, 0, 0.06) !important;
+            border-color: rgba(0, 0, 0, 0.12) !important;
+        }}
+        :root[data-theme="light"] .logo-title,
+        :root[data-theme="light"] .hero h1,
+        :root[data-theme="light"] .card h2,
+        :root[data-theme="light"] .channel-card-title,
+        :root[data-theme="light"] .feature-text h3 {{
+            color: #111b21 !important;
+        }}
+        :root[data-theme="light"] .hero p {{
+            color: #3b4a54 !important;
+        }}
+        :root[data-theme="light"] .modal {{
+            background: #ffffff !important;
+            color: #111b21 !important;
+        }}
+        :root[data-theme="light"] .modal h3 {{
+            color: #111b21 !important;
+        }}
+        :root[data-theme="light"] .modal p {{
+            color: #54656f !important;
+        }}
+        :root[data-theme="light"] .modal-qr-container {{
+            background: #ffffff !important;
+        }}
+        :root[data-theme="light"] .close-btn {{
+            background: rgba(0, 0, 0, 0.06) !important;
+            border-color: rgba(0, 0, 0, 0.12) !important;
+            color: #111b21 !important;
+        }}
+        :root[data-theme="light"] .close-btn:hover {{
+            background: rgba(0, 0, 0, 0.1) !important;
+        }}
+        :root[data-theme="light"] .theme-switcher {{
+            background: rgba(0, 0, 0, 0.05) !important;
+            border-color: rgba(0, 0, 0, 0.1) !important;
+        }}
+        :root[data-theme="light"] .theme-btn {{
+            color: #54656f !important;
+        }}
+        :root[data-theme="light"] .theme-btn:hover {{
+            background: rgba(0, 0, 0, 0.06) !important;
+            color: #111b21 !important;
+        }}
+        :root[data-theme="light"] .theme-btn.active {{
+            background: rgba(0, 0, 0, 0.1) !important;
+            color: #111b21 !important;
+        }}
+
+        :root[data-theme="dark"] {{
+            --bg-color: #19232b;
+            --card-bg: #232d36;
+            --card-border: rgba(255, 255, 255, 0.08);
+            --text-main: #e9edef;
+            --text-muted: #aebac1;
+            --color-primary: #2090ea;
+            --accent-blue: #53bdeb;
+            --code-bg: rgba(0, 0, 0, 0.25);
+            --code-border: rgba(255, 255, 255, 0.06);
+            --bg-overlay: 1;
+        }}
+        :root[data-theme="dark"] body::before {{
+            background-image: url('{bg_url}') !important;
+            opacity: 1 !important;
+        }}
+        :root[data-theme="dark"] .btn-primary:hover {{
+            background: #1a7ec9 !important;
+        }}
+        :root[data-theme="dark"] .card {{
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25) !important;
+        }}
+        :root[data-theme="dark"] .theme-switcher {{
+            background: rgba(255, 255, 255, 0.06) !important;
+            border-color: rgba(255, 255, 255, 0.08) !important;
+        }}
+        :root[data-theme="dark"] .theme-btn {{
+            color: var(--text-muted) !important;
+        }}
+        :root[data-theme="dark"] .theme-btn:hover {{
+            background: rgba(255, 255, 255, 0.08) !important;
+            color: var(--text-main) !important;
+        }}
+        :root[data-theme="dark"] .theme-btn.active {{
+            background: rgba(255, 255, 255, 0.14) !important;
+            color: var(--text-main) !important;
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
@@ -6961,7 +7200,7 @@ def get_landing_page_html(ingress_path: str = "") -> str:
         .logo-title {{
             font-size: 1.25rem;
             font-weight: 700;
-            color: #ffffff;
+            color: var(--text-main);
         }}
         .top-qr-btn {{
             display: inline-flex;
@@ -7025,11 +7264,11 @@ def get_landing_page_html(ingress_path: str = "") -> str:
             font-size: 2rem;
             font-weight: 700;
             line-height: 1.25;
-            color: #ffffff;
+            color: var(--text-main);
         }}
         .hero p {{
             font-size: 1rem;
-            color: #d1d5db;
+            color: var(--text-muted);
             max-width: 640px;
             line-height: 1.6;
         }}
@@ -7062,7 +7301,7 @@ def get_landing_page_html(ingress_path: str = "") -> str:
         .card h2 {{
             font-size: 1.25rem;
             font-weight: 600;
-            color: #ffffff;
+            color: var(--text-main);
             margin-bottom: 1rem;
             display: flex;
             align-items: center;
@@ -7104,7 +7343,7 @@ def get_landing_page_html(ingress_path: str = "") -> str:
         .channel-card-title {{
             font-weight: 600;
             font-size: 0.95rem;
-            color: #ffffff;
+            color: var(--text-main);
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -7116,7 +7355,7 @@ def get_landing_page_html(ingress_path: str = "") -> str:
         }}
         .channel-card-desc {{
             font-size: 0.82rem;
-            color: #9ca3af;
+            color: var(--text-muted);
             margin-top: 2px;
             white-space: nowrap;
             overflow: hidden;
@@ -7132,8 +7371,17 @@ def get_landing_page_html(ingress_path: str = "") -> str:
             gap: 0.75rem;
         }}
         .feature-icon {{ font-size: 1.35rem; flex-shrink: 0; line-height: 1.2; }}
-        .feature-text h3 {{ font-size: 0.98rem; font-weight: 600; color: #ffffff; margin-bottom: 0.25rem; }}
+        .feature-text h3 {{ font-size: 0.98rem; font-weight: 600; color: var(--text-main); margin-bottom: 0.25rem; }}
         .feature-text p {{ font-size: 0.88rem; color: var(--text-muted); line-height: 1.5; }}
+        code {{
+            background: var(--code-bg);
+            border: 1px solid var(--code-border);
+            padding: 0.15rem 0.4rem;
+            border-radius: 4px;
+            color: var(--accent-blue);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+            font-size: 0.85rem;
+        }}
         .commands-table {{
             width: 100%;
             border-collapse: collapse;
@@ -7151,9 +7399,12 @@ def get_landing_page_html(ingress_path: str = "") -> str:
             text-transform: uppercase;
             letter-spacing: 0.04em;
         }}
+        .commands-table td {{
+            color: var(--text-main);
+        }}
         .commands-table code {{
-            background: rgba(0, 0, 0, 0.25);
-            border: 1px solid rgba(255, 255, 255, 0.06);
+            background: var(--code-bg);
+            border: 1px solid var(--code-border);
             padding: 0.15rem 0.4rem;
             border-radius: 4px;
             color: var(--accent-blue);
@@ -7161,14 +7412,60 @@ def get_landing_page_html(ingress_path: str = "") -> str:
             font-size: 0.85rem;
         }}
         footer {{
-            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            border-top: 1px solid var(--card-border);
             padding: 1.5rem 1rem;
-            text-align: center;
             color: var(--text-muted);
             font-size: 0.85rem;
         }}
+        .footer-content {{
+            max-width: 760px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }}
+        @media (max-width: 600px) {{
+            .footer-content {{
+                flex-direction: column;
+                text-align: center;
+                gap: 0.75rem;
+            }}
+        }}
         footer a {{ color: var(--text-muted); text-decoration: underline; text-underline-offset: 2px; }}
         footer a:hover {{ color: var(--text-main); }}
+        .theme-switcher {{
+            display: inline-flex;
+            align-items: center;
+            gap: 2px;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid var(--card-border);
+            border-radius: 9999px;
+            padding: 2px;
+        }}
+        .theme-btn {{
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            padding: 0;
+            transition: color 0.15s, background 0.15s;
+        }}
+        .theme-btn:hover {{
+            color: var(--text-main);
+            background: rgba(255, 255, 255, 0.08);
+        }}
+        .theme-btn.active {{
+            color: var(--text-main);
+            background: rgba(255, 255, 255, 0.14);
+        }}
         .modal {{
             display: none;
             position: fixed;
@@ -7336,8 +7633,12 @@ def get_landing_page_html(ingress_path: str = "") -> str:
     {qr_modal_html}
 
     <footer>
-        <p>Powered by <a href="https://github.com/mrgluek/deltachat_bouncer" target="_blank">Delta Chat Bouncer Bot</a> (v{VERSION}) · <a href="https://git.gluek.info/gluek/deltachat_bouncer" target="_blank">Forgejo Mirror</a></p>
+        <div class="footer-content">
+            <p>Powered by <a href="https://github.com/mrgluek/deltachat_bouncer" target="_blank">Delta Chat Bouncer Bot</a> (v{VERSION}) · <a href="https://git.gluek.info/gluek/deltachat_bouncer" target="_blank">Forgejo Mirror</a></p>
+            {_THEME_SWITCHER_HTML}
+        </div>
     </footer>
+    {_THEME_CONTROLLER_SCRIPT}
     <script>
     var _qrOpenerBtn = null;
     function openQrModal() {{
@@ -7533,6 +7834,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
     <meta name="twitter:title" content="{ch_name_esc}">
     <meta name="twitter:description" content="{ch_desc_summary}">
     <meta name="twitter:image" content="{avatar_url}">
+    {_THEME_PRELOAD_SCRIPT}
 
     <style>
         :root {{
@@ -7549,7 +7851,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
             --bg-overlay: 1;
         }}
         @media (prefers-color-scheme: light) {{
-            :root {{
+            :root:not([data-theme="dark"]) {{
                 --bg-color: #efeae2;
                 --bubble-bg: #ffffff;
                 --border-subtle: rgba(0, 0, 0, 0.08);
@@ -7562,65 +7864,203 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
                 --color-success: #008069;
                 --bg-overlay: 1;
             }}
-            body::before {{
+            :root:not([data-theme="dark"]) body::before {{
                 background-image: url('{base_path}/background-light.png') !important;
                 opacity: 1 !important;
             }}
-            .btn-primary:hover {{
+            :root:not([data-theme="dark"]) .btn-primary:hover {{
                 background: #354e59 !important;
             }}
-            .btn-secondary {{
+            :root:not([data-theme="dark"]) .btn-secondary {{
                 background: rgba(0, 0, 0, 0.05) !important;
                 border-color: rgba(0, 0, 0, 0.1) !important;
                 color: #111b21 !important;
             }}
-            .btn-secondary:hover {{
+            :root:not([data-theme="dark"]) .btn-secondary:hover {{
                 background: rgba(0, 0, 0, 0.08) !important;
                 border-color: rgba(0, 0, 0, 0.15) !important;
             }}
-            .close-btn {{
+            :root:not([data-theme="dark"]) .close-btn {{
                 background: rgba(0, 0, 0, 0.06) !important;
                 border-color: rgba(0, 0, 0, 0.12) !important;
                 color: #111b21 !important;
             }}
-            .close-btn:hover {{
+            :root:not([data-theme="dark"]) .close-btn:hover {{
                 background: rgba(0, 0, 0, 0.1) !important;
             }}
-            .channel-header-card {{
+            :root:not([data-theme="dark"]) .channel-header-card {{
                 background: #ffffff !important;
                 box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08) !important;
             }}
-            .channel-title {{
+            :root:not([data-theme="dark"]) .channel-title {{
                 color: #111b21 !important;
             }}
-            .channel-desc {{
+            :root:not([data-theme="dark"]) .channel-desc {{
                 color: #3b4a54 !important;
             }}
-            .post-bubble {{
+            :root:not([data-theme="dark"]) .post-bubble {{
                 background: #ffffff !important;
                 box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08) !important;
             }}
-            .post-author {{
+            :root:not([data-theme="dark"]) .post-author {{
                 color: #0070e0 !important;
             }}
-            .fedi-tag-btn {{
+            :root:not([data-theme="dark"]) .fedi-tag-btn {{
                 background: rgba(0, 0, 0, 0.05) !important;
                 color: #111b21 !important;
                 border-color: rgba(0, 0, 0, 0.1) !important;
             }}
-            .modal {{
+            :root:not([data-theme="dark"]) .modal {{
                 background: #ffffff !important;
                 color: #111b21 !important;
             }}
-            .modal h3 {{
+            :root:not([data-theme="dark"]) .modal h3 {{
                 color: #111b21 !important;
             }}
-            .modal p {{
+            :root:not([data-theme="dark"]) .modal p {{
                 color: #54656f !important;
             }}
-            .modal-qr-container {{
+            :root:not([data-theme="dark"]) .modal-qr-container {{
                 background: #ffffff !important;
             }}
+            :root:not([data-theme="dark"]) .theme-switcher {{
+                background: rgba(0, 0, 0, 0.05) !important;
+                border-color: rgba(0, 0, 0, 0.1) !important;
+            }}
+            :root:not([data-theme="dark"]) .theme-btn {{
+                color: #54656f !important;
+            }}
+            :root:not([data-theme="dark"]) .theme-btn:hover {{
+                background: rgba(0, 0, 0, 0.06) !important;
+                color: #111b21 !important;
+            }}
+            :root:not([data-theme="dark"]) .theme-btn.active {{
+                background: rgba(0, 0, 0, 0.1) !important;
+                color: #111b21 !important;
+            }}
+        }}
+        :root[data-theme="light"] {{
+            --bg-color: #efeae2;
+            --bubble-bg: #ffffff;
+            --border-subtle: rgba(0, 0, 0, 0.08);
+            --border-bubble: rgba(0, 0, 0, 0.05);
+            --text-main: #111b21;
+            --text-muted: #54656f;
+            --text-secondary: #54656f;
+            --color-primary: #415e6b;
+            --color-author: #0070e0;
+            --color-success: #008069;
+            --bg-overlay: 1;
+        }}
+        :root[data-theme="light"] body::before {{
+            background-image: url('{base_path}/background-light.png') !important;
+            opacity: 1 !important;
+        }}
+        :root[data-theme="light"] .btn-primary:hover {{
+            background: #354e59 !important;
+        }}
+        :root[data-theme="light"] .btn-secondary {{
+            background: rgba(0, 0, 0, 0.05) !important;
+            border-color: rgba(0, 0, 0, 0.1) !important;
+            color: #111b21 !important;
+        }}
+        :root[data-theme="light"] .btn-secondary:hover {{
+            background: rgba(0, 0, 0, 0.08) !important;
+            border-color: rgba(0, 0, 0, 0.15) !important;
+        }}
+        :root[data-theme="light"] .close-btn {{
+            background: rgba(0, 0, 0, 0.06) !important;
+            border-color: rgba(0, 0, 0, 0.12) !important;
+            color: #111b21 !important;
+        }}
+        :root[data-theme="light"] .close-btn:hover {{
+            background: rgba(0, 0, 0, 0.1) !important;
+        }}
+        :root[data-theme="light"] .channel-header-card {{
+            background: #ffffff !important;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08) !important;
+        }}
+        :root[data-theme="light"] .channel-title {{
+            color: #111b21 !important;
+        }}
+        :root[data-theme="light"] .channel-desc {{
+            color: #3b4a54 !important;
+        }}
+        :root[data-theme="light"] .post-bubble {{
+            background: #ffffff !important;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08) !important;
+        }}
+        :root[data-theme="light"] .post-author {{
+            color: #0070e0 !important;
+        }}
+        :root[data-theme="light"] .fedi-tag-btn {{
+            background: rgba(0, 0, 0, 0.05) !important;
+            color: #111b21 !important;
+            border-color: rgba(0, 0, 0, 0.1) !important;
+        }}
+        :root[data-theme="light"] .modal {{
+            background: #ffffff !important;
+            color: #111b21 !important;
+        }}
+        :root[data-theme="light"] .modal h3 {{
+            color: #111b21 !important;
+        }}
+        :root[data-theme="light"] .modal p {{
+            color: #54656f !important;
+        }}
+        :root[data-theme="light"] .modal-qr-container {{
+            background: #ffffff !important;
+        }}
+        :root[data-theme="light"] .theme-switcher {{
+            background: rgba(0, 0, 0, 0.05) !important;
+            border-color: rgba(0, 0, 0, 0.1) !important;
+        }}
+        :root[data-theme="light"] .theme-btn {{
+            color: #54656f !important;
+        }}
+        :root[data-theme="light"] .theme-btn:hover {{
+            background: rgba(0, 0, 0, 0.06) !important;
+            color: #111b21 !important;
+        }}
+        :root[data-theme="light"] .theme-btn.active {{
+            background: rgba(0, 0, 0, 0.1) !important;
+            color: #111b21 !important;
+        }}
+
+        :root[data-theme="dark"] {{
+            --bg-color: #19232b;
+            --bubble-bg: #232d36;
+            --border-subtle: rgba(255, 255, 255, 0.08);
+            --border-bubble: rgba(255, 255, 255, 0.05);
+            --text-main: #e9edef;
+            --text-muted: #aebac1;
+            --text-secondary: #aebac1;
+            --color-primary: #2090ea;
+            --color-author: #53bdeb;
+            --color-success: #00a884;
+            --bg-overlay: 1;
+        }}
+        :root[data-theme="dark"] body::before {{
+            background-image: url('{base_path}/background.jpg') !important;
+            opacity: 1 !important;
+        }}
+        :root[data-theme="dark"] .btn-primary:hover {{
+            background: #1b7ed3 !important;
+        }}
+        :root[data-theme="dark"] .theme-switcher {{
+            background: rgba(255, 255, 255, 0.06) !important;
+            border-color: rgba(255, 255, 255, 0.08) !important;
+        }}
+        :root[data-theme="dark"] .theme-btn {{
+            color: var(--text-muted) !important;
+        }}
+        :root[data-theme="dark"] .theme-btn:hover {{
+            background: rgba(255, 255, 255, 0.08) !important;
+            color: var(--text-main) !important;
+        }}
+        :root[data-theme="dark"] .theme-btn.active {{
+            background: rgba(255, 255, 255, 0.14) !important;
+            color: var(--text-main) !important;
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
@@ -7973,12 +8413,58 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
         footer {{
             border-top: 1px solid var(--border-subtle);
             padding: 1.75rem 1rem;
-            text-align: center;
             color: var(--text-muted);
             font-size: 0.85rem;
         }}
+        .footer-content {{
+            max-width: 680px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }}
+        @media (max-width: 600px) {{
+            .footer-content {{
+                flex-direction: column;
+                text-align: center;
+                gap: 0.75rem;
+            }}
+        }}
         footer a {{ color: var(--color-author); text-decoration: none; }}
         footer a:hover {{ text-decoration: underline; }}
+        .theme-switcher {{
+            display: inline-flex;
+            align-items: center;
+            gap: 2px;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid var(--border-subtle);
+            border-radius: 9999px;
+            padding: 2px;
+        }}
+        .theme-btn {{
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            padding: 0;
+            transition: color 0.15s, background 0.15s;
+        }}
+        .theme-btn:hover {{
+            color: var(--text-main);
+            background: rgba(255, 255, 255, 0.08);
+        }}
+        .theme-btn.active {{
+            color: var(--text-main);
+            background: rgba(255, 255, 255, 0.14);
+        }}
         .modal {{
             display: none;
             position: fixed;
@@ -8048,8 +8534,12 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
     {qr_modal_html}
 
     <footer>
-        <p>Powered by <a href="https://github.com/mrgluek/deltachat_bouncer" target="_blank">Delta Chat Bouncer Bot</a> (v{VERSION}) · <a href="https://git.gluek.info/gluek/deltachat_bouncer" target="_blank">Forgejo Mirror</a></p>
+        <div class="footer-content">
+            <p>Powered by <a href="https://github.com/mrgluek/deltachat_bouncer" target="_blank">Delta Chat Bouncer Bot</a> (v{VERSION}) · <a href="https://git.gluek.info/gluek/deltachat_bouncer" target="_blank">Forgejo Mirror</a></p>
+            {_THEME_SWITCHER_HTML}
+        </div>
     </footer>
+    {_THEME_CONTROLLER_SCRIPT}
 
     <script>
     var _qrOpenerBtn = null;
@@ -8155,6 +8645,7 @@ def get_tombstone_html(channel_name: str, ingress_path: str = "") -> str:
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Channel Removed — Delta Chat</title>
     <link rel="icon" type="image/png" href="{base_path}/icon.png" />
+    {_THEME_PRELOAD_SCRIPT}
     <style>
         :root {{
             --bg-color: #19232b;
@@ -8165,7 +8656,7 @@ def get_tombstone_html(channel_name: str, ingress_path: str = "") -> str:
             --color-primary: #2090ea;
         }}
         @media (prefers-color-scheme: light) {{
-            :root {{
+            :root:not([data-theme="dark"]) {{
                 --bg-color: #efeae2;
                 --bubble-bg: #ffffff;
                 --border-subtle: rgba(0, 0, 0, 0.08);
@@ -8173,15 +8664,91 @@ def get_tombstone_html(channel_name: str, ingress_path: str = "") -> str:
                 --text-muted: #54656f;
                 --color-primary: #415e6b;
             }}
-            body {{
+            :root:not([data-theme="dark"]) body {{
                 background-image: url('{base_path}/background-light.png') !important;
             }}
-            .card {{
+            :root:not([data-theme="dark"]) .card {{
                 box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08) !important;
             }}
-            .btn:hover {{
+            :root:not([data-theme="dark"]) .btn:hover {{
                 background: #354e59 !important;
             }}
+            :root:not([data-theme="dark"]) .theme-switcher {{
+                background: rgba(0, 0, 0, 0.05) !important;
+                border-color: rgba(0, 0, 0, 0.1) !important;
+            }}
+            :root:not([data-theme="dark"]) .theme-btn {{
+                color: #54656f !important;
+            }}
+            :root:not([data-theme="dark"]) .theme-btn:hover {{
+                background: rgba(0, 0, 0, 0.06) !important;
+                color: #111b21 !important;
+            }}
+            :root:not([data-theme="dark"]) .theme-btn.active {{
+                background: rgba(0, 0, 0, 0.1) !important;
+                color: #111b21 !important;
+            }}
+        }}
+        :root[data-theme="light"] {{
+            --bg-color: #efeae2;
+            --bubble-bg: #ffffff;
+            --border-subtle: rgba(0, 0, 0, 0.08);
+            --text-main: #111b21;
+            --text-muted: #54656f;
+            --color-primary: #415e6b;
+        }}
+        :root[data-theme="light"] body {{
+            background-image: url('{base_path}/background-light.png') !important;
+        }}
+        :root[data-theme="light"] .card {{
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08) !important;
+        }}
+        :root[data-theme="light"] .btn:hover {{
+            background: #354e59 !important;
+        }}
+        :root[data-theme="light"] .theme-switcher {{
+            background: rgba(0, 0, 0, 0.05) !important;
+            border-color: rgba(0, 0, 0, 0.1) !important;
+        }}
+        :root[data-theme="light"] .theme-btn {{
+            color: #54656f !important;
+        }}
+        :root[data-theme="light"] .theme-btn:hover {{
+            background: rgba(0, 0, 0, 0.06) !important;
+            color: #111b21 !important;
+        }}
+        :root[data-theme="light"] .theme-btn.active {{
+            background: rgba(0, 0, 0, 0.1) !important;
+            color: #111b21 !important;
+        }}
+        :root[data-theme="dark"] {{
+            --bg-color: #19232b;
+            --bubble-bg: #232d36;
+            --border-subtle: rgba(255, 255, 255, 0.08);
+            --text-main: #e9edef;
+            --text-muted: #aebac1;
+            --color-primary: #2090ea;
+        }}
+        :root[data-theme="dark"] body {{
+            background-image: url('{base_path}/background.jpg') !important;
+        }}
+        :root[data-theme="dark"] .btn:hover {{
+            background: #1b7ed3 !important;
+        }}
+        :root[data-theme="dark"] .theme-switcher {{
+            background: rgba(255, 255, 255, 0.06) !important;
+            border-color: rgba(255, 255, 255, 0.08) !important;
+        }}
+        :root[data-theme="dark"] .theme-btn {{
+            color: var(--text-muted) !important;
+        }}
+        :root[data-theme="dark"] .theme-btn:hover {{
+            background: rgba(255, 255, 255, 0.08) !important;
+            color: var(--text-main) !important;
+        }}
+        :root[data-theme="dark"] .theme-btn.active {{
+            background: rgba(255, 255, 255, 0.14) !important;
+            color: var(--text-main) !important;
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
@@ -8194,7 +8761,7 @@ def get_tombstone_html(channel_name: str, ingress_path: str = "") -> str:
             min-height: 100vh;
             display: flex;
             flex-direction: column;
-            justify-content: center;
+            justify-content: space-between;
             align-items: center;
             padding: 1.5rem;
             text-align: center;
@@ -8212,6 +8779,7 @@ def get_tombstone_html(channel_name: str, ingress_path: str = "") -> str:
             align-items: center;
             gap: 1.25rem;
             box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+            margin: auto;
         }}
         .icon {{ font-size: 3rem; }}
         h1 {{ font-size: 1.5rem; font-weight: 600; color: var(--text-main); }}
@@ -8229,6 +8797,42 @@ def get_tombstone_html(channel_name: str, ingress_path: str = "") -> str:
             transition: background 0.15s;
         }}
         .btn:hover {{ background: #1b7ed3; }}
+        footer {{
+            padding: 1rem;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }}
+        .theme-switcher {{
+            display: inline-flex;
+            align-items: center;
+            gap: 2px;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid var(--border-subtle);
+            border-radius: 9999px;
+            padding: 2px;
+        }}
+        .theme-btn {{
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            padding: 0;
+            transition: color 0.15s, background 0.15s;
+        }}
+        .theme-btn:hover {{
+            color: var(--text-main);
+            background: rgba(255, 255, 255, 0.08);
+        }}
+        .theme-btn.active {{
+            color: var(--text-main);
+            background: rgba(255, 255, 255, 0.14);
+        }}
     </style>
 </head>
 <body>
@@ -8238,6 +8842,10 @@ def get_tombstone_html(channel_name: str, ingress_path: str = "") -> str:
         <p>The channel <strong>{ch_esc}</strong> has been removed from the public catalog and is no longer available for preview.</p>
         <a href="{home_url}" class="btn">← Return to Home</a>
     </div>
+    <footer>
+        {_THEME_SWITCHER_HTML}
+    </footer>
+    {_THEME_CONTROLLER_SCRIPT}
 </body>
 </html>
 """
@@ -8253,6 +8861,7 @@ def get_404_html(ingress_path: str = "") -> str:
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Channel Not Found — Delta Chat</title>
     <link rel="icon" type="image/png" href="{base_path}/icon.png" />
+    {_THEME_PRELOAD_SCRIPT}
     <style>
         :root {{
             --bg-color: #19232b;
@@ -8263,7 +8872,7 @@ def get_404_html(ingress_path: str = "") -> str:
             --color-primary: #2090ea;
         }}
         @media (prefers-color-scheme: light) {{
-            :root {{
+            :root:not([data-theme="dark"]) {{
                 --bg-color: #efeae2;
                 --bubble-bg: #ffffff;
                 --border-subtle: rgba(0, 0, 0, 0.08);
@@ -8271,15 +8880,91 @@ def get_404_html(ingress_path: str = "") -> str:
                 --text-muted: #54656f;
                 --color-primary: #415e6b;
             }}
-            body {{
+            :root:not([data-theme="dark"]) body {{
                 background-image: url('{base_path}/background-light.png') !important;
             }}
-            .card {{
+            :root:not([data-theme="dark"]) .card {{
                 box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08) !important;
             }}
-            .btn:hover {{
+            :root:not([data-theme="dark"]) .btn:hover {{
                 background: #354e59 !important;
             }}
+            :root:not([data-theme="dark"]) .theme-switcher {{
+                background: rgba(0, 0, 0, 0.05) !important;
+                border-color: rgba(0, 0, 0, 0.1) !important;
+            }}
+            :root:not([data-theme="dark"]) .theme-btn {{
+                color: #54656f !important;
+            }}
+            :root:not([data-theme="dark"]) .theme-btn:hover {{
+                background: rgba(0, 0, 0, 0.06) !important;
+                color: #111b21 !important;
+            }}
+            :root:not([data-theme="dark"]) .theme-btn.active {{
+                background: rgba(0, 0, 0, 0.1) !important;
+                color: #111b21 !important;
+            }}
+        }}
+        :root[data-theme="light"] {{
+            --bg-color: #efeae2;
+            --bubble-bg: #ffffff;
+            --border-subtle: rgba(0, 0, 0, 0.08);
+            --text-main: #111b21;
+            --text-muted: #54656f;
+            --color-primary: #415e6b;
+        }}
+        :root[data-theme="light"] body {{
+            background-image: url('{base_path}/background-light.png') !important;
+        }}
+        :root[data-theme="light"] .card {{
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08) !important;
+        }}
+        :root[data-theme="light"] .btn:hover {{
+            background: #354e59 !important;
+        }}
+        :root[data-theme="light"] .theme-switcher {{
+            background: rgba(0, 0, 0, 0.05) !important;
+            border-color: rgba(0, 0, 0, 0.1) !important;
+        }}
+        :root[data-theme="light"] .theme-btn {{
+            color: #54656f !important;
+        }}
+        :root[data-theme="light"] .theme-btn:hover {{
+            background: rgba(0, 0, 0, 0.06) !important;
+            color: #111b21 !important;
+        }}
+        :root[data-theme="light"] .theme-btn.active {{
+            background: rgba(0, 0, 0, 0.1) !important;
+            color: #111b21 !important;
+        }}
+        :root[data-theme="dark"] {{
+            --bg-color: #19232b;
+            --bubble-bg: #232d36;
+            --border-subtle: rgba(255, 255, 255, 0.08);
+            --text-main: #e9edef;
+            --text-muted: #aebac1;
+            --color-primary: #2090ea;
+        }}
+        :root[data-theme="dark"] body {{
+            background-image: url('{base_path}/background.jpg') !important;
+        }}
+        :root[data-theme="dark"] .btn:hover {{
+            background: #1b7ed3 !important;
+        }}
+        :root[data-theme="dark"] .theme-switcher {{
+            background: rgba(255, 255, 255, 0.06) !important;
+            border-color: rgba(255, 255, 255, 0.08) !important;
+        }}
+        :root[data-theme="dark"] .theme-btn {{
+            color: var(--text-muted) !important;
+        }}
+        :root[data-theme="dark"] .theme-btn:hover {{
+            background: rgba(255, 255, 255, 0.08) !important;
+            color: var(--text-main) !important;
+        }}
+        :root[data-theme="dark"] .theme-btn.active {{
+            background: rgba(255, 255, 255, 0.14) !important;
+            color: var(--text-main) !important;
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
@@ -8292,7 +8977,7 @@ def get_404_html(ingress_path: str = "") -> str:
             min-height: 100vh;
             display: flex;
             flex-direction: column;
-            justify-content: center;
+            justify-content: space-between;
             align-items: center;
             padding: 1.5rem;
             text-align: center;
@@ -8310,6 +8995,7 @@ def get_404_html(ingress_path: str = "") -> str:
             align-items: center;
             gap: 1.25rem;
             box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+            margin: auto;
         }}
         .icon {{ font-size: 3rem; }}
         h1 {{ font-size: 1.5rem; font-weight: 600; color: var(--text-main); }}
@@ -8327,6 +9013,42 @@ def get_404_html(ingress_path: str = "") -> str:
             transition: background 0.15s;
         }}
         .btn:hover {{ background: #1b7ed3; }}
+        footer {{
+            padding: 1rem;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }}
+        .theme-switcher {{
+            display: inline-flex;
+            align-items: center;
+            gap: 2px;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid var(--border-subtle);
+            border-radius: 9999px;
+            padding: 2px;
+        }}
+        .theme-btn {{
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            padding: 0;
+            transition: color 0.15s, background 0.15s;
+        }}
+        .theme-btn:hover {{
+            color: var(--text-main);
+            background: rgba(255, 255, 255, 0.08);
+        }}
+        .theme-btn.active {{
+            color: var(--text-main);
+            background: rgba(255, 255, 255, 0.14);
+        }}
     </style>
 </head>
 <body>
@@ -8336,6 +9058,10 @@ def get_404_html(ingress_path: str = "") -> str:
         <p>The requested channel preview could not be found. Please check that the URL is correct.</p>
         <a href="{home_url}" class="btn">← Return to Home</a>
     </div>
+    <footer>
+        {_THEME_SWITCHER_HTML}
+    </footer>
+    {_THEME_CONTROLLER_SCRIPT}
 </body>
 </html>
 """

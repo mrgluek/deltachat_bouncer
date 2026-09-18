@@ -243,6 +243,13 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn("📱 QR Code", landing_html)
         self.assertIn("--color-primary: #415e6b;", landing_html)
         self.assertIn("background-light.png", landing_html)
+        self.assertIn("theme-switcher", landing_html)
+        self.assertIn("light-theme-button", landing_html)
+        self.assertIn("dark-theme-button", landing_html)
+        self.assertIn("system-theme-button", landing_html)
+        self.assertIn("data-theme", landing_html)
+        self.assertIn(".feature-text h3", landing_html)
+        self.assertIn("color: var(--text-main);", landing_html)
 
         # Channel preview HTML
         posts = [
@@ -283,6 +290,8 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn("<span>🗨️</span>", preview_html)
         self.assertIn("channel-default.svg", preview_html)
         self.assertIn("onerror=\"this.src='/channel-default.svg'\"", preview_html)
+        self.assertIn("theme-switcher", preview_html)
+        self.assertIn("light-theme-button", preview_html)
 
         # Channel preview with 1 member (shows Channel badge)
         channel_single = dict(channel)
@@ -322,6 +331,7 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn(f'{ingress}/icon.png', tombstone_html)
         self.assertIn("--color-primary: #415e6b;", tombstone_html)
         self.assertIn(f"{ingress}/background-light.png", tombstone_html)
+        self.assertIn("theme-switcher", tombstone_html)
 
         # 404 HTML
         not_found_html = bot.get_404_html(ingress_path=ingress)
@@ -330,6 +340,7 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn(f'{ingress}/icon.png', not_found_html)
         self.assertIn("--color-primary: #415e6b;", not_found_html)
         self.assertIn(f"{ingress}/background-light.png", not_found_html)
+        self.assertIn("theme-switcher", not_found_html)
 
     def test_channel_preview_without_invite_link(self):
         """Verify channel preview disables action button and omits QR modal when invite link is empty."""
