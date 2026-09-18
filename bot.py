@@ -59,7 +59,7 @@ import activitypub
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.14.6"
+VERSION = "2.14.7"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -6843,7 +6843,7 @@ def get_landing_page_html(ingress_path: str = "") -> str:
 
     base_path = ingress_path.rstrip("/")
     bg_url = f"{base_path}/background.jpg"
-    bg_light_url = f"{base_path}/background-light.png"
+    bg_light_url = f"{base_path}/background-light.jpg"
     home_url = f"{base_path}/" if base_path else "/"
     channels = database.get_all_catalog_channels(public_only=True)
 
@@ -6932,7 +6932,8 @@ def get_landing_page_html(ingress_path: str = "") -> str:
     <meta property="og:image" content="{base_path}/icon.png" />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary" />
-    <link rel="icon" type="image/png" href="{base_path}/icon.png" />
+    <link rel="icon" type="image/svg+xml" href="{base_path}/icon.svg" />
+    <link rel="alternate icon" type="image/png" href="{base_path}/icon.png" />
     <link rel="shortcut icon" href="{base_path}/favicon.ico" />
     {_THEME_PRELOAD_SCRIPT}
     <style>
@@ -7930,7 +7931,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
                 --bg-overlay: 1;
             }}
             :root:not([data-theme="dark"]) body::before {{
-                background-image: url('{base_path}/background-light.png') !important;
+                background-image: url('{base_path}/background-light.jpg') !important;
                 opacity: 1 !important;
             }}
             :root:not([data-theme="dark"]) .btn-primary:hover {{
@@ -8033,7 +8034,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
             --bg-overlay: 1;
         }}
         :root[data-theme="light"] body::before {{
-            background-image: url('{base_path}/background-light.png') !important;
+            background-image: url('{base_path}/background-light.jpg') !important;
             opacity: 1 !important;
         }}
         :root[data-theme="light"] .btn-primary:hover {{
@@ -8787,7 +8788,8 @@ def get_tombstone_html(channel_name: str, ingress_path: str = "") -> str:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Channel Removed — Delta Chat</title>
-    <link rel="icon" type="image/png" href="{base_path}/icon.png" />
+    <link rel="icon" type="image/svg+xml" href="{base_path}/icon.svg" />
+    <link rel="alternate icon" type="image/png" href="{base_path}/icon.png" />
     {_THEME_PRELOAD_SCRIPT}
     <style>
         :root {{
@@ -8808,7 +8810,7 @@ def get_tombstone_html(channel_name: str, ingress_path: str = "") -> str:
                 --color-primary: #415e6b;
             }}
             :root:not([data-theme="dark"]) body {{
-                background-image: url('{base_path}/background-light.png') !important;
+                background-image: url('{base_path}/background-light.jpg') !important;
             }}
             :root:not([data-theme="dark"]) .card {{
                 box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08) !important;
@@ -8841,7 +8843,7 @@ def get_tombstone_html(channel_name: str, ingress_path: str = "") -> str:
             --color-primary: #415e6b;
         }}
         :root[data-theme="light"] body {{
-            background-image: url('{base_path}/background-light.png') !important;
+            background-image: url('{base_path}/background-light.jpg') !important;
         }}
         :root[data-theme="light"] .card {{
             box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08) !important;
@@ -9003,7 +9005,8 @@ def get_404_html(ingress_path: str = "") -> str:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Channel Not Found — Delta Chat</title>
-    <link rel="icon" type="image/png" href="{base_path}/icon.png" />
+    <link rel="icon" type="image/svg+xml" href="{base_path}/icon.svg" />
+    <link rel="alternate icon" type="image/png" href="{base_path}/icon.png" />
     {_THEME_PRELOAD_SCRIPT}
     <style>
         :root {{
@@ -9024,7 +9027,7 @@ def get_404_html(ingress_path: str = "") -> str:
                 --color-primary: #415e6b;
             }}
             :root:not([data-theme="dark"]) body {{
-                background-image: url('{base_path}/background-light.png') !important;
+                background-image: url('{base_path}/background-light.jpg') !important;
             }}
             :root:not([data-theme="dark"]) .card {{
                 box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08) !important;
@@ -9057,7 +9060,7 @@ def get_404_html(ingress_path: str = "") -> str:
             --color-primary: #415e6b;
         }}
         :root[data-theme="light"] body {{
-            background-image: url('{base_path}/background-light.png') !important;
+            background-image: url('{base_path}/background-light.jpg') !important;
         }}
         :root[data-theme="light"] .card {{
             box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08) !important;
@@ -9456,19 +9459,74 @@ def _get_allowed_icon_filenames() -> set[str]:
         names.add(os.path.basename(avatar_env))
     return names
 
-_ALLOWED_BG_FILENAMES = {"background.jpg", "background-light.png"}
+_ALLOWED_BG_FILENAMES = {"background.jpg", "background-light.jpg", "background-light.jpg"}
 
 _DEFAULT_CHANNEL_AVATAR_SVG = (
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">'
-    '<defs>'
-    '<linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">'
-    '<stop offset="0%" stop-color="#4a6977"/>'
-    '<stop offset="100%" stop-color="#344c56"/>'
+    '<svg xmlns="http://www.w3.org/2000/svg" xmlns:svg="http://www.w3.org/2000/svg" '
+    'xmlns:xlink="http://www.w3.org/1999/xlink" id="svg2985" width="48" height="48" version="1.1">'
+    '<defs id="defs2987">'
+    '<linearGradient id="linearGradient4409">'
+    '<stop style="stop-color:#f9f9f9;stop-opacity:1" id="stop4411" offset="0"/>'
+    '<stop style="stop-color:#ccc;stop-opacity:0" id="stop4413" offset="1"/>'
     '</linearGradient>'
+    '<linearGradient id="linearGradient4399">'
+    '<stop style="stop-color:#f9f9f9;stop-opacity:1" id="stop4401" offset="0"/>'
+    '<stop style="stop-color:#f9f9f9;stop-opacity:0" id="stop4403" offset="1"/>'
+    '</linearGradient>'
+    '<linearGradient id="linearGradient4375">'
+    '<stop style="stop-color:#364e59;stop-opacity:1" id="stop4377" offset="0"/>'
+    '<stop style="stop-color:#364e59;stop-opacity:0" id="stop4379" offset="1"/>'
+    '</linearGradient>'
+    '<linearGradient id="linearGradient4367">'
+    '<stop style="stop-color:#dc000f;stop-opacity:1" id="stop4369" offset="0"/>'
+    '<stop style="stop-color:#0f0;stop-opacity:0" id="stop4371" offset="1"/>'
+    '</linearGradient>'
+    '<linearGradient id="linearGradient4359">'
+    '<stop style="stop-color:#dc000f;stop-opacity:1" id="stop4361" offset="0"/>'
+    '<stop style="stop-color:#000;stop-opacity:0" id="stop4363" offset="1"/>'
+    '</linearGradient>'
+    '<linearGradient id="linearGradient4381" x1="31.957" x2="-45.041" y1="29.751" y2="-18.592" '
+    'gradientTransform="matrix(0.93766393,0,0,0.93766393,1.542566,1.7199693)" '
+    'gradientUnits="userSpaceOnUse" xlink:href="#linearGradient4375"/>'
+    '<linearGradient id="linearGradient4415" x1="16.345" x2="36.002" y1="3.839" y2="24.359" '
+    'gradientUnits="userSpaceOnUse" xlink:href="#linearGradient4409"/>'
     '</defs>'
-    '<circle cx="50" cy="50" r="50" fill="url(#bg)"/>'
-    '<path d="M32 42 h8 l16 -12 v40 l-16 -12 h-8 a2 2 0 0 1 -2 -2 v-12 a2 2 0 0 1 2 -2 z M40 56 v8 a2 2 0 0 0 2 2 h4 a2 2 0 0 0 2 -2 v-8 M62 38 a14 14 0 0 1 0 24 M67 31 a22 22 0 0 1 0 38" '
-    'fill="none" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>'
+    '<metadata id="metadata2990"/>'
+    '<g id="layer1">'
+    '<path style="fill:#fff;fill-opacity:1;stroke:#000;stroke-width:.57405078;stroke-linejoin:round;'
+    'stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:.43921569" id="path3769" '
+    'd="m 24.015419,1.2870249 c -12.549421,0 -22.7283936,10.1789711 -22.7283936,22.7283931 '
+    '0,12.549422 10.1789726,22.728395 22.7283936,22.728395 14.337742,-0.342877 9.614352,-4.702705 '
+    '23.697556,0.969161 -7.545453,-13.001555 -1.082973,-13.32964 -0.969161,-23.697556 '
+    '0,-12.549422 -10.178973,-22.7283931 -22.728395,-22.7283931 z"/>'
+    '<path id="path3799" '
+    'd="M 23.982249,5.3106163 C 13.645822,5.4364005 5.2618355,13.92999 5.2618355,24.275753 '
+    'c 0,10.345764 8.3839865,18.635301 18.7204135,18.509516 9.827724,-0.03951 7.516769,-5.489695 '
+    '18.380082,-0.443187 -5.950849,-9.296115 0.201753,-10.533667 0.340336,-18.521947 '
+    '0,-10.345766 -8.383989,-18.6353031 -18.720418,-18.5095187 z" '
+    'style="fill:url(#linearGradient4381);fill-opacity:1;stroke:none"/>'
+    '<g style="font-style:normal;font-weight:400;font-size:42.10587311px;line-height:125%;'
+    'font-family:Sans;letter-spacing:0;word-spacing:0;fill:#fff;fill-opacity:1;stroke:none" '
+    'id="text3797" transform="scale(1.1122373,0.89908874)">'
+    '<path style="font-family:\'Times New Roman\';-inkscape-font-specification:\'Times New Roman\';'
+    'fill:#fff;fill-opacity:1" id="path4161" '
+    'd="m 21.688854,23.636251 q -1.027975,-1.151333 -2.857771,-2.754974 -2.014832,-1.768118 '
+    '-2.713855,-2.775534 -0.699024,-1.027975 -0.699024,-2.240986 0,-1.809237 1.68588,-2.837212 '
+    '1.68588,-1.048535 4.399735,-1.048535 2.713855,0 4.728687,0.925178 2.035391,0.925177 '
+    '2.035391,2.549379 0,0.781261 -0.493428,1.295249 -0.493428,0.513987 -1.151333,0.513987 '
+    '-0.945737,0 -2.220426,-1.418606 -1.295249,-1.439165 -2.199868,-2.014832 '
+    '-0.884059,-0.596225 -2.07651,-0.596225 -1.521404,0 -2.50826,0.678463 '
+    '-0.966297,0.678464 -0.966297,1.726999 0,0.986857 0.801821,1.850356 '
+    '0.801821,0.863499 4.132461,3.145605 3.556795,2.446581 5.01652,3.824068 '
+    '1.480285,1.377487 2.405462,3.3512 0.925178,1.973713 0.925178,4.17358 '
+    '0,3.865188 -2.734414,6.825757 -2.713855,2.94001 -6.352888,2.94001 '
+    '-3.310081,0 -5.592187,-2.364344 -2.282105,-2.364343 -2.282105,-6.311769 '
+    '0,-3.803509 2.50826,-6.352888 2.528819,-2.549379 6.208971,-3.083926 z '
+    'm 0.904619,0.945737 q -5.900579,0.966297 -5.900579,8.100447 0,3.680152 1.459725,5.715543 '
+    '1.480285,2.035391 3.433438,2.035391 2.035391,0 3.3512,-1.953153 '
+    '1.315808,-1.973713 1.315808,-5.324913 0,-4.852044 -3.659592,-8.573315 z"/>'
+    '</g>'
+    '</g>'
     '</svg>'
 )
 
@@ -10383,11 +10441,12 @@ async def handle_api_v1_instance(request):
 async def _run_web_server():
     app = web.Application(client_max_size=256 * 1024)
     app.router.add_get('/icon.png', handle_icon)
+    app.router.add_get('/icon.svg', handle_channel_default_avatar)
     app.router.add_get('/favicon.ico', handle_icon)
     app.router.add_get('/background.jpg', handle_background)
     app.router.add_get('/static/background.jpg', handle_background)
-    app.router.add_get('/background-light.png', handle_background)
-    app.router.add_get('/static/background-light.png', handle_background)
+    app.router.add_get('/background-light.jpg', handle_background)
+    app.router.add_get('/static/background-light.jpg', handle_background)
     app.router.add_get('/robots.txt', handle_robots_txt)
     app.router.add_get('/health', handle_health)
     app.router.add_get('/qr.svg', handle_qr_svg)

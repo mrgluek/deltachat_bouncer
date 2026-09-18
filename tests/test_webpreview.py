@@ -242,7 +242,7 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn("top-qr-btn", landing_html)
         self.assertIn("📱 QR Code", landing_html)
         self.assertIn("--color-primary: #415e6b;", landing_html)
-        self.assertIn("background-light.png", landing_html)
+        self.assertIn("background-light.jpg", landing_html)
         self.assertIn("theme-switcher", landing_html)
         self.assertIn("light-theme-button", landing_html)
         self.assertIn("dark-theme-button", landing_html)
@@ -286,7 +286,7 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn('href="/"', preview_html)
         self.assertIn("https://git.gluek.info/gluek/deltachat_bouncer", preview_html)
         self.assertIn("--color-primary: #415e6b;", preview_html)
-        self.assertIn("background-light.png", preview_html)
+        self.assertIn("background-light.jpg", preview_html)
         self.assertIn("<span>🗨️</span>", preview_html)
         self.assertIn("channel-default.svg", preview_html)
         self.assertIn("onerror=\"this.src='/channel-default.svg'\"", preview_html)
@@ -334,7 +334,7 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn(f'href="{ingress}/"', tombstone_html)
         self.assertIn(f'{ingress}/icon.png', tombstone_html)
         self.assertIn("--color-primary: #415e6b;", tombstone_html)
-        self.assertIn(f"{ingress}/background-light.png", tombstone_html)
+        self.assertIn(f"{ingress}/background-light.jpg", tombstone_html)
         self.assertIn("theme-switcher", tombstone_html)
 
         # 404 HTML
@@ -343,7 +343,7 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn(f'href="{ingress}/"', not_found_html)
         self.assertIn(f'{ingress}/icon.png', not_found_html)
         self.assertIn("--color-primary: #415e6b;", not_found_html)
-        self.assertIn(f"{ingress}/background-light.png", not_found_html)
+        self.assertIn(f"{ingress}/background-light.jpg", not_found_html)
         self.assertIn("theme-switcher", not_found_html)
 
     def test_channel_preview_without_invite_link(self):
@@ -559,7 +559,7 @@ class TestWebPreview(unittest.TestCase):
         self.assertIsInstance(resp, web.FileResponse)
 
         req_light = MagicMock()
-        req_light.path = "/background-light.png"
+        req_light.path = "/background-light.jpg"
         resp_light = asyncio.run(bot.handle_background(req_light))
         self.assertEqual(resp_light.status, 200)
         self.assertIn("immutable", resp_light.headers.get("Cache-Control", ""))
