@@ -119,6 +119,15 @@ if hasattr(pw_routes, "qrcode") and isinstance(pw_routes.qrcode, MagicMock):
     pw_routes.qrcode.QRCode.return_value = _mock_qr_instance
 
 
+def _file_response_path(resp) -> str:
+    """Return the served file path from a web.FileResponse, whether it's the
+    real aiohttp class (private ._path, a pathlib.Path) or the local mock
+    fallback (public .path, a str) used when aiohttp isn't installed."""
+    if hasattr(resp, "path"):
+        return resp.path
+    return str(resp._path)
+
+
 class TestWebPreview(unittest.TestCase):
     def setUp(self):
         database.close_db()
@@ -1043,7 +1052,7 @@ class TestWebPreview(unittest.TestCase):
             req.path = "/icon.png"
             resp = asyncio.run(pw_routes.handle_icon(req))
             self.assertEqual(resp.status, 200)
-            self.assertEqual(resp.path, custom_avatar)
+            self.assertEqual(_file_response_path(resp), custom_avatar)
             self.assertEqual(resp.headers.get("Content-Type"), "image/jpeg")
 
             # Route by custom filename directly
@@ -1051,7 +1060,7 @@ class TestWebPreview(unittest.TestCase):
             req_custom.path = f"/{os.path.basename(custom_avatar)}"
             resp_custom = asyncio.run(pw_routes.handle_icon(req_custom))
             self.assertEqual(resp_custom.status, 200)
-            self.assertEqual(resp_custom.path, custom_avatar)
+            self.assertEqual(_file_response_path(resp_custom), custom_avatar)
             self.assertEqual(resp_custom.headers.get("Content-Type"), "image/jpeg")
         finally:
             if old_avatar_env is not None:
