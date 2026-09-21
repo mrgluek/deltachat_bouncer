@@ -585,6 +585,7 @@ def help_command(bot, accid, event):
         status_text = f"I monitor groups and report inactive users (no activity for {config.INACTIVITY_DAYS_THRESHOLD} days)."
 
     help_text = (
+        f"🤖 **Delta Chat Bouncer Bot v{config.VERSION}**\n\n"
         f"👋 Hi {sender_email}!\n\n"
         f"{status_text}\n\n"
         f"**Commands:**\n"

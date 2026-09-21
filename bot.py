@@ -511,7 +511,7 @@ def on_start(bot, args):
                 if hasattr(bot, "_on_new_msg"):
                     bot._on_new_msg(accid, msg)
                 else:
-                    from deltachat2 import NewMsgEvent, Event
+                    from deltachat2 import NewMsgEvent, Event, events
                     event = NewMsgEvent(command="", payload="", msg=msg)
                     if not msg.is_info and msg.text.startswith(bot.command_prefix):
                         bot._parse_command(accid, event)
