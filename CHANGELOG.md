@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.15.0] - 2026-09-21
+
+### Internal Refactor: Modularization
+- **Split the 10,500+ line `bot.py` monolith into focused modules**, matching the pattern already used by `deltachat_username`. No behavior change — this is a structural refactor only, verified line-for-line against the original file and covered by the full existing unit test suite (all 170 tests passing).
+  - `config.py` — static configuration (env loading, logging, version, cooldown/constant tables, the `dc_cli` instance).
+  - `state.py` — mutable runtime state (locks, caches, the live bot handle).
+  - `dc_helpers.py` — generic Delta Chat RPC helpers shared across modules.
+  - `formatting.py` — markdown → HTML rendering. `security.py` — web rate limiting and safe host/URL resolution.
+  - `moderation.py`, `transports.py`, `cmping.py` + `cmping_commands.py`, `channels.py`, `virustotal.py`, `stickers.py` — one module per subsystem (background workers + their `/command` handlers).
+  - `commands.py` / `handlers.py` — remaining general commands and the global Delta Chat event handlers.
+  - `web/` package — the aiohttp channel-preview + ActivityPub server (`web/routes.py`, `web/ap_routes.py`, `web/templates/*`).
+  - `bot.py` is now the lifecycle entry point only (`on_init`/`on_start`/`__main__`) plus a backward-compatible facade re-exporting everything under its old name.
+- Added `tests/__init__.py` and `.github/workflows/tests.yml` (unit test CI pipeline), matching the standard bot template.
+
 ## [2.14.7] - 2026-09-18
 
 ### UI & Branding Improvements

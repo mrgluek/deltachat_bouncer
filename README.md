@@ -178,6 +178,20 @@ Every channel registered in the Bouncer Bot automatically federates with the Fed
 
 All outgoing federation deliveries are cryptographically signed using **HTTP Signatures** (`draft-cavage-http-signatures`) with individual RSA-2048 actor keypairs.
 
+## Architecture
+
+As of v2.15.0, the bot logic is split into focused modules instead of one monolithic file (`bot.py` is now the lifecycle entry point only — `on_init`/`on_start`/`__main__`):
+
+- `config.py` — static configuration: env loading, logging, version, cooldown/constant tables, the `dc_cli` instance.
+- `state.py` — mutable runtime state: locks, caches, the live bot handle. Other modules always read/write it as `state.<name>`.
+- `dc_helpers.py` — generic Delta Chat RPC helpers (admin/fingerprint checks, `_send`/`_react`, the delayed-command debouncer, message-attachment extraction).
+- `formatting.py` / `security.py` — Delta Chat markdown → HTML rendering; web-layer rate limiting and safe host/URL resolution.
+- `moderation.py`, `transports.py`, `cmping.py` + `cmping_commands.py`, `channels.py`, `virustotal.py`, `stickers.py` — one module per subsystem, each owning its background workers and `/command` handlers.
+- `commands.py` / `handlers.py` — the remaining general commands (`/help`, `/bounce`, `/search`, …) and the global Delta Chat event handlers (system messages, the catch-all `NewMessage` dispatcher).
+- `web/` — the aiohttp channel-preview + ActivityPub server: `web/routes.py`, `web/ap_routes.py`, and `web/templates/` (landing page, channel preview, RSS feed, tombstone/404, shared theme snippets).
+
+`bot.py` re-exports everything under its old name for backward compatibility (`import bot; bot.<name>` still works), but new code should import the owning module directly.
+
 ## Support & Development
 
 If you find this bot useful, consider supporting its development:

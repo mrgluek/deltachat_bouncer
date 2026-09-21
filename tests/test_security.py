@@ -98,9 +98,17 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import database
 import activitypub
 import bot
+import security
+import state
+import web.ap_routes as pw_ap_routes
+import web.routes as pw_routes
 
-if bot.web is None:
-    bot.web = sys.modules.get('aiohttp.web', MagicMock())
+if security.web is None:
+    security.web = sys.modules.get('aiohttp.web', MagicMock())
+if pw_routes.web is None:
+    pw_routes.web = sys.modules.get('aiohttp.web', MagicMock())
+if pw_ap_routes.web is None:
+    pw_ap_routes.web = sys.modules.get('aiohttp.web', MagicMock())
 
 
 class TestSecurity(unittest.TestCase):
@@ -108,12 +116,12 @@ class TestSecurity(unittest.TestCase):
         database.close_db()
         database.DB_PATH = TEST_DB
         database.init_db()
-        bot.CHANNEL_MEDIA_DIR = "test_media_dir_sec"
-        bot.index_page_html_cache = None
-        if os.path.exists(bot.CHANNEL_MEDIA_DIR):
-            shutil.rmtree(bot.CHANNEL_MEDIA_DIR, ignore_errors=True)
-        with bot._rate_limit_lock:
-            bot._rate_limits.clear()
+        state.CHANNEL_MEDIA_DIR = "test_media_dir_sec"
+        state.index_page_html_cache = None
+        if os.path.exists(state.CHANNEL_MEDIA_DIR):
+            shutil.rmtree(state.CHANNEL_MEDIA_DIR, ignore_errors=True)
+        with security._rate_limit_lock:
+            security._rate_limits.clear()
 
     def tearDown(self):
         database.close_db()
@@ -124,10 +132,10 @@ class TestSecurity(unittest.TestCase):
                     os.remove(f)
                 except Exception:
                     pass
-        if os.path.exists(bot.CHANNEL_MEDIA_DIR):
-            shutil.rmtree(bot.CHANNEL_MEDIA_DIR, ignore_errors=True)
-        with bot._rate_limit_lock:
-            bot._rate_limits.clear()
+        if os.path.exists(state.CHANNEL_MEDIA_DIR):
+            shutil.rmtree(state.CHANNEL_MEDIA_DIR, ignore_errors=True)
+        with security._rate_limit_lock:
+            security._rate_limits.clear()
 
     # ==========================================================================
     # 1. SSRF Protection (is_safe_url)
@@ -291,7 +299,7 @@ class TestSecurity(unittest.TestCase):
         # Payload > 64 KB (e.g. 65,537 bytes)
         req.read = AsyncMock(return_value=b"x" * 65537)
 
-        resp = asyncio.run(bot.handle_ap_inbox(req))
+        resp = asyncio.run(pw_ap_routes.handle_ap_inbox(req))
         self.assertEqual(resp.status, 413)
         self.assertIn("Payload Too Large", resp.text)
 
@@ -306,16 +314,16 @@ class TestSecurity(unittest.TestCase):
 
         # Allow 3 requests per 10 seconds
         for _ in range(3):
-            self.assertTrue(bot.check_rate_limit(req, "test_window", max_requests=3, window_seconds=10))
+            self.assertTrue(security.check_rate_limit(req, "test_window", max_requests=3, window_seconds=10))
 
         # 4th request must be rate limited
-        self.assertFalse(bot.check_rate_limit(req, "test_window", max_requests=3, window_seconds=10))
+        self.assertFalse(security.check_rate_limit(req, "test_window", max_requests=3, window_seconds=10))
 
         # Another IP should still be allowed
         req_other = MagicMock()
         req_other.remote = "203.0.113.20"
         req_other.headers = {}
-        self.assertTrue(bot.check_rate_limit(req_other, "test_window", max_requests=3, window_seconds=10))
+        self.assertTrue(security.check_rate_limit(req_other, "test_window", max_requests=3, window_seconds=10))
 
     def test_check_rate_limit_x_forwarded_for(self):
         req = MagicMock()
@@ -323,10 +331,10 @@ class TestSecurity(unittest.TestCase):
         req.headers = {"X-Forwarded-For": "198.51.100.5, 10.0.0.1"}
 
         for _ in range(2):
-            self.assertTrue(bot.check_rate_limit(req, "test_xff", max_requests=2, window_seconds=10))
+            self.assertTrue(security.check_rate_limit(req, "test_xff", max_requests=2, window_seconds=10))
 
         # 3rd request blocked based on client IP from XFF
-        self.assertFalse(bot.check_rate_limit(req, "test_xff", max_requests=2, window_seconds=10))
+        self.assertFalse(security.check_rate_limit(req, "test_xff", max_requests=2, window_seconds=10))
 
     def test_handle_ap_inbox_rate_limiting(self):
         token = "inboxrate123"
@@ -342,10 +350,10 @@ class TestSecurity(unittest.TestCase):
 
         # Exhaust 60 requests in the inbox bucket
         for _ in range(60):
-            self.assertTrue(bot.check_rate_limit(req, "inbox", max_requests=60, window_seconds=60))
+            self.assertTrue(security.check_rate_limit(req, "inbox", max_requests=60, window_seconds=60))
 
         # 61st request directly to handler should return 429
-        resp = asyncio.run(bot.handle_ap_inbox(req))
+        resp = asyncio.run(pw_ap_routes.handle_ap_inbox(req))
         self.assertEqual(resp.status, 429)
         self.assertIn("Too Many Requests", resp.text)
         self.assertEqual(resp.headers.get("Retry-After"), "60")
@@ -362,9 +370,9 @@ class TestSecurity(unittest.TestCase):
 
         # Exhaust 120 requests
         for _ in range(120):
-            self.assertTrue(bot.check_rate_limit(req, "channel_preview", max_requests=120, window_seconds=60))
+            self.assertTrue(security.check_rate_limit(req, "channel_preview", max_requests=120, window_seconds=60))
 
-        resp = asyncio.run(bot.handle_channel_preview(req))
+        resp = asyncio.run(pw_routes.handle_channel_preview(req))
         self.assertEqual(resp.status, 429)
         self.assertIn("Too Many Requests", resp.text)
         self.assertEqual(resp.headers.get("Retry-After"), "60")
@@ -378,9 +386,9 @@ class TestSecurity(unittest.TestCase):
 
         # Exhaust 120 requests
         for _ in range(120):
-            self.assertTrue(bot.check_rate_limit(req, "media", max_requests=120, window_seconds=60))
+            self.assertTrue(security.check_rate_limit(req, "media", max_requests=120, window_seconds=60))
 
-        resp = asyncio.run(bot.handle_media_file(req))
+        resp = asyncio.run(pw_routes.handle_media_file(req))
         self.assertEqual(resp.status, 429)
         self.assertIn("Too Many Requests", resp.text)
         self.assertEqual(resp.headers.get("Retry-After"), "60")
@@ -408,20 +416,20 @@ class TestSecurity(unittest.TestCase):
         # 1. Valid host and scheme
         req = MagicMock()
         req.headers = {"X-Forwarded-Proto": "https", "X-Forwarded-Host": "chat.example.com"}
-        self.assertEqual(bot._get_base_url(req), "https://chat.example.com")
+        self.assertEqual(security._get_base_url(req), "https://chat.example.com")
 
         # 2. Host with port
         req.headers = {"Host": "dc.local:8080"}
-        self.assertEqual(bot._get_base_url(req), "http://dc.local:8080")
+        self.assertEqual(security._get_base_url(req), "http://dc.local:8080")
 
         # 3. Host with illegal characters / header injection fallback to localhost
         req.headers = {"X-Forwarded-Host": "evil.com\r\nInjected-Header: bad"}
         req.host = "evil.com\r\n"
-        self.assertEqual(bot._get_base_url(req), "http://localhost")
+        self.assertEqual(security._get_base_url(req), "http://localhost")
 
         # 4. Configured BASE_URL overrides headers
         database.set_config("base_url", "https://canonical.example.com")
-        self.assertEqual(bot._get_base_url(req), "https://canonical.example.com")
+        self.assertEqual(security._get_base_url(req), "https://canonical.example.com")
         database.set_config("base_url", "")
 
     def test_handle_ap_inbox_key_id_actor_mismatch(self):
@@ -450,7 +458,7 @@ class TestSecurity(unittest.TestCase):
         req.read = AsyncMock(return_value=body)
 
         with patch('activitypub.is_safe_url', return_value=(True, "")):
-            resp = asyncio.run(bot.handle_ap_inbox(req))
+            resp = asyncio.run(pw_ap_routes.handle_ap_inbox(req))
             self.assertEqual(resp.status, 401)
             self.assertIn("KeyId and actor origin mismatch", resp.text)
 
