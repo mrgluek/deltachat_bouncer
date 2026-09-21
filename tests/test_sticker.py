@@ -56,6 +56,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import database
 import bot
+import state
+import stickers
 
 
 def _make_sync_thread(target, args=(), daemon=True):
@@ -80,8 +82,8 @@ class TestStickerCommands(unittest.TestCase):
         self.mock_bot.rpc = MagicMock()
         self.mock_bot.logger = MagicMock()
         self.accid = 1
-        bot._chat_sticker_anti_spam.clear()
-        bot._chat_stickernobg_anti_spam.clear()
+        state._chat_sticker_anti_spam.clear()
+        state._chat_stickernobg_anti_spam.clear()
 
         self.temp_test_dir = tempfile.mkdtemp(prefix="dc_test_sticker_")
 
@@ -111,8 +113,8 @@ class TestStickerCommands(unittest.TestCase):
         event.msg.quote = None
         event.payload = ""
 
-        with patch("bot._send") as mock_send, patch("bot._is_dc_admin", return_value=True):
-            bot.sticker_command(self.mock_bot, self.accid, event)
+        with patch("dc_helpers._send") as mock_send, patch("dc_helpers._is_dc_admin", return_value=True):
+            stickers.sticker_command(self.mock_bot, self.accid, event)
             mock_send.assert_called_once()
             args, kwargs = mock_send.call_args
             self.assertIn("Sticker Generator Usage", args[3])
@@ -137,13 +139,13 @@ class TestStickerCommands(unittest.TestCase):
         event.msg.quote = None
         event.payload = ""
 
-        with patch("bot._react") as mock_react, \
-             patch("bot.convert_to_sticker_webp", return_value=(True, "")) as mock_convert, \
-             patch("bot._send_sticker") as mock_send_sticker, \
-             patch("bot._is_dc_admin", return_value=True), \
+        with patch("dc_helpers._react") as mock_react, \
+             patch("stickers.convert_to_sticker_webp", return_value=(True, "")) as mock_convert, \
+             patch("stickers._send_sticker") as mock_send_sticker, \
+             patch("dc_helpers._is_dc_admin", return_value=True), \
              patch("threading.Thread", side_effect=_make_sync_thread):
 
-            bot.sticker_command(self.mock_bot, self.accid, event)
+            stickers.sticker_command(self.mock_bot, self.accid, event)
 
             # Check ⏳ reaction was added
             mock_react.assert_any_call(self.mock_bot, self.accid, 101, "⏳")
@@ -185,13 +187,13 @@ class TestStickerCommands(unittest.TestCase):
         event.msg.quote = {"message_id": 50}
         event.payload = ""
 
-        with patch("bot._react") as mock_react, \
-             patch("bot.convert_to_sticker_webp", return_value=(True, "")) as mock_convert, \
-             patch("bot._send_sticker") as mock_send_sticker, \
-             patch("bot._is_dc_admin", return_value=True), \
+        with patch("dc_helpers._react") as mock_react, \
+             patch("stickers.convert_to_sticker_webp", return_value=(True, "")) as mock_convert, \
+             patch("stickers._send_sticker") as mock_send_sticker, \
+             patch("dc_helpers._is_dc_admin", return_value=True), \
              patch("threading.Thread", side_effect=_make_sync_thread):
 
-            bot.sticker_command(self.mock_bot, self.accid, event)
+            stickers.sticker_command(self.mock_bot, self.accid, event)
 
             self.mock_bot.rpc.get_message.assert_called_with(self.accid, 50)
             mock_convert.assert_called_once()
@@ -218,13 +220,13 @@ class TestStickerCommands(unittest.TestCase):
         event.msg.quote = None
         event.payload = ""
 
-        with patch("bot._react") as mock_react, \
-             patch("bot.convert_to_sticker_webp", return_value=(True, "")) as mock_convert, \
-             patch("bot._send_sticker") as mock_send_sticker, \
-             patch("bot._is_dc_admin", return_value=True), \
+        with patch("dc_helpers._react") as mock_react, \
+             patch("stickers.convert_to_sticker_webp", return_value=(True, "")) as mock_convert, \
+             patch("stickers._send_sticker") as mock_send_sticker, \
+             patch("dc_helpers._is_dc_admin", return_value=True), \
              patch("threading.Thread", side_effect=_make_sync_thread):
 
-            bot.stickernobg_command(self.mock_bot, self.accid, event)
+            stickers.stickernobg_command(self.mock_bot, self.accid, event)
 
             mock_convert.assert_called_once()
             self.assertTrue(mock_convert.call_args[1].get("remove_bg", False))
@@ -250,13 +252,13 @@ class TestStickerCommands(unittest.TestCase):
         event.msg.quote = None
         event.payload = "nobg"
 
-        with patch("bot._react"), \
-             patch("bot.convert_to_sticker_webp", return_value=(True, "")) as mock_convert, \
-             patch("bot._send_sticker"), \
-             patch("bot._is_dc_admin", return_value=True), \
+        with patch("dc_helpers._react"), \
+             patch("stickers.convert_to_sticker_webp", return_value=(True, "")) as mock_convert, \
+             patch("stickers._send_sticker"), \
+             patch("dc_helpers._is_dc_admin", return_value=True), \
              patch("threading.Thread", side_effect=_make_sync_thread):
 
-            bot.sticker_command(self.mock_bot, self.accid, event)
+            stickers.sticker_command(self.mock_bot, self.accid, event)
 
             mock_convert.assert_called_once()
             self.assertTrue(mock_convert.call_args[1].get("remove_bg", False))
@@ -280,13 +282,13 @@ class TestStickerCommands(unittest.TestCase):
         event.msg.quote = None
         event.payload = ""
 
-        with patch("bot._react") as mock_react, \
-             patch("bot._send") as mock_send, \
-             patch("bot.convert_to_sticker_webp", return_value=(False, "Invalid or unsupported image file")), \
-             patch("bot._is_dc_admin", return_value=True), \
+        with patch("dc_helpers._react") as mock_react, \
+             patch("dc_helpers._send") as mock_send, \
+             patch("stickers.convert_to_sticker_webp", return_value=(False, "Invalid or unsupported image file")), \
+             patch("dc_helpers._is_dc_admin", return_value=True), \
              patch("threading.Thread", side_effect=_make_sync_thread):
 
-            bot.sticker_command(self.mock_bot, self.accid, event)
+            stickers.sticker_command(self.mock_bot, self.accid, event)
 
             mock_react.assert_any_call(self.mock_bot, self.accid, 105, "❌")
             mock_send.assert_called_once()
@@ -312,20 +314,20 @@ class TestStickerCommands(unittest.TestCase):
         event.payload = ""
 
         # First call records timestamp
-        with patch("bot._is_dc_admin", return_value=False), \
-             patch("bot.convert_to_sticker_webp", return_value=(True, "")), \
-             patch("bot._send_sticker"), \
+        with patch("dc_helpers._is_dc_admin", return_value=False), \
+             patch("stickers.convert_to_sticker_webp", return_value=(True, "")), \
+             patch("stickers._send_sticker"), \
              patch("threading.Thread", side_effect=_make_sync_thread):
 
-            bot.sticker_command(self.mock_bot, self.accid, event)
+            stickers.sticker_command(self.mock_bot, self.accid, event)
 
-        self.assertIn(206, bot._chat_sticker_anti_spam)
+        self.assertIn(206, state._chat_sticker_anti_spam)
 
         # Immediate second call should trigger _queue_delayed_command
-        with patch("bot._is_dc_admin", return_value=False), \
-             patch("bot._queue_delayed_command") as mock_queue:
+        with patch("dc_helpers._is_dc_admin", return_value=False), \
+             patch("dc_helpers._queue_delayed_command") as mock_queue:
 
-            bot.sticker_command(self.mock_bot, self.accid, event)
+            stickers.sticker_command(self.mock_bot, self.accid, event)
             mock_queue.assert_called_once()
             self.assertEqual(mock_queue.call_args[0][3], "sticker")
 
@@ -352,7 +354,7 @@ class TestStickerCommands(unittest.TestCase):
 
         with patch.dict("sys.modules", {"PIL": mock_pil, "PIL.Image": mock_pil_image, "PIL.ImageOps": mock_pil_imageops}):
             dest_file = os.path.join(self.temp_test_dir, "out.webp")
-            success, err = bot.convert_to_sticker_webp("dummy.jpg", dest_file, remove_bg=False, max_dim=512)
+            success, err = stickers.convert_to_sticker_webp("dummy.jpg", dest_file, remove_bg=False, max_dim=512)
 
             self.assertTrue(success, f"Error was: {err}")
             self.assertEqual(err, "")
@@ -369,7 +371,7 @@ class TestStickerCommands(unittest.TestCase):
 
         with patch("subprocess.run", return_value=mock_proc) as mock_run:
             dest_file = os.path.join(self.temp_test_dir, "out_nobg.webp")
-            success, err = bot.convert_to_sticker_webp("input.jpg", dest_file, remove_bg=True, max_dim=512)
+            success, err = stickers.convert_to_sticker_webp("input.jpg", dest_file, remove_bg=True, max_dim=512)
 
             self.assertTrue(success)
             self.assertEqual(err, "")
@@ -388,7 +390,7 @@ class TestStickerCommands(unittest.TestCase):
 
         with patch("subprocess.run", return_value=mock_proc):
             dest_file = os.path.join(self.temp_test_dir, "out_err.webp")
-            success, err = bot.convert_to_sticker_webp("input.jpg", dest_file, remove_bg=True, max_dim=512)
+            success, err = stickers.convert_to_sticker_webp("input.jpg", dest_file, remove_bg=True, max_dim=512)
 
             self.assertFalse(success)
             self.assertIn("rembg", err)
@@ -413,21 +415,21 @@ class TestStickerCommands(unittest.TestCase):
         event.payload = ""
 
         # First call records timestamp
-        with patch("bot._is_dc_admin", return_value=False), \
-             patch("bot.convert_to_sticker_webp", return_value=(True, "")), \
-             patch("bot._send_sticker"), \
+        with patch("dc_helpers._is_dc_admin", return_value=False), \
+             patch("stickers.convert_to_sticker_webp", return_value=(True, "")), \
+             patch("stickers._send_sticker"), \
              patch("threading.Thread", side_effect=_make_sync_thread):
 
-            bot.stickernobg_command(self.mock_bot, self.accid, event)
+            stickers.stickernobg_command(self.mock_bot, self.accid, event)
 
-        self.assertIn(207, bot._chat_stickernobg_anti_spam)
-        self.assertNotIn(207, bot._chat_sticker_anti_spam)
+        self.assertIn(207, state._chat_stickernobg_anti_spam)
+        self.assertNotIn(207, state._chat_sticker_anti_spam)
 
         # Immediate second call should trigger _queue_delayed_command with stickernobg key
-        with patch("bot._is_dc_admin", return_value=False), \
-             patch("bot._queue_delayed_command") as mock_queue:
+        with patch("dc_helpers._is_dc_admin", return_value=False), \
+             patch("dc_helpers._queue_delayed_command") as mock_queue:
 
-            bot.stickernobg_command(self.mock_bot, self.accid, event)
+            stickers.stickernobg_command(self.mock_bot, self.accid, event)
             mock_queue.assert_called_once()
             self.assertEqual(mock_queue.call_args[0][3], "stickernobg")
 
@@ -435,7 +437,7 @@ class TestStickerCommands(unittest.TestCase):
         """When ENABLE_REMBG=false, return error message indicating background removal is disabled."""
         with patch.dict(os.environ, {"ENABLE_REMBG": "false"}):
             dest_file = os.path.join(self.temp_test_dir, "out_disabled.webp")
-            success, err = bot.convert_to_sticker_webp("photo.jpg", dest_file, remove_bg=True)
+            success, err = stickers.convert_to_sticker_webp("photo.jpg", dest_file, remove_bg=True)
 
             self.assertFalse(success)
             self.assertIn("Background removal is disabled", err)

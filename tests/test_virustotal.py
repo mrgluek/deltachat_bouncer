@@ -55,6 +55,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import database
 import bot
+import config
+import dc_helpers
+import state
+import virustotal
 
 
 class TestVirusTotalInspection(unittest.TestCase):
@@ -73,10 +77,10 @@ class TestVirusTotalInspection(unittest.TestCase):
         self.accid = 1
 
         # Reset rate limiting and lock
-        bot._vt_last_request_time = 0.0
-        if bot._vt_global_lock.locked():
+        state._vt_last_request_time = 0.0
+        if state._vt_global_lock.locked():
             try:
-                bot._vt_global_lock.release()
+                state._vt_global_lock.release()
             except RuntimeError:
                 pass
 
@@ -89,9 +93,9 @@ class TestVirusTotalInspection(unittest.TestCase):
                     os.remove(path)
                 except OSError:
                     pass
-        if bot._vt_global_lock.locked():
+        if state._vt_global_lock.locked():
             try:
-                bot._vt_global_lock.release()
+                state._vt_global_lock.release()
             except RuntimeError:
                 pass
 
@@ -103,8 +107,8 @@ class TestVirusTotalInspection(unittest.TestCase):
             mock_event.msg.id = 200
             mock_event.payload = "https://example.com"
 
-            with patch.object(bot, "_send") as mock_send:
-                bot.virus_command(self.mock_bot, self.accid, mock_event)
+            with patch.object(dc_helpers, "_send") as mock_send:
+                virustotal.virus_command(self.mock_bot, self.accid, mock_event)
                 mock_send.assert_called_once()
                 args = mock_send.call_args[0]
                 self.assertIn("VirusTotal API key is not configured", args[3])
@@ -119,15 +123,15 @@ class TestVirusTotalInspection(unittest.TestCase):
             mock_event.msg.file = None
             mock_event.payload = ""
 
-            with patch.object(bot, "_send") as mock_send:
-                bot.virus_command(self.mock_bot, self.accid, mock_event)
+            with patch.object(dc_helpers, "_send") as mock_send:
+                virustotal.virus_command(self.mock_bot, self.accid, mock_event)
                 mock_send.assert_called_once()
                 args = mock_send.call_args[0]
                 self.assertIn("Usage:", args[3])
                 self.assertIn("/virus <url>", args[3])
 
-    @patch.object(bot, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
-    @patch.object(bot, "_vt_api_request")
+    @patch.object(config, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
+    @patch.object(virustotal, "_vt_api_request")
     def test_virus_command_clean_url(self, mock_api_req):
         """Verify clean URL scan reports clean status and reaction ☑️."""
         mock_api_req.return_value = (
@@ -155,8 +159,8 @@ class TestVirusTotalInspection(unittest.TestCase):
             mock_event.msg.id = 200
             mock_event.payload = "https://clean-domain.example.com"
 
-            with patch.object(bot, "_send") as mock_send, patch.object(bot, "_react") as mock_react:
-                bot.virus_command(self.mock_bot, self.accid, mock_event)
+            with patch.object(dc_helpers, "_send") as mock_send, patch.object(dc_helpers, "_react") as mock_react:
+                virustotal.virus_command(self.mock_bot, self.accid, mock_event)
                 time.sleep(0.1)
 
                 mock_react.assert_any_call(self.mock_bot, self.accid, 200, "⏳")
@@ -166,8 +170,8 @@ class TestVirusTotalInspection(unittest.TestCase):
                 self.assertTrue(any("VirusTotal URL Report — Clean" in text for text in send_calls))
                 self.assertTrue(any("0/85 security vendors" in text for text in send_calls))
 
-    @patch.object(bot, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
-    @patch.object(bot, "_vt_api_request")
+    @patch.object(config, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
+    @patch.object(virustotal, "_vt_api_request")
     def test_virus_command_malicious_url(self, mock_api_req):
         """Verify malicious URL scan reports malicious status, vendor detections, and reaction 🚨."""
         mock_api_req.return_value = (
@@ -199,8 +203,8 @@ class TestVirusTotalInspection(unittest.TestCase):
             mock_event.msg.id = 201
             mock_event.payload = "https://malicious-test.example.com"
 
-            with patch.object(bot, "_send") as mock_send, patch.object(bot, "_react") as mock_react:
-                bot.virus_command(self.mock_bot, self.accid, mock_event)
+            with patch.object(dc_helpers, "_send") as mock_send, patch.object(dc_helpers, "_react") as mock_react:
+                virustotal.virus_command(self.mock_bot, self.accid, mock_event)
                 time.sleep(0.1)
 
                 mock_react.assert_any_call(self.mock_bot, self.accid, 201, "🚨")
@@ -211,8 +215,8 @@ class TestVirusTotalInspection(unittest.TestCase):
                 self.assertIn("VendorA", report)
                 self.assertIn("phishing", report)
 
-    @patch.object(bot, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
-    @patch.object(bot, "_vt_api_request")
+    @patch.object(config, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
+    @patch.object(virustotal, "_vt_api_request")
     def test_virus_command_url_not_found_then_submit_and_poll(self, mock_api_req):
         """Verify 404 URL is submitted via POST and polled via GET /analyses."""
         mock_api_req.side_effect = [
@@ -245,9 +249,9 @@ class TestVirusTotalInspection(unittest.TestCase):
             mock_event.msg.id = 202
             mock_event.payload = "https://new-domain.example.com"
 
-            with patch.object(bot, "_send") as mock_send, patch.object(bot, "_react") as mock_react:
+            with patch.object(dc_helpers, "_send") as mock_send, patch.object(dc_helpers, "_react") as mock_react:
                 mock_send.return_value = 555
-                bot.virus_command(self.mock_bot, self.accid, mock_event)
+                virustotal.virus_command(self.mock_bot, self.accid, mock_event)
                 time.sleep(0.1)
 
                 mock_react.assert_any_call(self.mock_bot, self.accid, 202, "⏳")
@@ -260,8 +264,8 @@ class TestVirusTotalInspection(unittest.TestCase):
                 self.assertEqual(edit_args[1], 555)
                 self.assertIn("VirusTotal URL Report — Clean", edit_args[2])
 
-    @patch.object(bot, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
-    @patch.object(bot, "_vt_api_request")
+    @patch.object(config, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
+    @patch.object(virustotal, "_vt_api_request")
     def test_virus_command_reply_with_url(self, mock_api_req):
         """Verify replying to a message extracts URL and scans it."""
         mock_api_req.return_value = (
@@ -297,8 +301,8 @@ class TestVirusTotalInspection(unittest.TestCase):
             quoted_msg.text = "Take a look at https://reply-target.org"
             self.mock_bot.rpc.get_message.return_value = quoted_msg
 
-            with patch.object(bot, "_send") as mock_send, patch.object(bot, "_react") as mock_react:
-                bot.virus_command(self.mock_bot, self.accid, mock_event)
+            with patch.object(dc_helpers, "_send") as mock_send, patch.object(dc_helpers, "_react") as mock_react:
+                virustotal.virus_command(self.mock_bot, self.accid, mock_event)
                 time.sleep(0.1)
 
                 mock_react.assert_any_call(self.mock_bot, self.accid, 203, "☑️")
@@ -306,8 +310,8 @@ class TestVirusTotalInspection(unittest.TestCase):
                 report = next(t for t in send_calls if "VirusTotal URL Report" in t)
                 self.assertIn("https://reply-target.org", report)
 
-    @patch.object(bot, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
-    @patch.object(bot, "_vt_api_request")
+    @patch.object(config, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
+    @patch.object(virustotal, "_vt_api_request")
     def test_virus_command_reply_with_file(self, mock_api_req):
         """Verify replying to a message with an attached file hashes and scans the file."""
         with tempfile.NamedTemporaryFile(delete=False) as tf:
@@ -351,8 +355,8 @@ class TestVirusTotalInspection(unittest.TestCase):
                 quoted_msg.text = ""
                 self.mock_bot.rpc.get_message.return_value = quoted_msg
 
-                with patch.object(bot, "_send") as mock_send, patch.object(bot, "_react") as mock_react:
-                    bot.virus_command(self.mock_bot, self.accid, mock_event)
+                with patch.object(dc_helpers, "_send") as mock_send, patch.object(dc_helpers, "_react") as mock_react:
+                    virustotal.virus_command(self.mock_bot, self.accid, mock_event)
                     time.sleep(0.1)
 
                     mock_react.assert_any_call(self.mock_bot, self.accid, 204, "☑️")
@@ -365,9 +369,9 @@ class TestVirusTotalInspection(unittest.TestCase):
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
-    @patch.object(bot, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
-    @patch.object(bot, "_vt_upload_file")
-    @patch.object(bot, "_vt_api_request")
+    @patch.object(config, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
+    @patch.object(virustotal, "_vt_upload_file")
+    @patch.object(virustotal, "_vt_api_request")
     def test_virus_command_file_not_found_then_upload(self, mock_api_req, mock_upload):
         """Verify file not in VT database is uploaded and analysis polled."""
         with tempfile.NamedTemporaryFile(delete=False) as tf:
@@ -408,9 +412,9 @@ class TestVirusTotalInspection(unittest.TestCase):
                 mock_event.msg.filename = "unique.bin"
                 mock_event.payload = ""
 
-                with patch.object(bot, "_send") as mock_send, patch.object(bot, "_react") as mock_react:
+                with patch.object(dc_helpers, "_send") as mock_send, patch.object(dc_helpers, "_react") as mock_react:
                     mock_send.return_value = 777
-                    bot.virus_command(self.mock_bot, self.accid, mock_event)
+                    virustotal.virus_command(self.mock_bot, self.accid, mock_event)
                     time.sleep(0.1)
 
                     mock_upload.assert_called_once()
@@ -429,8 +433,8 @@ class TestVirusTotalInspection(unittest.TestCase):
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
-    @patch.object(bot, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
-    @patch.object(bot, "_vt_api_request")
+    @patch.object(config, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
+    @patch.object(virustotal, "_vt_api_request")
     def test_virus_command_file_too_large(self, mock_api_req):
         """Verify files larger than 32MB not in VT report size limit reached."""
         with tempfile.NamedTemporaryFile(delete=False) as tf:
@@ -450,8 +454,8 @@ class TestVirusTotalInspection(unittest.TestCase):
                 mock_event.msg.filename = "huge_installer.iso"
                 mock_event.payload = ""
 
-                with patch.object(bot, "_send") as mock_send, patch.object(bot, "_react") as mock_react:
-                    bot.virus_command(self.mock_bot, self.accid, mock_event)
+                with patch.object(dc_helpers, "_send") as mock_send, patch.object(dc_helpers, "_react") as mock_react:
+                    virustotal.virus_command(self.mock_bot, self.accid, mock_event)
                     time.sleep(0.1)
 
                     mock_react.assert_any_call(self.mock_bot, self.accid, 206, "⚠️")
@@ -462,8 +466,8 @@ class TestVirusTotalInspection(unittest.TestCase):
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
-    @patch.object(bot, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
-    @patch.object(bot, "_vt_api_request")
+    @patch.object(config, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
+    @patch.object(virustotal, "_vt_api_request")
     def test_virus_command_queue_notification(self, mock_api_req):
         """Verify queue notification is sent when worker lock is already held."""
         mock_api_req.return_value = (
@@ -481,26 +485,26 @@ class TestVirusTotalInspection(unittest.TestCase):
 
         with patch.dict(os.environ, {"VIRUSTOTAL_API_KEY": "test_api_key"}):
             # Acquire lock manually to simulate active test
-            bot._vt_global_lock.acquire()
+            state._vt_global_lock.acquire()
 
             mock_event = MagicMock()
             mock_event.msg.chat_id = 100
             mock_event.msg.id = 207
             mock_event.payload = "https://queued-check.com"
 
-            with patch.object(bot, "_send") as mock_send:
-                bot.virus_command(self.mock_bot, self.accid, mock_event)
+            with patch.object(dc_helpers, "_send") as mock_send:
+                virustotal.virus_command(self.mock_bot, self.accid, mock_event)
                 time.sleep(0.05)
 
                 send_calls = [c[0][3] for c in mock_send.call_args_list]
                 self.assertTrue(any("Another VirusTotal check is in progress, your request is queued" in t for t in send_calls))
 
             # Release lock so worker thread can proceed and finish
-            bot._vt_global_lock.release()
+            state._vt_global_lock.release()
             time.sleep(0.1)
 
-    @patch.object(bot, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
-    @patch.object(bot, "_vt_api_request")
+    @patch.object(config, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
+    @patch.object(virustotal, "_vt_api_request")
     def test_virus_api_error_handling(self, mock_api_req):
         """Verify HTTP error reporting (e.g. 401, 429)."""
         mock_api_req.return_value = (None, 401, "Invalid VirusTotal API key. Please check VIRUSTOTAL_API_KEY in .env.")
@@ -510,16 +514,16 @@ class TestVirusTotalInspection(unittest.TestCase):
             mock_event.msg.id = 208
             mock_event.payload = "https://test-error.com"
 
-            with patch.object(bot, "_send") as mock_send, patch.object(bot, "_react") as mock_react:
-                bot.virus_command(self.mock_bot, self.accid, mock_event)
+            with patch.object(dc_helpers, "_send") as mock_send, patch.object(dc_helpers, "_react") as mock_react:
+                virustotal.virus_command(self.mock_bot, self.accid, mock_event)
                 time.sleep(0.1)
 
                 mock_react.assert_any_call(self.mock_bot, self.accid, 208, "❌")
                 send_calls = [c[0][3] for c in mock_send.call_args_list]
                 self.assertTrue(any("Invalid VirusTotal API key" in t for t in send_calls))
 
-    @patch.object(bot, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
-    @patch.object(bot, "_vt_api_request")
+    @patch.object(config, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
+    @patch.object(virustotal, "_vt_api_request")
     def test_virus_command_url_multi_poll_then_complete(self, mock_api_req):
         """Verify URL scan completes after multiple polling attempts."""
         mock_api_req.side_effect = [
@@ -549,9 +553,9 @@ class TestVirusTotalInspection(unittest.TestCase):
             mock_event.msg.id = 209
             mock_event.payload = "https://multipoll-test.org"
 
-            with patch.object(bot, "_send") as mock_send, patch.object(bot, "_react") as mock_react:
+            with patch.object(dc_helpers, "_send") as mock_send, patch.object(dc_helpers, "_react") as mock_react:
                 mock_send.return_value = 888
-                bot.virus_command(self.mock_bot, self.accid, mock_event)
+                virustotal.virus_command(self.mock_bot, self.accid, mock_event)
                 time.sleep(0.1)
 
                 mock_react.assert_any_call(self.mock_bot, self.accid, 209, "⏳")
@@ -562,8 +566,8 @@ class TestVirusTotalInspection(unittest.TestCase):
                 self.assertIn("VirusTotal URL Report — Malicious", edit_args[2])
                 self.assertIn("MalVendor", edit_args[2])
 
-    @patch.object(bot, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
-    @patch.object(bot, "_vt_api_request")
+    @patch.object(config, "VIRUSTOTAL_RATE_LIMIT_SECONDS", 0.0)
+    @patch.object(virustotal, "_vt_api_request")
     def test_virus_command_polling_timeout(self, mock_api_req):
         """Verify URL scan reaches timeout after max_attempts and updates message."""
         mock_api_req.side_effect = [
@@ -577,9 +581,9 @@ class TestVirusTotalInspection(unittest.TestCase):
             mock_event.msg.id = 210
             mock_event.payload = "https://timeout-test.org"
 
-            with patch.object(bot, "_send") as mock_send, patch.object(bot, "_react") as mock_react:
+            with patch.object(dc_helpers, "_send") as mock_send, patch.object(dc_helpers, "_react") as mock_react:
                 mock_send.return_value = 999
-                bot.virus_command(self.mock_bot, self.accid, mock_event)
+                virustotal.virus_command(self.mock_bot, self.accid, mock_event)
                 time.sleep(0.1)
 
                 mock_react.assert_any_call(self.mock_bot, self.accid, 210, "⏳")

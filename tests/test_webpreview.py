@@ -88,19 +88,44 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import database
 import bot
+import channels
+import commands
+import formatting
+import handlers
+import security
+import state
+import web.ap_routes as pw_ap_routes
+import web.routes as pw_routes
+import web.templates.channel as pw_tpl_channel
+import web.templates.errors as pw_tpl_errors
+import web.templates.feed as pw_tpl_feed
+import web.templates.landing as pw_tpl_landing
 
-if bot.web is None:
-    bot.web = sys.modules.get('aiohttp.web', MagicMock())
+if security.web is None:
+    security.web = sys.modules.get('aiohttp.web', MagicMock())
+if pw_routes.web is None:
+    pw_routes.web = sys.modules.get('aiohttp.web', MagicMock())
+if pw_ap_routes.web is None:
+    pw_ap_routes.web = sys.modules.get('aiohttp.web', MagicMock())
 
-# Ensure bot.qrcode mock writes bytes when save is called
-if hasattr(bot, "qrcode") and isinstance(bot.qrcode, MagicMock):
+# Ensure pw_routes.qrcode mock writes bytes when save is called
+if hasattr(pw_routes, "qrcode") and isinstance(pw_routes.qrcode, MagicMock):
     def _fake_save(buf, *args, **kwargs):
         buf.write(b"fake_qr_data")
     _mock_img = MagicMock()
     _mock_img.save.side_effect = _fake_save
     _mock_qr_instance = MagicMock()
     _mock_qr_instance.make_image.return_value = _mock_img
-    bot.qrcode.QRCode.return_value = _mock_qr_instance
+    pw_routes.qrcode.QRCode.return_value = _mock_qr_instance
+
+
+def _file_response_path(resp) -> str:
+    """Return the served file path from a web.FileResponse, whether it's the
+    real aiohttp class (private ._path, a pathlib.Path) or the local mock
+    fallback (public .path, a str) used when aiohttp isn't installed."""
+    if hasattr(resp, "path"):
+        return resp.path
+    return str(resp._path)
 
 
 class TestWebPreview(unittest.TestCase):
@@ -108,10 +133,10 @@ class TestWebPreview(unittest.TestCase):
         database.close_db()
         database.DB_PATH = TEST_DB
         database.init_db()
-        bot.CHANNEL_MEDIA_DIR = "test_media_dir"
-        bot.index_page_html_cache = None
-        if os.path.exists(bot.CHANNEL_MEDIA_DIR):
-            shutil.rmtree(bot.CHANNEL_MEDIA_DIR, ignore_errors=True)
+        state.CHANNEL_MEDIA_DIR = "test_media_dir"
+        state.index_page_html_cache = None
+        if os.path.exists(state.CHANNEL_MEDIA_DIR):
+            shutil.rmtree(state.CHANNEL_MEDIA_DIR, ignore_errors=True)
 
     def tearDown(self):
         database.close_db()
@@ -236,7 +261,7 @@ class TestWebPreview(unittest.TestCase):
         channel = database.get_catalog_channel_by_token(token)
 
         # Landing page HTML
-        landing_html = bot.get_landing_page_html()
+        landing_html = pw_tpl_landing.get_landing_page_html()
         self.assertIn("Delta Chat Bouncer", landing_html)
         self.assertIn("🛡️ Delta Chat Bouncer Bot", landing_html)
         self.assertIn("top-qr-btn", landing_html)
@@ -273,7 +298,7 @@ class TestWebPreview(unittest.TestCase):
             }
         ]
         # Channel preview without ingress
-        preview_html = bot.get_channel_preview_html(channel, posts, "https://channels.example.com")
+        preview_html = pw_tpl_channel.get_channel_preview_html(channel, posts, "https://channels.example.com")
         self.assertIn("Design", preview_html)
         self.assertIn("UI/UX talks", preview_html)
         self.assertIn("Hello world!", preview_html)
@@ -297,12 +322,12 @@ class TestWebPreview(unittest.TestCase):
         # Channel preview with 1 member (shows Channel badge)
         channel_single = dict(channel)
         channel_single["member_count"] = 1
-        single_html = bot.get_channel_preview_html(channel_single, [], "")
+        single_html = pw_tpl_channel.get_channel_preview_html(channel_single, [], "")
         self.assertIn("📢 Channel", single_html)
 
         # Channel preview with ingress
         ingress = "/api/hassio_ingress/token123"
-        preview_ingress = bot.get_channel_preview_html(channel, posts, "", ingress_path=ingress)
+        preview_ingress = pw_tpl_channel.get_channel_preview_html(channel, posts, "", ingress_path=ingress)
         self.assertIn(f"{ingress}/c/{token}/avatar.png", preview_ingress)
         self.assertIn(f"{ingress}/c/{token}/qr.png", preview_ingress)
         self.assertIn(f"{ingress}/media/{token}/2/photo.jpg", preview_ingress)
@@ -310,14 +335,14 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn(f"onerror=\"this.src='{ingress}/channel-default.svg'\"", preview_ingress)
 
         # Landing page with ingress (no invite link configured)
-        landing_ingress_no_link = bot.get_landing_page_html(ingress_path=ingress)
+        landing_ingress_no_link = pw_tpl_landing.get_landing_page_html(ingress_path=ingress)
         self.assertIn(f"{ingress}/icon.png", landing_ingress_no_link)
         self.assertIn("Bot Link Unavailable", landing_ingress_no_link)
         self.assertIn("Bot invite link is not configured yet", landing_ingress_no_link)
 
         # Landing page with ingress (with bot invite link)
         database.set_config("bot_invite_link", "https://i.delta.chat/#botinvite")
-        landing_ingress = bot.get_landing_page_html(ingress_path=ingress)
+        landing_ingress = pw_tpl_landing.get_landing_page_html(ingress_path=ingress)
         self.assertIn(f"{ingress}/icon.png", landing_ingress)
         self.assertIn(f"{ingress}/qr.png", landing_ingress)
         self.assertIn("Add Bouncer Bot", landing_ingress)
@@ -327,7 +352,7 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn("rgba(17, 27, 33, 0.55)", landing_ingress)
 
         # Tombstone HTML
-        tombstone_html = bot.get_tombstone_html(channel["name"], ingress_path=ingress)
+        tombstone_html = pw_tpl_errors.get_tombstone_html(channel["name"], ingress_path=ingress)
         self.assertIn("Channel Removed", tombstone_html)
         self.assertIn("Design", tombstone_html)
         self.assertIn("has been removed from the public catalog", tombstone_html)
@@ -338,7 +363,7 @@ class TestWebPreview(unittest.TestCase):
         self.assertIn("theme-switcher", tombstone_html)
 
         # 404 HTML
-        not_found_html = bot.get_404_html(ingress_path=ingress)
+        not_found_html = pw_tpl_errors.get_404_html(ingress_path=ingress)
         self.assertIn("Channel Not Found", not_found_html)
         self.assertIn(f'href="{ingress}/"', not_found_html)
         self.assertIn(f'{ingress}/icon.png', not_found_html)
@@ -356,7 +381,7 @@ class TestWebPreview(unittest.TestCase):
             "invite_link": "",
         }
         posts = [{"msg_id": 1, "text": "Post 1", "from_name": "Admin", "timestamp": time.time()}]
-        html_out = bot.get_channel_preview_html(channel_no_invite, posts, "https://channels.example.com")
+        html_out = pw_tpl_channel.get_channel_preview_html(channel_no_invite, posts, "https://channels.example.com")
         self.assertIn("Invite Link Unavailable", html_out)
         self.assertIn('disabled style="opacity: 0.55; cursor: not-allowed;"', html_out)
         self.assertNotIn("Show QR Code", html_out)
@@ -384,13 +409,13 @@ class TestWebPreview(unittest.TestCase):
                 "media_path": None
             }
         ]
-        rss_xml = bot.get_channel_rss_xml(channel, posts, "https://channels.example.com")
+        rss_xml = pw_tpl_feed.get_channel_rss_xml(channel, posts, "https://channels.example.com")
         self.assertIn("<?xml version=\"1.0\" encoding=\"UTF-8\"?>", rss_xml)
         self.assertIn("<title><![CDATA[Open Source]]></title>", rss_xml)
         self.assertIn("Latest release v1.0 is here!", rss_xml)
         self.assertIn(f"https://channels.example.com/c/{token}", rss_xml)
 
-    @patch('bot._is_dc_admin')
+    @patch('dc_helpers._is_dc_admin')
     def test_url_command(self, mock_is_admin):
         mock_bot = MagicMock()
         mock_bot.rpc.send_msg = MagicMock()
@@ -398,25 +423,25 @@ class TestWebPreview(unittest.TestCase):
 
         # Non-admin
         mock_is_admin.return_value = False
-        bot.url_command(mock_bot, 123, mock_event)
+        commands.url_command(mock_bot, 123, mock_event)
         self.assertIn("bot administrator", mock_bot.rpc.send_msg.call_args[0][2].text)
 
         # Admin view default
         mock_is_admin.return_value = True
         mock_event.payload = ""
-        bot.url_command(mock_bot, 123, mock_event)
+        commands.url_command(mock_bot, 123, mock_event)
         last_msg = mock_bot.rpc.send_msg.call_args[0][2].text
         self.assertIn("Current base web URL", last_msg)
 
         # Admin set invalid URL
         mock_event.payload = "ftp://invalid.com"
-        bot.url_command(mock_bot, 123, mock_event)
+        commands.url_command(mock_bot, 123, mock_event)
         last_msg = mock_bot.rpc.send_msg.call_args[0][2].text
         self.assertIn("Invalid URL", last_msg)
 
         # Admin set valid URL
         mock_event.payload = "https://channels.mybot.org/"
-        bot.url_command(mock_bot, 123, mock_event)
+        commands.url_command(mock_bot, 123, mock_event)
         last_msg = mock_bot.rpc.send_msg.call_args[0][2].text
         self.assertIn("Base web URL has been set to", last_msg)
         self.assertIn("https://channels.mybot.org", last_msg)
@@ -436,7 +461,7 @@ class TestWebPreview(unittest.TestCase):
         mock_bot.rpc.send_msg = MagicMock()
         mock_event = MagicMock()
 
-        bot.dchannels_command(mock_bot, 123, mock_event)
+        channels.dchannels_command(mock_bot, 123, mock_event)
         sent_text = mock_bot.rpc.send_msg.call_args[0][2].text
 
         self.assertIn("News Channel", sent_text)
@@ -447,50 +472,50 @@ class TestWebPreview(unittest.TestCase):
 
     def test_format_markdown_html(self):
         # 1. Bold
-        html_bold1 = bot.format_markdown_html("This is **bold** text")
+        html_bold1 = formatting.format_markdown_html("This is **bold** text")
         self.assertIn("<strong>bold</strong>", html_bold1)
-        html_bold2 = bot.format_markdown_html("This is __bold__ text")
+        html_bold2 = formatting.format_markdown_html("This is __bold__ text")
         self.assertIn("<strong>bold</strong>", html_bold2)
 
         # 2. Italic
-        html_italic1 = bot.format_markdown_html("This is *italic* text")
+        html_italic1 = formatting.format_markdown_html("This is *italic* text")
         self.assertIn("<em>italic</em>", html_italic1)
-        html_italic2 = bot.format_markdown_html("This is _italic_ text")
+        html_italic2 = formatting.format_markdown_html("This is _italic_ text")
         self.assertIn("<em>italic</em>", html_italic2)
 
         # 3. Strikethrough
-        html_strike = bot.format_markdown_html("This is ~~strike~~ text")
+        html_strike = formatting.format_markdown_html("This is ~~strike~~ text")
         self.assertIn("<del>strike</del>", html_strike)
 
         # 4. Inline code
-        html_code = bot.format_markdown_html("Use `print('hello')` function")
+        html_code = formatting.format_markdown_html("Use `print('hello')` function")
         self.assertIn("<code>print(&#x27;hello&#x27;)</code>", html_code)
 
         # 5. Code block
         block_input = "```python\ndef greet():\n    return 'hi' < 'hello'\n```"
-        html_block = bot.format_markdown_html(block_input)
+        html_block = formatting.format_markdown_html(block_input)
         self.assertIn('<pre><code class="language-python">def greet():\n    return &#x27;hi&#x27; &lt; &#x27;hello&#x27;</code></pre>', html_block)
 
         # 6. Spoilers
-        html_spoiler = bot.format_markdown_html("The killer is ||John Doe||!")
+        html_spoiler = formatting.format_markdown_html("The killer is ||John Doe||!")
         self.assertIn('<span class="spoiler"', html_spoiler)
         self.assertIn("John Doe</span>", html_spoiler)
 
         # 7. Blockquotes
-        html_quote = bot.format_markdown_html("> First quote line\n> Second quote line")
+        html_quote = formatting.format_markdown_html("> First quote line\n> Second quote line")
         self.assertIn("<blockquote>First quote line<br>Second quote line</blockquote>", html_quote)
 
         # 8. Markdown links
-        html_link = bot.format_markdown_html("Visit [Delta Chat](https://delta.chat) today")
+        html_link = formatting.format_markdown_html("Visit [Delta Chat](https://delta.chat) today")
         self.assertIn('<a href="https://delta.chat" target="_blank" rel="noopener noreferrer">Delta Chat</a>', html_link)
 
         # 9. Autolinking raw URLs
-        html_autolink = bot.format_markdown_html("Check out https://gluek.info/blog for updates")
+        html_autolink = formatting.format_markdown_html("Check out https://gluek.info/blog for updates")
         self.assertIn('<a href="https://gluek.info/blog" target="_blank" rel="noopener noreferrer">https://gluek.info/blog</a>', html_autolink)
 
         # 10. Security / XSS Immunity
         xss_input = "<script>alert('pwned')</script> and <img src=x onerror=alert(1)> and [xss](javascript:alert(1))"
-        html_safe = bot.format_markdown_html(xss_input)
+        html_safe = formatting.format_markdown_html(xss_input)
         self.assertNotIn("<script>", html_safe)
         self.assertNotIn("<img", html_safe)
         self.assertNotIn('href="javascript:', html_safe)
@@ -505,43 +530,43 @@ class TestWebPreview(unittest.TestCase):
             invite_link="https://i.delta.chat/#cache"
         )
         # Populate caches manually
-        bot._channel_preview_cache[f"{token}:"] = (time.time() + 60, "etag1", "<html>test</html>")
-        bot._channel_rss_cache[f"{token}:https://example.com"] = (time.time() + 120, "etag2", "<xml>test</xml>")
+        state._channel_preview_cache[f"{token}:"] = (time.time() + 60, "etag1", "<html>test</html>")
+        state._channel_rss_cache[f"{token}:https://example.com"] = (time.time() + 120, "etag2", "<xml>test</xml>")
 
-        self.assertIn(f"{token}:", bot._channel_preview_cache)
-        self.assertIn(f"{token}:https://example.com", bot._channel_rss_cache)
+        self.assertIn(f"{token}:", state._channel_preview_cache)
+        self.assertIn(f"{token}:https://example.com", state._channel_rss_cache)
 
         # Invalidate specific channel by token
-        bot.invalidate_channel_cache(token=token)
-        self.assertNotIn(f"{token}:", bot._channel_preview_cache)
-        self.assertNotIn(f"{token}:https://example.com", bot._channel_rss_cache)
+        pw_routes.invalidate_channel_cache(token=token)
+        self.assertNotIn(f"{token}:", state._channel_preview_cache)
+        self.assertNotIn(f"{token}:https://example.com", state._channel_rss_cache)
 
         # Populate again and invalidate by chat_id
-        bot._channel_preview_cache[f"{token}:"] = (time.time() + 60, "etag1", "<html>test</html>")
-        bot.invalidate_channel_cache(chat_id=6001)
-        self.assertNotIn(f"{token}:", bot._channel_preview_cache)
+        state._channel_preview_cache[f"{token}:"] = (time.time() + 60, "etag1", "<html>test</html>")
+        pw_routes.invalidate_channel_cache(chat_id=6001)
+        self.assertNotIn(f"{token}:", state._channel_preview_cache)
 
         # Global invalidate
-        bot._channel_preview_cache["other:"] = (time.time() + 60, "etag1", "<html>test</html>")
-        bot.invalidate_channel_cache()
-        self.assertEqual(len(bot._channel_preview_cache), 0)
+        state._channel_preview_cache["other:"] = (time.time() + 60, "etag1", "<html>test</html>")
+        pw_routes.invalidate_channel_cache()
+        self.assertEqual(len(state._channel_preview_cache), 0)
 
     def test_qr_code_caching(self):
-        bot._qr_cache.clear()
+        state._qr_cache.clear()
         link = "https://i.delta.chat/#testqr"
-        b1, mime1 = bot._generate_qr_bytes(link, fmt="png", box_size=6)
+        b1, mime1 = pw_routes._generate_qr_bytes(link, fmt="png", box_size=6)
         self.assertEqual(mime1, "image/png")
         self.assertTrue(len(b1) > 0)
-        self.assertIn(f"{link}:png:6", bot._qr_cache)
+        self.assertIn(f"{link}:png:6", state._qr_cache)
 
         # Second call returns from cache
-        b2, mime2 = bot._generate_qr_bytes(link, fmt="png", box_size=6)
+        b2, mime2 = pw_routes._generate_qr_bytes(link, fmt="png", box_size=6)
         self.assertEqual(b1, b2)
 
     def test_robots_txt_disallow_all(self):
         import asyncio
         req = MagicMock()
-        resp = asyncio.run(bot.handle_robots_txt(req))
+        resp = asyncio.run(pw_routes.handle_robots_txt(req))
         self.assertEqual(resp.status, 200)
         self.assertIn("User-agent: *", resp.text)
         self.assertIn("Disallow: /", resp.text)
@@ -553,14 +578,14 @@ class TestWebPreview(unittest.TestCase):
         import asyncio
         req = MagicMock()
         req.path = "/background.jpg"
-        resp = asyncio.run(bot.handle_background(req))
+        resp = asyncio.run(pw_routes.handle_background(req))
         self.assertEqual(resp.status, 200)
         self.assertIn("immutable", resp.headers.get("Cache-Control", ""))
         self.assertIsInstance(resp, web.FileResponse)
 
         req_light = MagicMock()
         req_light.path = "/background-light.jpg"
-        resp_light = asyncio.run(bot.handle_background(req_light))
+        resp_light = asyncio.run(pw_routes.handle_background(req_light))
         self.assertEqual(resp_light.status, 200)
         self.assertIn("immutable", resp_light.headers.get("Cache-Control", ""))
         self.assertIsInstance(resp_light, web.FileResponse)
@@ -568,7 +593,7 @@ class TestWebPreview(unittest.TestCase):
     def test_dc_fallback_stripping_and_text_preservation(self):
         # 1. Stripping DC attachment fallback strings while keeping author text
         raw_with_img = "what if you just fuck off???\n\n>> 🧑‍💼 Debuging Memes Channel << [Image – 304.26 KiB]"
-        res = bot.format_markdown_html(raw_with_img)
+        res = formatting.format_markdown_html(raw_with_img)
         self.assertNotIn("[Image – 304.26 KiB]", res)
         self.assertNotIn("[Image", res)
         self.assertIn("what if you just fuck off???", res)
@@ -576,10 +601,10 @@ class TestWebPreview(unittest.TestCase):
 
         # 2. Only fallback tag -> empty string
         only_fallback = "[Image – 500 KiB]"
-        self.assertEqual(bot.format_markdown_html(only_fallback), "")
+        self.assertEqual(formatting.format_markdown_html(only_fallback), "")
 
         only_doc = "  [Document - report.pdf]  "
-        self.assertEqual(bot.format_markdown_html(only_doc), "")
+        self.assertEqual(formatting.format_markdown_html(only_doc), "")
 
     def test_image_optimization_and_webp_fallback(self):
         import asyncio
@@ -590,7 +615,7 @@ class TestWebPreview(unittest.TestCase):
             member_count=12,
             invite_link="https://i.delta.chat/#media"
         )
-        ch_dir = os.path.join(bot.CHANNEL_MEDIA_DIR, token)
+        ch_dir = os.path.join(state.CHANNEL_MEDIA_DIR, token)
         os.makedirs(ch_dir, exist_ok=True)
 
         # 1. Existing .webp file served when .webp requested
@@ -600,14 +625,14 @@ class TestWebPreview(unittest.TestCase):
 
         req_webp = MagicMock()
         req_webp.match_info = {"token": token, "msg_id": "100", "filename": "photo.webp"}
-        resp = asyncio.run(bot.handle_media_file(req_webp))
+        resp = asyncio.run(pw_routes.handle_media_file(req_webp))
         self.assertEqual(resp.status, 200)
         self.assertEqual(resp.headers.get("Content-Type"), "image/webp")
 
         # 2. When .jpg requested, falls back to .webp if .webp exists
         req_jpg = MagicMock()
         req_jpg.match_info = {"token": token, "msg_id": "100", "filename": "photo.jpg"}
-        resp_fallback = asyncio.run(bot.handle_media_file(req_jpg))
+        resp_fallback = asyncio.run(pw_routes.handle_media_file(req_jpg))
         self.assertEqual(resp_fallback.status, 200)
         self.assertEqual(resp_fallback.headers.get("Content-Type"), "image/webp")
 
@@ -618,7 +643,7 @@ class TestWebPreview(unittest.TestCase):
 
         req_png = MagicMock()
         req_png.match_info = {"token": token, "msg_id": "101", "filename": "graphic.png"}
-        resp_png = asyncio.run(bot.handle_media_file(req_png))
+        resp_png = asyncio.run(pw_routes.handle_media_file(req_png))
         self.assertEqual(resp_png.status, 200)
         self.assertEqual(resp_png.headers.get("Content-Type"), "image/png")
 
@@ -642,7 +667,7 @@ class TestWebPreview(unittest.TestCase):
         mock_msg.text = "You were removed from the group."
         mock_event.msg = mock_msg
 
-        bot.handle_dc_info_message(mock_bot, 1, mock_event)
+        handlers.handle_dc_info_message(mock_bot, 1, mock_event)
 
         # Verify channel was soft-removed
         self.assertIsNone(database.get_catalog_channel_by_chat_id(9001))
@@ -669,7 +694,7 @@ class TestWebPreview(unittest.TestCase):
         mock_msg.text = "You were removed by the channel owner."
         mock_event.msg = mock_msg
 
-        bot.handle_dc_info_message(mock_bot, 1, mock_event)
+        handlers.handle_dc_info_message(mock_bot, 1, mock_event)
 
         # Verify channel was soft-removed
         self.assertIsNone(database.get_catalog_channel_by_chat_id(9002))
@@ -698,7 +723,7 @@ class TestWebPreview(unittest.TestCase):
         mock_msg.text = "Member 42 removed by admin."
         mock_event.msg = mock_msg
 
-        bot.handle_dc_info_message(mock_bot, 1, mock_event)
+        handlers.handle_dc_info_message(mock_bot, 1, mock_event)
 
         # Verify channel is NOT removed
         ch = database.get_catalog_channel_by_chat_id(9003)
@@ -743,7 +768,7 @@ class TestWebPreview(unittest.TestCase):
         public_channels = database.get_all_catalog_channels(public_only=True)
         self.assertEqual(len(public_channels), 0)
 
-    @patch('bot._is_dc_admin')
+    @patch('dc_helpers._is_dc_admin')
     def test_dchannels_admin_dm_vs_non_admin(self, mock_is_admin):
         # Setup 1 public and 1 unlisted channel
         tok_pub = database.add_catalog_channel(
@@ -774,7 +799,7 @@ class TestWebPreview(unittest.TestCase):
         # 1. Non-admin calls /dchannels
         mock_is_admin.return_value = False
         mock_bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Single"}
-        bot.dchannels_command(mock_bot, 1, mock_event)
+        channels.dchannels_command(mock_bot, 1, mock_event)
         non_admin_reply = mock_bot.rpc.send_msg.call_args[0][2].text
         self.assertIn("Public DC", non_admin_reply)
         self.assertNotIn("Secret DC", non_admin_reply)
@@ -783,21 +808,21 @@ class TestWebPreview(unittest.TestCase):
         # 2. Admin calls /dchannels in a Group chat -> only public channels shown
         mock_is_admin.return_value = True
         mock_bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Group"}
-        bot.dchannels_command(mock_bot, 1, mock_event)
+        channels.dchannels_command(mock_bot, 1, mock_event)
         group_admin_reply = mock_bot.rpc.send_msg.call_args[0][2].text
         self.assertIn("Public DC", group_admin_reply)
         self.assertNotIn("Secret DC", group_admin_reply)
 
         # 3. Admin calls /dchannels in private DM (Single) -> all channels shown with unlisted badge & publish hint
         mock_bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Single"}
-        bot.dchannels_command(mock_bot, 1, mock_event)
+        channels.dchannels_command(mock_bot, 1, mock_event)
         admin_dm_reply = mock_bot.rpc.send_msg.call_args[0][2].text
         self.assertIn("Public DC", admin_dm_reply)
         self.assertIn("Secret DC", admin_dm_reply)
         self.assertIn("🔒 **Secret DC** [Unlisted]", admin_dm_reply)
         self.assertIn(f"Publish: /dchannelpub{ch_unlisted['id']}on", admin_dm_reply)
 
-    @patch('bot._is_dc_admin')
+    @patch('dc_helpers._is_dc_admin')
     def test_dchannelpub_command_and_channel_id_access(self, mock_is_admin):
         tok = database.add_catalog_channel(
             chat_id=9701,
@@ -820,20 +845,20 @@ class TestWebPreview(unittest.TestCase):
         # 1. Non-admin queries /dchannel<ID> for unlisted channel -> not found
         mock_is_admin.return_value = False
         mock_msg.text = f"/dchannel{cid}"
-        bot.handle_all_messages(mock_bot, 1, mock_event)
+        handlers.handle_all_messages(mock_bot, 1, mock_event)
         reply1 = mock_bot.rpc.send_msg.call_args[0][2].text
         self.assertIn("not found", reply1)
 
         # 2. Non-admin attempts /dchannelpub<ID>on -> unauthorized
         mock_msg.text = f"/dchannelpub{cid}on"
-        bot.handle_all_messages(mock_bot, 1, mock_event)
+        handlers.handle_all_messages(mock_bot, 1, mock_event)
         reply2 = mock_bot.rpc.send_msg.call_args[0][2].text
         self.assertIn("administrator", reply2)
 
         # 3. Admin calls /dchannelpub<ID>on -> channel becomes public
         mock_is_admin.return_value = True
         mock_msg.text = f"/dchannelpub{cid}on"
-        bot.handle_all_messages(mock_bot, 1, mock_event)
+        handlers.handle_all_messages(mock_bot, 1, mock_event)
         reply3 = mock_bot.rpc.send_msg.call_args[0][2].text
         self.assertIn("is now **public**", reply3)
         self.assertEqual(database.get_catalog_channel_by_id(cid)["is_public"], 1)
@@ -841,7 +866,7 @@ class TestWebPreview(unittest.TestCase):
         # 4. Now non-admin queries /dchannel<ID> -> accessible
         mock_is_admin.return_value = False
         mock_msg.text = f"/dchannel{cid}"
-        bot.handle_all_messages(mock_bot, 1, mock_event)
+        handlers.handle_all_messages(mock_bot, 1, mock_event)
         reply4 = mock_bot.rpc.send_msg.call_args[0][2].text
         self.assertIn("Alpha Release", reply4)
         self.assertNotIn("[Unlisted]", reply4)
@@ -849,21 +874,21 @@ class TestWebPreview(unittest.TestCase):
         # 5. Admin calls /dchannelpub<ID>off -> channel becomes unlisted
         mock_is_admin.return_value = True
         mock_msg.text = f"/dchannelpub{cid}off"
-        bot.handle_all_messages(mock_bot, 1, mock_event)
+        handlers.handle_all_messages(mock_bot, 1, mock_event)
         reply5 = mock_bot.rpc.send_msg.call_args[0][2].text
         self.assertIn("is now **unlisted**", reply5)
         self.assertEqual(database.get_catalog_channel_by_id(cid)["is_public"], 0)
 
         # 6. Admin queries /dchannel<ID> for unlisted channel -> can view with [Unlisted] badge and toggle hint
         mock_msg.text = f"/dchannel{cid}"
-        bot.handle_all_messages(mock_bot, 1, mock_event)
+        handlers.handle_all_messages(mock_bot, 1, mock_event)
         reply6 = mock_bot.rpc.send_msg.call_args[0][2].text
         self.assertIn("Alpha Release", reply6)
         self.assertIn("[Unlisted]", reply6)
         self.assertIn(f"Publish: /dchannelpub{cid}on", reply6)
 
     def test_landing_page_unlisted_channel_excluded(self):
-        bot.index_page_html_cache = None
+        state.index_page_html_cache = None
         database.add_catalog_channel(
             chat_id=9801,
             name="Public Showcase",
@@ -880,33 +905,33 @@ class TestWebPreview(unittest.TestCase):
             invite_link="https://i.delta.chat/#hidden",
             is_public=0
         )
-        landing_html = bot.get_landing_page_html()
+        landing_html = pw_tpl_landing.get_landing_page_html()
         self.assertIn("Public Showcase", landing_html)
         self.assertNotIn("Hidden Unlisted", landing_html)
 
         # Web preview and RSS for unlisted channel still function normally via direct token
         ch_unlisted = database.get_catalog_channel_by_token(tok_unlisted)
         self.assertIsNotNone(ch_unlisted)
-        preview_html = bot.get_channel_preview_html(ch_unlisted, [], "https://example.com")
+        preview_html = pw_tpl_channel.get_channel_preview_html(ch_unlisted, [], "https://example.com")
         self.assertIn("Hidden Unlisted", preview_html)
 
     def test_guess_media_content_type(self):
         import tempfile
         # Test extension mappings
-        self.assertEqual(bot._guess_media_content_type("photo.webp"), "image/webp")
-        self.assertEqual(bot._guess_media_content_type("photo.jpg"), "image/jpeg")
-        self.assertEqual(bot._guess_media_content_type("photo.jpeg"), "image/jpeg")
-        self.assertEqual(bot._guess_media_content_type("photo.png"), "image/png")
-        self.assertEqual(bot._guess_media_content_type("clip.mp4"), "video/mp4")
-        self.assertEqual(bot._guess_media_content_type("audio.ogg"), "audio/ogg")
-        self.assertEqual(bot._guess_media_content_type("icon.svg"), "image/svg+xml")
+        self.assertEqual(security._guess_media_content_type("photo.webp"), "image/webp")
+        self.assertEqual(security._guess_media_content_type("photo.jpg"), "image/jpeg")
+        self.assertEqual(security._guess_media_content_type("photo.jpeg"), "image/jpeg")
+        self.assertEqual(security._guess_media_content_type("photo.png"), "image/png")
+        self.assertEqual(security._guess_media_content_type("clip.mp4"), "video/mp4")
+        self.assertEqual(security._guess_media_content_type("audio.ogg"), "audio/ogg")
+        self.assertEqual(security._guess_media_content_type("icon.svg"), "image/svg+xml")
 
         # Test magic bytes inspection for extensionless or unknown files
         with tempfile.NamedTemporaryFile(delete=False) as tf:
             tf.write(b"RIFF\x00\x00\x00\x00WEBPVP8 ")
             tf_webp = tf.name
         try:
-            self.assertEqual(bot._guess_media_content_type(tf_webp), "image/webp")
+            self.assertEqual(security._guess_media_content_type(tf_webp), "image/webp")
         finally:
             os.remove(tf_webp)
 
@@ -914,7 +939,7 @@ class TestWebPreview(unittest.TestCase):
             tf.write(b"\x89PNG\r\n\x1a\n")
             tf_png = tf.name
         try:
-            self.assertEqual(bot._guess_media_content_type(tf_png), "image/png")
+            self.assertEqual(security._guess_media_content_type(tf_png), "image/png")
         finally:
             os.remove(tf_png)
 
@@ -928,7 +953,7 @@ class TestWebPreview(unittest.TestCase):
             invite_link="https://i.delta.chat/#noavatar"
         )
         # Ensure cached avatar does not exist
-        cached_avatar = os.path.join(bot.CHANNEL_MEDIA_DIR, token, "avatar.png")
+        cached_avatar = os.path.join(state.CHANNEL_MEDIA_DIR, token, "avatar.png")
         if os.path.exists(cached_avatar):
             os.remove(cached_avatar)
 
@@ -937,10 +962,10 @@ class TestWebPreview(unittest.TestCase):
         mock_bot.rpc.get_full_chat_by_id.return_value = {"id": 9901, "name": "No Avatar Channel"}
         mock_bot.rpc.get_chat_contacts.return_value = []
 
-        with patch.object(bot, "dc_bot_instance", mock_bot), patch.object(bot, "dc_accid", 1):
+        with patch.object(state, "dc_bot_instance", mock_bot), patch.object(state, "dc_accid", 1):
             req = MagicMock()
             req.match_info = {"token": token}
-            resp = asyncio.run(bot.handle_channel_avatar(req))
+            resp = asyncio.run(pw_routes.handle_channel_avatar(req))
             self.assertEqual(resp.status, 200)
             self.assertEqual(resp.content_type, "image/svg+xml")
             self.assertIn(b"<svg", resp.body)
@@ -969,10 +994,10 @@ class TestWebPreview(unittest.TestCase):
                 "id": 9902,
                 "profileImage": camel_avatar_file
             }
-            with patch.object(bot, "dc_bot_instance", mock_bot), patch.object(bot, "dc_accid", 1):
+            with patch.object(state, "dc_bot_instance", mock_bot), patch.object(state, "dc_accid", 1):
                 req = MagicMock()
                 req.match_info = {"token": token_camel}
-                resp = asyncio.run(bot.handle_channel_avatar(req))
+                resp = asyncio.run(pw_routes.handle_channel_avatar(req))
                 self.assertEqual(resp.status, 200)
                 self.assertEqual(resp.headers.get("Content-Type"), "image/jpeg")
         finally:
@@ -998,10 +1023,10 @@ class TestWebPreview(unittest.TestCase):
                 "id": 9903,
                 "profile_image": snake_avatar_file
             }
-            with patch.object(bot, "dc_bot_instance", mock_bot), patch.object(bot, "dc_accid", 1):
+            with patch.object(state, "dc_bot_instance", mock_bot), patch.object(state, "dc_accid", 1):
                 req = MagicMock()
                 req.match_info = {"token": token_snake}
-                resp = asyncio.run(bot.handle_channel_avatar(req))
+                resp = asyncio.run(pw_routes.handle_channel_avatar(req))
                 self.assertEqual(resp.status, 200)
                 self.assertEqual(resp.headers.get("Content-Type"), "image/webp")
         finally:
@@ -1020,22 +1045,22 @@ class TestWebPreview(unittest.TestCase):
         old_avatar_env = os.environ.get("AVATAR_PATH")
         try:
             os.environ["AVATAR_PATH"] = custom_avatar
-            resolved = bot.get_bot_avatar_file_path()
+            resolved = pw_routes.get_bot_avatar_file_path()
             self.assertEqual(resolved, custom_avatar)
 
             req = MagicMock()
             req.path = "/icon.png"
-            resp = asyncio.run(bot.handle_icon(req))
+            resp = asyncio.run(pw_routes.handle_icon(req))
             self.assertEqual(resp.status, 200)
-            self.assertEqual(resp.path, custom_avatar)
+            self.assertEqual(_file_response_path(resp), custom_avatar)
             self.assertEqual(resp.headers.get("Content-Type"), "image/jpeg")
 
             # Route by custom filename directly
             req_custom = MagicMock()
             req_custom.path = f"/{os.path.basename(custom_avatar)}"
-            resp_custom = asyncio.run(bot.handle_icon(req_custom))
+            resp_custom = asyncio.run(pw_routes.handle_icon(req_custom))
             self.assertEqual(resp_custom.status, 200)
-            self.assertEqual(resp_custom.path, custom_avatar)
+            self.assertEqual(_file_response_path(resp_custom), custom_avatar)
             self.assertEqual(resp_custom.headers.get("Content-Type"), "image/jpeg")
         finally:
             if old_avatar_env is not None:

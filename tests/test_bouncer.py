@@ -55,6 +55,21 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import database
 import bot
+import channels
+import cmping
+import cmping_commands
+import commands
+import config
+import dc_helpers
+import handlers
+import moderation
+import state
+import transports
+import web.ap_routes
+import web.routes
+import web.templates.channel
+import web.templates.feed
+import web.templates.landing
 
 class TestBouncerBot(unittest.TestCase):
     def setUp(self):
@@ -62,9 +77,9 @@ class TestBouncerBot(unittest.TestCase):
         database.DB_PATH = TEST_DB
         database.init_db()
         database._transport_stats_buffer.clear()
-        bot._cmping_server_status = {}
-        bot._cmping_server_errors = {}
-        bot._cmping_last_results = {}
+        state._cmping_server_status = {}
+        state._cmping_server_errors = {}
+        state._cmping_last_results = {}
 
     def tearDown(self):
         database.close_db()
@@ -80,16 +95,16 @@ class TestBouncerBot(unittest.TestCase):
                     os.remove(TEST_DB + ext)
                 except Exception:
                     pass
-        bot.clear_pending_delayed_commands()
+        dc_helpers.clear_pending_delayed_commands()
 
     def test_format_duration(self):
-        self.assertEqual(bot._format_duration(45), "45s")
-        self.assertEqual(bot._format_duration(120), "2m")
-        self.assertEqual(bot._format_duration(125), "2m 5s")
-        self.assertEqual(bot._format_duration(3600), "1h")
-        self.assertEqual(bot._format_duration(3660), "1h 1m")
-        self.assertEqual(bot._format_duration(86400), "1d")
-        self.assertEqual(bot._format_duration(90000), "1d 1h")
+        self.assertEqual(cmping._format_duration(45), "45s")
+        self.assertEqual(cmping._format_duration(120), "2m")
+        self.assertEqual(cmping._format_duration(125), "2m 5s")
+        self.assertEqual(cmping._format_duration(3600), "1h")
+        self.assertEqual(cmping._format_duration(3660), "1h 1m")
+        self.assertEqual(cmping._format_duration(86400), "1d")
+        self.assertEqual(cmping._format_duration(90000), "1d 1h")
 
     def test_cmping_incident_database_operations(self):
         now = int(time.time())
@@ -138,14 +153,14 @@ class TestBouncerBot(unittest.TestCase):
 
         mock_bot = MagicMock()
         mock_bot.rpc.send_msg.return_value = 50001
-        bot.dc_accid = 1
+        state.dc_accid = 1
 
-        with patch.object(bot, '_send', return_value=50001) as mock_send:
+        with patch.object(dc_helpers, '_send', return_value=50001) as mock_send:
             # 1. Server 1 fails -> Incident created, _send called
             database.record_cmping_server_down("node1.cc", int(time.time()), "Incoming from node2.cc failed")
-            bot._cmping_server_status = {"node1.cc": False, "node2.cc": True, "node3.cc": True}
-            bot._cmping_server_errors = {"node1.cc": "Incoming from node2.cc failed"}
-            bot._sync_cmping_incident_alerts(mock_bot, 1, all_servers)
+            state._cmping_server_status = {"node1.cc": False, "node2.cc": True, "node3.cc": True}
+            state._cmping_server_errors = {"node1.cc": "Incoming from node2.cc failed"}
+            cmping._sync_cmping_incident_alerts(mock_bot, 1, all_servers)
 
             mock_send.assert_called_once()
             sent_text = mock_send.call_args[0][3]
@@ -163,9 +178,9 @@ class TestBouncerBot(unittest.TestCase):
             mock_bot.rpc.send_edit_request.reset_mock()
 
             database.record_cmping_server_down("node2.cc", int(time.time()), "All checks failed")
-            bot._cmping_server_status["node2.cc"] = False
-            bot._cmping_server_errors["node2.cc"] = "All checks failed"
-            bot._sync_cmping_incident_alerts(mock_bot, 1, all_servers)
+            state._cmping_server_status["node2.cc"] = False
+            state._cmping_server_errors["node2.cc"] = "All checks failed"
+            cmping._sync_cmping_incident_alerts(mock_bot, 1, all_servers)
 
             mock_send.assert_not_called()
             mock_bot.rpc.send_edit_request.assert_called_once()
@@ -180,9 +195,9 @@ class TestBouncerBot(unittest.TestCase):
             mock_bot.rpc.send_edit_request.reset_mock()
 
             database.record_cmping_server_up("node1.cc", int(time.time()))
-            bot._cmping_server_status["node1.cc"] = True
-            bot._cmping_server_errors.pop("node1.cc", None)
-            bot._sync_cmping_incident_alerts(mock_bot, 1, all_servers)
+            state._cmping_server_status["node1.cc"] = True
+            state._cmping_server_errors.pop("node1.cc", None)
+            cmping._sync_cmping_incident_alerts(mock_bot, 1, all_servers)
 
             mock_send.assert_not_called()
             mock_bot.rpc.send_edit_request.assert_called_once()
@@ -197,9 +212,9 @@ class TestBouncerBot(unittest.TestCase):
             mock_bot.rpc.send_edit_request.reset_mock()
 
             database.record_cmping_server_up("node2.cc", int(time.time()))
-            bot._cmping_server_status["node2.cc"] = True
-            bot._cmping_server_errors.pop("node2.cc", None)
-            bot._sync_cmping_incident_alerts(mock_bot, 1, all_servers)
+            state._cmping_server_status["node2.cc"] = True
+            state._cmping_server_errors.pop("node2.cc", None)
+            cmping._sync_cmping_incident_alerts(mock_bot, 1, all_servers)
 
             mock_send.assert_not_called()
             mock_bot.rpc.send_edit_request.assert_called_once()
@@ -215,7 +230,7 @@ class TestBouncerBot(unittest.TestCase):
         # Test case: source server fails connectivity with all 3 peers.
         # Verify that source is marked UNHEALTHY, but the 3 targets remain HEALTHY.
         all_servers = ["cm-broken.cc", "peer1.cc", "peer2.cc", "peer3.cc"]
-        bot._cmping_server_status = {s: True for s in all_servers}
+        state._cmping_server_status = {s: True for s in all_servers}
 
         source = "cm-broken.cc"
         targets = ["peer1.cc", "peer2.cc", "peer3.cc"]
@@ -224,23 +239,23 @@ class TestBouncerBot(unittest.TestCase):
 
         # Simulate broken source failure
         if not any_source_success and len(targets) >= 2:
-            bot._cmping_server_status[source] = False
-            bot._cmping_server_errors[source] = "All peer checks failed"
+            state._cmping_server_status[source] = False
+            state._cmping_server_errors[source] = "All peer checks failed"
             database.record_cmping_server_down(source, now, "All peer checks failed")
 
-        self.assertFalse(bot._cmping_server_status["cm-broken.cc"])
-        self.assertTrue(bot._cmping_server_status["peer1.cc"])
-        self.assertTrue(bot._cmping_server_status["peer2.cc"])
-        self.assertTrue(bot._cmping_server_status["peer3.cc"])
+        self.assertFalse(state._cmping_server_status["cm-broken.cc"])
+        self.assertTrue(state._cmping_server_status["peer1.cc"])
+        self.assertTrue(state._cmping_server_status["peer2.cc"])
+        self.assertTrue(state._cmping_server_status["peer3.cc"])
 
     def test_cmpingevents_command(self):
         mock_bot = MagicMock()
         mock_event = MagicMock()
         mock_event.msg.chat_id = 8822
 
-        with patch.object(bot, '_send') as mock_send:
+        with patch.object(dc_helpers, '_send') as mock_send:
             # 1. No incidents
-            bot.cmpingevents_command(mock_bot, 1, mock_event)
+            cmping_commands.cmpingevents_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             self.assertIn("No CMPing incidents recorded", mock_send.call_args[0][3])
 
@@ -252,12 +267,12 @@ class TestBouncerBot(unittest.TestCase):
 
             inc2_id = database.create_cmping_incident(int(time.time()))
             database.add_cmping_monitor("cm2.test.cc")
-            bot._cmping_server_status["cm2.test.cc"] = False
-            bot._cmping_server_errors["cm2.test.cc"] = "All peer checks failed"
+            state._cmping_server_status["cm2.test.cc"] = False
+            state._cmping_server_errors["cm2.test.cc"] = "All peer checks failed"
 
             mock_send.reset_mock()
             mock_event.msg.text = "/cmpingevents"
-            bot.cmpingevents_command(mock_bot, 1, mock_event)
+            cmping_commands.cmpingevents_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             text = mock_send.call_args[0][3]
             self.assertIn("CMPing Incident Log", text)
@@ -269,7 +284,7 @@ class TestBouncerBot(unittest.TestCase):
             # 3. View incident by ID: /cmpingevents <id>
             mock_send.reset_mock()
             mock_event.msg.text = f"/cmpingevents {inc_id}"
-            bot.cmpingevents_command(mock_bot, 1, mock_event)
+            cmping_commands.cmpingevents_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             text_detail = mock_send.call_args[0][3]
             self.assertIn(f"CMPing Incident #{inc_id} Details", text_detail)
@@ -279,7 +294,7 @@ class TestBouncerBot(unittest.TestCase):
             # 4. View ongoing incident by ID: /cmpingevents <inc2_id>
             mock_send.reset_mock()
             mock_event.msg.text = f"/cmpingevents #{inc2_id}"
-            bot.cmpingevents_command(mock_bot, 1, mock_event)
+            cmping_commands.cmpingevents_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             text_ongoing = mock_send.call_args[0][3]
             self.assertIn(f"CMPing Incident #{inc2_id}", text_ongoing)
@@ -292,10 +307,10 @@ class TestBouncerBot(unittest.TestCase):
         mock_event.msg.chat_id = 8833
         database.add_cmping_monitor("mail.server1.org")
 
-        with patch.object(bot, '_send') as mock_send:
+        with patch.object(dc_helpers, '_send') as mock_send:
             # 1. Guide / summary list
             mock_event.msg.text = "/cmpinghistory"
-            bot.cmpinghistory_command(mock_bot, 1, mock_event)
+            cmping_commands.cmpinghistory_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             text = mock_send.call_args[0][3]
             self.assertIn("CMPing Downtime History Guide", text)
@@ -308,7 +323,7 @@ class TestBouncerBot(unittest.TestCase):
 
             mock_send.reset_mock()
             mock_event.msg.text = "/cmpinghistory mail.server1.org"
-            bot.cmpinghistory_command(mock_bot, 1, mock_event)
+            cmping_commands.cmpinghistory_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             text = mock_send.call_args[0][3]
             self.assertIn("CMPing Downtime History for mail.server1.org", text)
@@ -349,54 +364,54 @@ class TestBouncerBot(unittest.TestCase):
         mock_event.msg.from_id = 100
 
         # 1. Non-admin is rejected
-        with patch('bot._is_dc_admin', return_value=False), patch.object(bot, '_send') as mock_send:
-            bot.autokick_command(mock_bot, 1, mock_event)
+        with patch('dc_helpers._is_dc_admin', return_value=False), patch.object(dc_helpers, '_send') as mock_send:
+            moderation.autokick_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             self.assertIn("Only the bot administrator", mock_send.call_args[0][3])
 
         # 2. Private chat (non-group) rejected
         mock_bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Single"}
-        with patch('bot._is_dc_admin', return_value=True), patch.object(bot, '_send') as mock_send:
-            bot.autokick_command(mock_bot, 1, mock_event)
+        with patch('dc_helpers._is_dc_admin', return_value=True), patch.object(dc_helpers, '_send') as mock_send:
+            moderation.autokick_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             self.assertIn("can only be used in group chats", mock_send.call_args[0][3])
 
         # 3. Group chat status when disabled
         mock_bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Group"}
-        with patch('bot._is_dc_admin', return_value=True), patch.object(bot, '_send') as mock_send:
+        with patch('dc_helpers._is_dc_admin', return_value=True), patch.object(dc_helpers, '_send') as mock_send:
             mock_event.payload = ""
-            bot.autokick_command(mock_bot, 1, mock_event)
+            moderation.autokick_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             self.assertIn("Auto-kick is OFF", mock_send.call_args[0][3])
 
         # 4. Enable with default (on -> 90 days)
-        with patch('bot._is_dc_admin', return_value=True), patch.object(bot, '_send') as mock_send:
+        with patch('dc_helpers._is_dc_admin', return_value=True), patch.object(dc_helpers, '_send') as mock_send:
             mock_event.payload = "on"
-            bot.autokick_command(mock_bot, 1, mock_event)
+            moderation.autokick_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             self.assertIn("threshold of **90 days**", mock_send.call_args[0][3])
             self.assertEqual(database.get_chat_autokick(7010), 90)
 
         # 5. Check status when enabled
-        with patch('bot._is_dc_admin', return_value=True), patch.object(bot, '_send') as mock_send:
+        with patch('dc_helpers._is_dc_admin', return_value=True), patch.object(dc_helpers, '_send') as mock_send:
             mock_event.payload = "status"
-            bot.autokick_command(mock_bot, 1, mock_event)
+            moderation.autokick_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             self.assertIn("Auto-kick is ON", mock_send.call_args[0][3])
             self.assertIn("90 days", mock_send.call_args[0][3])
 
         # 6. Enable with custom days (e.g. 30)
-        with patch('bot._is_dc_admin', return_value=True), patch.object(bot, '_send') as mock_send:
+        with patch('dc_helpers._is_dc_admin', return_value=True), patch.object(dc_helpers, '_send') as mock_send:
             mock_event.payload = "30"
-            bot.autokick_command(mock_bot, 1, mock_event)
+            moderation.autokick_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             self.assertIn("threshold of **30 days**", mock_send.call_args[0][3])
             self.assertEqual(database.get_chat_autokick(7010), 30)
 
         # 7. Disable (off)
-        with patch('bot._is_dc_admin', return_value=True), patch.object(bot, '_send') as mock_send:
+        with patch('dc_helpers._is_dc_admin', return_value=True), patch.object(dc_helpers, '_send') as mock_send:
             mock_event.payload = "off"
-            bot.autokick_command(mock_bot, 1, mock_event)
+            moderation.autokick_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             self.assertIn("Auto-kick disabled", mock_send.call_args[0][3])
             self.assertEqual(database.get_chat_autokick(7010), 0)
@@ -443,16 +458,16 @@ class TestBouncerBot(unittest.TestCase):
         def is_admin_mock(b, accid, cid):
             return cid == 10
 
-        with patch('bot._is_dc_admin', side_effect=is_admin_mock), patch.object(bot, '_send') as mock_send:
+        with patch('dc_helpers._is_dc_admin', side_effect=is_admin_mock), patch.object(dc_helpers, '_send') as mock_send:
             # Without warnings, NO ONE should be kicked
-            kicked_unwarned = bot._perform_autokick_for_chat(mock_bot, 1, chat_id, days=90)
+            kicked_unwarned = moderation._perform_autokick_for_chat(mock_bot, 1, chat_id, days=90)
             self.assertEqual(len(kicked_unwarned), 0)
 
             # Record warnings for 30 and 40 given 2 days ago (> 24h grace period)
             database.record_autokick_warning(chat_id, 30, now - (2 * 86400))
             database.record_autokick_warning(chat_id, 40, now - (2 * 86400))
 
-            kicked = bot._perform_autokick_for_chat(mock_bot, 1, chat_id, days=90)
+            kicked = moderation._perform_autokick_for_chat(mock_bot, 1, chat_id, days=90)
             self.assertEqual(len(kicked), 2)
             kicked_ids = [m["id"] for m in kicked]
             self.assertIn(30, kicked_ids)
@@ -508,15 +523,15 @@ class TestBouncerBot(unittest.TestCase):
             return cid == 100
 
         # 1. Non-admin rejected
-        with patch('bot._is_dc_admin', return_value=False), patch.object(bot, '_send') as mock_send:
-            bot.kick_command(mock_bot, 1, mock_event)
+        with patch('dc_helpers._is_dc_admin', return_value=False), patch.object(dc_helpers, '_send') as mock_send:
+            moderation.kick_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             self.assertIn("Only the bot administrator can use /kick", mock_send.call_args[0][3])
 
         # 2. Kick by numeric ID (/kick 201)
-        with patch('bot._is_dc_admin', side_effect=is_admin_mock), patch.object(bot, '_send') as mock_send:
+        with patch('dc_helpers._is_dc_admin', side_effect=is_admin_mock), patch.object(dc_helpers, '_send') as mock_send:
             mock_event.payload = "201"
-            bot.kick_command(mock_bot, 1, mock_event)
+            moderation.kick_command(mock_bot, 1, mock_event)
             mock_bot.rpc.remove_contact_from_chat.assert_called_with(1, 7030, 201)
             mock_send.assert_called_once()
             self.assertIn("Kicked 1 member", mock_send.call_args[0][3])
@@ -524,9 +539,9 @@ class TestBouncerBot(unittest.TestCase):
 
         # 3. Kick with /contact format (/kick /contact202)
         mock_bot.rpc.remove_contact_from_chat.reset_mock()
-        with patch('bot._is_dc_admin', side_effect=is_admin_mock), patch.object(bot, '_send') as mock_send:
+        with patch('dc_helpers._is_dc_admin', side_effect=is_admin_mock), patch.object(dc_helpers, '_send') as mock_send:
             mock_event.payload = "/contact202"
-            bot.kick_command(mock_bot, 1, mock_event)
+            moderation.kick_command(mock_bot, 1, mock_event)
             mock_bot.rpc.remove_contact_from_chat.assert_called_with(1, 7030, 202)
             mock_send.assert_called_once()
             self.assertIn("Bob", mock_send.call_args[0][3])
@@ -538,25 +553,25 @@ class TestBouncerBot(unittest.TestCase):
         quoted_msg.from_id = 203
         mock_bot.rpc.get_message.return_value = quoted_msg
 
-        with patch('bot._is_dc_admin', side_effect=is_admin_mock), patch.object(bot, '_send') as mock_send:
+        with patch('dc_helpers._is_dc_admin', side_effect=is_admin_mock), patch.object(dc_helpers, '_send') as mock_send:
             mock_event.payload = ""
-            bot.kick_command(mock_bot, 1, mock_event)
+            moderation.kick_command(mock_bot, 1, mock_event)
             mock_bot.rpc.remove_contact_from_chat.assert_called_with(1, 7030, 203)
             mock_send.assert_called_once()
             self.assertIn("Charlie", mock_send.call_args[0][3])
 
         # 5. Protection: Cannot kick admin or self
         mock_event.msg.quote = None
-        with patch('bot._is_dc_admin', side_effect=is_admin_mock), patch.object(bot, '_send') as mock_send:
+        with patch('dc_helpers._is_dc_admin', side_effect=is_admin_mock), patch.object(dc_helpers, '_send') as mock_send:
             mock_event.payload = "1 100"
-            bot.kick_command(mock_bot, 1, mock_event)
+            moderation.kick_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             self.assertIn("The bot cannot kick itself", mock_send.call_args[0][3])
             self.assertIn("Cannot kick the bot administrator", mock_send.call_args[0][3])
 
     def test_bounce_inactivity_threshold_21_days(self):
-        self.assertEqual(bot.INACTIVITY_DAYS_THRESHOLD, 21)
-        self.assertEqual(bot.INACTIVITY_SECONDS_THRESHOLD, 21 * 24 * 3600)
+        self.assertEqual(config.INACTIVITY_DAYS_THRESHOLD, 21)
+        self.assertEqual(config.INACTIVITY_SECONDS_THRESHOLD, 21 * 24 * 3600)
 
         mock_bot = MagicMock()
         chat_id = 7040
@@ -584,24 +599,24 @@ class TestBouncerBot(unittest.TestCase):
 
         mock_bot.rpc.get_contact.side_effect = get_contact_mock
 
-        report = bot._check_chat_inactivity(mock_bot, 1, chat_id)
+        report = moderation._check_chat_inactivity(mock_bot, 1, chat_id)
         self.assertIn("Inactive (>21d): 1", report)
         self.assertIn("UserInactive25d", report)
         self.assertNotIn("UserActive10d", report)
 
     def test_get_cmping_incident_update_interval(self):
-        self.assertEqual(bot._get_cmping_incident_update_interval(0), 15)
-        self.assertEqual(bot._get_cmping_incident_update_interval(59), 15)
-        self.assertEqual(bot._get_cmping_incident_update_interval(60), 30)
-        self.assertEqual(bot._get_cmping_incident_update_interval(299), 30)
-        self.assertEqual(bot._get_cmping_incident_update_interval(300), 60)
-        self.assertEqual(bot._get_cmping_incident_update_interval(3599), 60)
+        self.assertEqual(cmping._get_cmping_incident_update_interval(0), 15)
+        self.assertEqual(cmping._get_cmping_incident_update_interval(59), 15)
+        self.assertEqual(cmping._get_cmping_incident_update_interval(60), 30)
+        self.assertEqual(cmping._get_cmping_incident_update_interval(299), 30)
+        self.assertEqual(cmping._get_cmping_incident_update_interval(300), 60)
+        self.assertEqual(cmping._get_cmping_incident_update_interval(3599), 60)
         # 1 hour - 24 hours: 300s (5 minutes)
-        self.assertEqual(bot._get_cmping_incident_update_interval(3600), 300)
-        self.assertEqual(bot._get_cmping_incident_update_interval(86399), 300)
+        self.assertEqual(cmping._get_cmping_incident_update_interval(3600), 300)
+        self.assertEqual(cmping._get_cmping_incident_update_interval(86399), 300)
         # > 24 hours: 3600s (1 hour)
-        self.assertEqual(bot._get_cmping_incident_update_interval(86400), 3600)
-        self.assertEqual(bot._get_cmping_incident_update_interval(86400 * 7), 3600)
+        self.assertEqual(cmping._get_cmping_incident_update_interval(86400), 3600)
+        self.assertEqual(cmping._get_cmping_incident_update_interval(86400 * 7), 3600)
 
     def test_cmping_incident_rate_limiting(self):
         mock_bot = MagicMock()
@@ -609,37 +624,37 @@ class TestBouncerBot(unittest.TestCase):
         database.add_cmping_report_chat(chat_id)
         servers = ["cm1.test.org", "cm2.test.org"]
 
-        bot._cmping_server_status["cm1.test.org"] = False
-        bot._cmping_server_errors["cm1.test.org"] = "Timeout"
-        bot._cmping_server_status["cm2.test.org"] = True
-        bot._cmping_incident_last_edit_state.clear()
+        state._cmping_server_status["cm1.test.org"] = False
+        state._cmping_server_errors["cm1.test.org"] = "Timeout"
+        state._cmping_server_status["cm2.test.org"] = True
+        state._cmping_incident_last_edit_state.clear()
 
         # 1. Initial alert
-        with patch.object(bot, '_send', return_value=60001):
-            bot._sync_cmping_incident_alerts(mock_bot, 1, servers, force_update=False)
+        with patch.object(dc_helpers, '_send', return_value=60001):
+            cmping._sync_cmping_incident_alerts(mock_bot, 1, servers, force_update=False)
 
         inc = database.get_active_cmping_incident()
         self.assertIsNotNone(inc)
         database.set_cmping_incident_msg_id(inc["id"], chat_id, 60001)
-        self.assertIn(inc["id"], bot._cmping_incident_last_edit_state)
+        self.assertIn(inc["id"], state._cmping_incident_last_edit_state)
 
         # 2. Immediate second call with same state -> throttled
         mock_bot.rpc.send_edit_request.reset_mock()
-        bot._sync_cmping_incident_alerts(mock_bot, 1, servers, force_update=False)
+        cmping._sync_cmping_incident_alerts(mock_bot, 1, servers, force_update=False)
         mock_bot.rpc.send_edit_request.assert_not_called()
 
         # 3. Time elapsed >= 15s -> sends edit
-        last_t, sig = bot._cmping_incident_last_edit_state[inc["id"]]
-        bot._cmping_incident_last_edit_state[inc["id"]] = (last_t - 20, sig)
-        bot._sync_cmping_incident_alerts(mock_bot, 1, servers, force_update=False)
+        last_t, sig = state._cmping_incident_last_edit_state[inc["id"]]
+        state._cmping_incident_last_edit_state[inc["id"]] = (last_t - 20, sig)
+        cmping._sync_cmping_incident_alerts(mock_bot, 1, servers, force_update=False)
         mock_bot.rpc.send_edit_request.assert_called_once()
 
         # 4. Status change (cm2 also goes down) -> immediate edit
         mock_bot.rpc.send_edit_request.reset_mock()
         database.record_cmping_server_down("cm2.test.org", int(time.time()), "Connection refused")
-        bot._cmping_server_status["cm2.test.org"] = False
-        bot._cmping_server_errors["cm2.test.org"] = "Connection refused"
-        bot._sync_cmping_incident_alerts(mock_bot, 1, servers, force_update=False)
+        state._cmping_server_status["cm2.test.org"] = False
+        state._cmping_server_errors["cm2.test.org"] = "Connection refused"
+        cmping._sync_cmping_incident_alerts(mock_bot, 1, servers, force_update=False)
         mock_bot.rpc.send_edit_request.assert_called_once()
 
     def test_cmping_incident_split_after_one_hour_gap(self):
@@ -648,16 +663,16 @@ class TestBouncerBot(unittest.TestCase):
         servers = ["srv1.test.org", "srv2.test.org"]
 
         mock_bot = MagicMock()
-        bot.dc_accid = 1
+        state.dc_accid = 1
         t0 = 1000000
 
         # 1. Srv 1 goes down at t0 -> Incident #1 created
-        with patch('time.time', return_value=t0), patch.object(bot, '_send', return_value=70001):
+        with patch('time.time', return_value=t0), patch.object(dc_helpers, '_send', return_value=70001):
             database.record_cmping_server_down("srv1.test.org", t0, "Timeout")
-            bot._cmping_server_status = {"srv1.test.org": False, "srv2.test.org": True}
-            bot._cmping_server_errors = {"srv1.test.org": "Timeout"}
-            bot._cmping_incident_last_edit_state.clear()
-            bot._sync_cmping_incident_alerts(mock_bot, 1, servers)
+            state._cmping_server_status = {"srv1.test.org": False, "srv2.test.org": True}
+            state._cmping_server_errors = {"srv1.test.org": "Timeout"}
+            state._cmping_incident_last_edit_state.clear()
+            cmping._sync_cmping_incident_alerts(mock_bot, 1, servers)
 
         active_incs = database.get_all_active_cmping_incidents()
         self.assertEqual(len(active_incs), 1)
@@ -666,11 +681,11 @@ class TestBouncerBot(unittest.TestCase):
 
         # 2. Srv 2 goes down at t0 + 4000s (> 1 hour gap) -> Incident #2 created!
         t1 = t0 + 4000
-        with patch('time.time', return_value=t1), patch.object(bot, '_send', return_value=70002):
+        with patch('time.time', return_value=t1), patch.object(dc_helpers, '_send', return_value=70002):
             database.record_cmping_server_down("srv2.test.org", t1, "Refused")
-            bot._cmping_server_status["srv2.test.org"] = False
-            bot._cmping_server_errors["srv2.test.org"] = "Refused"
-            bot._sync_cmping_incident_alerts(mock_bot, 1, servers)
+            state._cmping_server_status["srv2.test.org"] = False
+            state._cmping_server_errors["srv2.test.org"] = "Refused"
+            cmping._sync_cmping_incident_alerts(mock_bot, 1, servers)
 
         active_incs = database.get_all_active_cmping_incidents()
         self.assertEqual(len(active_incs), 2)
@@ -683,9 +698,9 @@ class TestBouncerBot(unittest.TestCase):
 
         with patch('time.time', return_value=t2):
             database.record_cmping_server_up("srv2.test.org", t2)
-            bot._cmping_server_status["srv2.test.org"] = True
-            bot._cmping_server_errors.pop("srv2.test.org", None)
-            bot._sync_cmping_incident_alerts(mock_bot, 1, servers)
+            state._cmping_server_status["srv2.test.org"] = True
+            state._cmping_server_errors.pop("srv2.test.org", None)
+            cmping._sync_cmping_incident_alerts(mock_bot, 1, servers)
 
         resolved_calls = [c for c in mock_bot.rpc.send_edit_request.call_args_list if c[0][1] == 70002]
         self.assertEqual(len(resolved_calls), 1)
@@ -703,9 +718,9 @@ class TestBouncerBot(unittest.TestCase):
 
         with patch('time.time', return_value=t3):
             database.record_cmping_server_up("srv1.test.org", t3)
-            bot._cmping_server_status["srv1.test.org"] = True
-            bot._cmping_server_errors.pop("srv1.test.org", None)
-            bot._sync_cmping_incident_alerts(mock_bot, 1, servers)
+            state._cmping_server_status["srv1.test.org"] = True
+            state._cmping_server_errors.pop("srv1.test.org", None)
+            cmping._sync_cmping_incident_alerts(mock_bot, 1, servers)
 
         resolved_calls = [c for c in mock_bot.rpc.send_edit_request.call_args_list if c[0][1] == 70001]
         self.assertEqual(len(resolved_calls), 1)
@@ -759,16 +774,16 @@ class TestBouncerBot(unittest.TestCase):
         servers = ["flap.example.com"]
 
         mock_bot = MagicMock()
-        bot.dc_accid = 1
+        state.dc_accid = 1
         t0 = 1000000
 
         # 1. Goes DOWN at t0 -> Incident #1 created with _send
-        with patch('time.time', return_value=t0), patch.object(bot, '_send', return_value=80001) as mock_send:
+        with patch('time.time', return_value=t0), patch.object(dc_helpers, '_send', return_value=80001) as mock_send:
             database.record_cmping_server_down("flap.example.com", t0, "Timeout")
-            bot._cmping_server_status = {"flap.example.com": False}
-            bot._cmping_server_errors = {"flap.example.com": "Timeout"}
-            bot._cmping_incident_last_edit_state.clear()
-            bot._sync_cmping_incident_alerts(mock_bot, 1, servers)
+            state._cmping_server_status = {"flap.example.com": False}
+            state._cmping_server_errors = {"flap.example.com": "Timeout"}
+            state._cmping_incident_last_edit_state.clear()
+            cmping._sync_cmping_incident_alerts(mock_bot, 1, servers)
 
         mock_send.assert_called_once()
         active_incs = database.get_all_active_cmping_incidents()
@@ -779,11 +794,11 @@ class TestBouncerBot(unittest.TestCase):
         # 2. Recovers at t0 + 300s -> Incident #1 resolves with send_edit_request
         t1 = t0 + 300
         mock_bot.rpc.send_edit_request.reset_mock()
-        with patch('time.time', return_value=t1), patch.object(bot, '_send') as mock_send:
+        with patch('time.time', return_value=t1), patch.object(dc_helpers, '_send') as mock_send:
             database.record_cmping_server_up("flap.example.com", t1)
-            bot._cmping_server_status["flap.example.com"] = True
-            bot._cmping_server_errors.pop("flap.example.com", None)
-            bot._sync_cmping_incident_alerts(mock_bot, 1, servers)
+            state._cmping_server_status["flap.example.com"] = True
+            state._cmping_server_errors.pop("flap.example.com", None)
+            cmping._sync_cmping_incident_alerts(mock_bot, 1, servers)
 
         mock_send.assert_not_called()
         mock_bot.rpc.send_edit_request.assert_called_once()
@@ -795,11 +810,11 @@ class TestBouncerBot(unittest.TestCase):
         # 3. Flaps DOWN again at t1 + 300s (T = t0 + 600s, < 1 hour) -> Reopens Incident #1!
         t2 = t1 + 300
         mock_bot.rpc.send_edit_request.reset_mock()
-        with patch('time.time', return_value=t2), patch.object(bot, '_send') as mock_send:
+        with patch('time.time', return_value=t2), patch.object(dc_helpers, '_send') as mock_send:
             database.record_cmping_server_down("flap.example.com", t2, "Connection refused")
-            bot._cmping_server_status["flap.example.com"] = False
-            bot._cmping_server_errors["flap.example.com"] = "Connection refused"
-            bot._sync_cmping_incident_alerts(mock_bot, 1, servers)
+            state._cmping_server_status["flap.example.com"] = False
+            state._cmping_server_errors["flap.example.com"] = "Connection refused"
+            cmping._sync_cmping_incident_alerts(mock_bot, 1, servers)
 
         # MUST NOT send a new message
         mock_send.assert_not_called()
@@ -819,11 +834,11 @@ class TestBouncerBot(unittest.TestCase):
         # 4. Finally recovers at t2 + 300s (T = t0 + 900s) -> Resolves again
         t3 = t2 + 300
         mock_bot.rpc.send_edit_request.reset_mock()
-        with patch('time.time', return_value=t3), patch.object(bot, '_send') as mock_send:
+        with patch('time.time', return_value=t3), patch.object(dc_helpers, '_send') as mock_send:
             database.record_cmping_server_up("flap.example.com", t3)
-            bot._cmping_server_status["flap.example.com"] = True
-            bot._cmping_server_errors.pop("flap.example.com", None)
-            bot._sync_cmping_incident_alerts(mock_bot, 1, servers)
+            state._cmping_server_status["flap.example.com"] = True
+            state._cmping_server_errors.pop("flap.example.com", None)
+            cmping._sync_cmping_incident_alerts(mock_bot, 1, servers)
 
         mock_send.assert_not_called()
         mock_bot.rpc.send_edit_request.assert_called_once()
@@ -878,13 +893,13 @@ class TestBouncerBot(unittest.TestCase):
         self.assertFalse(database.remove_autokick_ignored_fingerprint(fp))
 
     def test_get_chat_autokick_warn_threshold(self):
-        self.assertEqual(bot._get_chat_autokick_warn_threshold(90), 83)
-        self.assertEqual(bot._get_chat_autokick_warn_threshold(30), 23)
-        self.assertEqual(bot._get_chat_autokick_warn_threshold(14), 7)
-        self.assertEqual(bot._get_chat_autokick_warn_threshold(7), 6)
-        self.assertEqual(bot._get_chat_autokick_warn_threshold(5), 4)
-        self.assertEqual(bot._get_chat_autokick_warn_threshold(2), 1)
-        self.assertEqual(bot._get_chat_autokick_warn_threshold(1), 1)
+        self.assertEqual(dc_helpers._get_chat_autokick_warn_threshold(90), 83)
+        self.assertEqual(dc_helpers._get_chat_autokick_warn_threshold(30), 23)
+        self.assertEqual(dc_helpers._get_chat_autokick_warn_threshold(14), 7)
+        self.assertEqual(dc_helpers._get_chat_autokick_warn_threshold(7), 6)
+        self.assertEqual(dc_helpers._get_chat_autokick_warn_threshold(5), 4)
+        self.assertEqual(dc_helpers._get_chat_autokick_warn_threshold(2), 1)
+        self.assertEqual(dc_helpers._get_chat_autokick_warn_threshold(1), 1)
 
     def test_perform_autokick_warnings_private_dm_and_24h_broadcast(self):
         mock_bot = MagicMock()
@@ -925,8 +940,8 @@ class TestBouncerBot(unittest.TestCase):
 
         mock_bot.rpc.get_contact.side_effect = get_contact_mock
 
-        with patch('bot._is_dc_admin', side_effect=lambda b, a, cid: cid == 10), patch.object(bot, '_send') as mock_send:
-            warned = bot._perform_autokick_warnings_for_chat(mock_bot, 1, chat_id, days=90)
+        with patch('dc_helpers._is_dc_admin', side_effect=lambda b, a, cid: cid == 10), patch.object(dc_helpers, '_send') as mock_send:
+            warned = moderation._perform_autokick_warnings_for_chat(mock_bot, 1, chat_id, days=90)
             self.assertEqual(len(warned), 2)
             warned_ids = [c["id"] for c in warned]
             self.assertIn(30, warned_ids)
@@ -946,7 +961,7 @@ class TestBouncerBot(unittest.TestCase):
             # Second run within 24h: no new DMs and no group broadcast
             mock_send.reset_mock()
             mock_bot.rpc.create_chat_by_contact_id.reset_mock()
-            warned2 = bot._perform_autokick_warnings_for_chat(mock_bot, 1, chat_id, days=90)
+            warned2 = moderation._perform_autokick_warnings_for_chat(mock_bot, 1, chat_id, days=90)
             self.assertEqual(len(warned2), 2)
             mock_bot.rpc.create_chat_by_contact_id.assert_not_called()
             mock_send.assert_not_called()
@@ -987,8 +1002,8 @@ class TestBouncerBot(unittest.TestCase):
 
         mock_bot.rpc.get_contact.side_effect = get_contact_mock
 
-        with patch('bot._is_dc_admin', return_value=False), patch('bot._get_contact_fingerprint', side_effect=lambda b, a, cid, contact=None: fp40 if cid == 40 else None), patch.object(bot, '_send'):
-            warn_candidates, _ = bot._get_chat_autokick_candidates(mock_bot, 1, chat_id, 90)
+        with patch('dc_helpers._is_dc_admin', return_value=False), patch('dc_helpers._get_contact_fingerprint', side_effect=lambda b, a, cid, contact=None: fp40 if cid == 40 else None), patch.object(dc_helpers, '_send'):
+            warn_candidates, _ = moderation._get_chat_autokick_candidates(mock_bot, 1, chat_id, 90)
             c_ids = [c["id"] for c in warn_candidates]
             self.assertNotIn(30, c_ids) # exempt because of /away
             self.assertNotIn(40, c_ids) # exempt because of ignored fingerprint
@@ -1028,8 +1043,8 @@ class TestBouncerBot(unittest.TestCase):
             return c
         mock_bot.rpc.get_contact.side_effect = get_contact_mock
 
-        with patch('bot._is_dc_admin', side_effect=lambda b, a, cid: cid == 10), patch.object(bot, '_send') as mock_send:
-            bot.bounce_command(mock_bot, 1, mock_event)
+        with patch('dc_helpers._is_dc_admin', side_effect=lambda b, a, cid: cid == 10), patch.object(dc_helpers, '_send') as mock_send:
+            commands.bounce_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             msg_text = mock_send.call_args[0][3]
             self.assertIn("Inactivity Warning", msg_text)
@@ -1070,8 +1085,8 @@ class TestBouncerBot(unittest.TestCase):
         mock_event.msg.from_id = 10
         mock_event.payload = "ignore service@example.com"
 
-        with patch('bot._is_dc_admin', return_value=True), patch('bot._get_contact_fingerprint', return_value=fp60), patch.object(bot, '_send') as mock_send:
-            bot.autokick_command(mock_bot, 1, mock_event)
+        with patch('dc_helpers._is_dc_admin', return_value=True), patch('dc_helpers._get_contact_fingerprint', return_value=fp60), patch.object(dc_helpers, '_send') as mock_send:
+            moderation.autokick_command(mock_bot, 1, mock_event)
             self.assertTrue(database.is_fingerprint_autokick_ignored(fp60))
             mock_send.assert_called_once()
             self.assertIn("Added", mock_send.call_args[0][3])
@@ -1079,14 +1094,14 @@ class TestBouncerBot(unittest.TestCase):
             # 2. /autokick ignore list
             mock_event.payload = "ignore list"
             mock_send.reset_mock()
-            bot.autokick_command(mock_bot, 1, mock_event)
+            moderation.autokick_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             self.assertIn("Ignored Members/Bots", mock_send.call_args[0][3])
 
             # 3. /autokick unignore
             mock_event.payload = f"unignore {fp60}"
             mock_send.reset_mock()
-            bot.autokick_command(mock_bot, 1, mock_event)
+            moderation.autokick_command(mock_bot, 1, mock_event)
             self.assertFalse(database.is_fingerprint_autokick_ignored(fp60))
             mock_send.assert_called_once()
             self.assertIn("Removed", mock_send.call_args[0][3])
@@ -1119,8 +1134,8 @@ class TestBouncerBot(unittest.TestCase):
             return c
         mock_bot.rpc.get_contact.side_effect = get_contact_mock
 
-        with patch('bot._is_dc_admin', side_effect=lambda b, a, cid: cid == 10), patch.object(bot, '_send'):
-            warn_candidates, kick_candidates = bot._get_chat_autokick_candidates(mock_bot, 1, chat_id, 90)
+        with patch('dc_helpers._is_dc_admin', side_effect=lambda b, a, cid: cid == 10), patch.object(dc_helpers, '_send'):
+            warn_candidates, kick_candidates = moderation._get_chat_autokick_candidates(mock_bot, 1, chat_id, 90)
             self.assertEqual(len(warn_candidates), 0)
             self.assertEqual(len(kick_candidates), 0)
 
@@ -1154,8 +1169,8 @@ class TestBouncerBot(unittest.TestCase):
             return c
         mock_bot.rpc.get_contact.side_effect = get_contact_mock
 
-        with patch('bot._is_dc_admin', side_effect=lambda b, a, cid: cid == 10), patch.object(bot, '_send'):
-            warn_candidates, kick_candidates = bot._get_chat_autokick_candidates(mock_bot, 1, chat_id, 90)
+        with patch('dc_helpers._is_dc_admin', side_effect=lambda b, a, cid: cid == 10), patch.object(dc_helpers, '_send'):
+            warn_candidates, kick_candidates = moderation._get_chat_autokick_candidates(mock_bot, 1, chat_id, 90)
             # New member has only been in the group 2 days (< 83d warning threshold) -> MUST NOT be warned or kicked!
             c_ids = [c["id"] for c in warn_candidates]
             self.assertNotIn(70, c_ids)
@@ -1166,9 +1181,9 @@ class TestBouncerBot(unittest.TestCase):
         self.assertTrue(hasattr(bot, 'resilient_lock'))
         import threading
         # Ensure it behaves as a lock
-        acquired = bot.resilient_lock.acquire(timeout=1.0)
+        acquired = state.resilient_lock.acquire(timeout=1.0)
         self.assertTrue(acquired)
-        bot.resilient_lock.release()
+        state.resilient_lock.release()
 
     def test_cmping_domain_validation(self):
         """Verify domain validation rejects invalid strings and potential command injections."""
@@ -1177,26 +1192,26 @@ class TestBouncerBot(unittest.TestCase):
         mock_event.msg.chat_id = 9010
         mock_event.msg.id = 111
 
-        with patch('bot._send') as mock_send, patch('bot._react'):
+        with patch('dc_helpers._send') as mock_send, patch('dc_helpers._react'):
             # Invalid domains
             for bad in ["bad;rm-rf", "domain..com", "-invalid.com", "foo/bar"]:
                 mock_event.payload = bad
-                bot.cmping_command(mock_bot, 1, mock_event)
+                cmping_commands.cmping_command(mock_bot, 1, mock_event)
                 mock_send.assert_called()
                 last_call_text = mock_send.call_args[0][3]
                 self.assertIn("Invalid server domain", last_call_text)
 
             # Too many arguments check
             mock_event.payload = "server1.org server2.org server3.org"
-            bot.cmping_command(mock_bot, 1, mock_event)
+            cmping_commands.cmping_command(mock_bot, 1, mock_event)
             last_call_text = mock_send.call_args[0][3]
             self.assertIn("Only 1 or 2 server parameters are supported", last_call_text)
 
             # Valid domain
-            with patch('bot._get_bot_domains', return_value=["relay1.org"]), patch('threading.Thread') as mock_thread:
-                bot._chat_cmping_anti_spam.clear()
+            with patch('dc_helpers._get_bot_domains', return_value=["relay1.org"]), patch('threading.Thread') as mock_thread:
+                state._chat_cmping_anti_spam.clear()
                 mock_event.payload = "chatmail.example.org"
-                bot.cmping_command(mock_bot, 1, mock_event)
+                cmping_commands.cmping_command(mock_bot, 1, mock_event)
                 mock_thread.assert_called()
 
     def test_addtransport_private_chat_enforcement(self):
@@ -1207,10 +1222,10 @@ class TestBouncerBot(unittest.TestCase):
         mock_event.msg.from_id = 10  # Admin
         mock_event.payload = "user@example.com secret123"
 
-        with patch('bot._is_dc_admin', return_value=True), patch('bot._send') as mock_send:
+        with patch('dc_helpers._is_dc_admin', return_value=True), patch('dc_helpers._send') as mock_send:
             # When run in a Group chat
             mock_bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Group"}
-            bot.addtransport_command(mock_bot, 1, mock_event)
+            transports.addtransport_command(mock_bot, 1, mock_event)
             mock_send.assert_called()
             sent_text = mock_send.call_args[0][3]
             self.assertIn("private 1-on-1 chat", sent_text)
@@ -1219,7 +1234,7 @@ class TestBouncerBot(unittest.TestCase):
             # When run in a Single (private 1-on-1) chat
             mock_send.reset_mock()
             mock_bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Single"}
-            bot.addtransport_command(mock_bot, 1, mock_event)
+            transports.addtransport_command(mock_bot, 1, mock_event)
             mock_bot.rpc.add_or_update_transport.assert_called_with(1, {"addr": "user@example.com", "password": "secret123"})
             sent_text = mock_send.call_args[0][3]
             self.assertIn("Backup transport `user@example.com` added", sent_text)
@@ -1233,26 +1248,26 @@ class TestBouncerBot(unittest.TestCase):
         mock_event.msg.id = 100
         mock_event.payload = "someone"
 
-        bot._chat_slap_anti_spam.clear()
-        bot.clear_pending_delayed_commands()
+        state._chat_slap_anti_spam.clear()
+        dc_helpers.clear_pending_delayed_commands()
         try:
-            with patch('bot._is_dc_admin', return_value=False), \
-                 patch('bot._send') as mock_send, \
-                 patch('bot._react') as mock_react:
+            with patch('dc_helpers._is_dc_admin', return_value=False), \
+                 patch('dc_helpers._send') as mock_send, \
+                 patch('dc_helpers._react') as mock_react:
                 # First slap proceeds
-                bot.slap_command(mock_bot, 1, mock_event)
-                self.assertIn(9030, bot._chat_slap_anti_spam)
+                commands.slap_command(mock_bot, 1, mock_event)
+                self.assertIn(9030, state._chat_slap_anti_spam)
                 mock_send.assert_called()
 
                 # Immediate second slap is queued without group spam
                 mock_send.reset_mock()
                 mock_react.reset_mock()
                 mock_event.msg.id = 101
-                bot.slap_command(mock_bot, 1, mock_event)
+                commands.slap_command(mock_bot, 1, mock_event)
                 mock_send.assert_not_called()
                 mock_react.assert_called_with(mock_bot, 1, 101, "⏳")
         finally:
-            bot.clear_pending_delayed_commands()
+            dc_helpers.clear_pending_delayed_commands()
 
     def test_queue_delayed_command_lifecycle(self):
         """Verify _queue_delayed_command sets ⏳ and transitions to ☑️ upon completion."""
@@ -1265,10 +1280,10 @@ class TestBouncerBot(unittest.TestCase):
         def dummy_cmd(val):
             executed.append(val)
 
-        bot.clear_pending_delayed_commands()
+        dc_helpers.clear_pending_delayed_commands()
         try:
-            with patch('bot._react') as mock_react:
-                bot._queue_delayed_command(mock_bot, 1, mock_msg, "test_cmd", 0.05, dummy_cmd, "hello")
+            with patch('dc_helpers._react') as mock_react:
+                dc_helpers._queue_delayed_command(mock_bot, 1, mock_msg, "test_cmd", 0.05, dummy_cmd, "hello")
                 mock_react.assert_called_with(mock_bot, 1, 505, "⏳")
 
                 time.sleep(0.15)
@@ -1276,7 +1291,7 @@ class TestBouncerBot(unittest.TestCase):
                 self.assertEqual(executed, ["hello"])
                 mock_react.assert_any_call(mock_bot, 1, 505, "☑️")
         finally:
-            bot.clear_pending_delayed_commands()
+            dc_helpers.clear_pending_delayed_commands()
 
     def test_queue_delayed_command_deduplication(self):
         """Verify multiple messages during cooldown are coalesced and all get ☑️."""
@@ -1293,11 +1308,11 @@ class TestBouncerBot(unittest.TestCase):
         def dummy_cmd():
             call_count[0] += 1
 
-        bot.clear_pending_delayed_commands()
+        dc_helpers.clear_pending_delayed_commands()
         try:
-            with patch('bot._react') as mock_react:
-                bot._queue_delayed_command(mock_bot, 1, mock_msg1, "test_cmd", 0.05, dummy_cmd)
-                bot._queue_delayed_command(mock_bot, 1, mock_msg2, "test_cmd", 0.05, dummy_cmd)
+            with patch('dc_helpers._react') as mock_react:
+                dc_helpers._queue_delayed_command(mock_bot, 1, mock_msg1, "test_cmd", 0.05, dummy_cmd)
+                dc_helpers._queue_delayed_command(mock_bot, 1, mock_msg2, "test_cmd", 0.05, dummy_cmd)
 
                 mock_react.assert_any_call(mock_bot, 1, 701, "⏳")
                 mock_react.assert_any_call(mock_bot, 1, 702, "⏳")
@@ -1308,7 +1323,7 @@ class TestBouncerBot(unittest.TestCase):
                 mock_react.assert_any_call(mock_bot, 1, 701, "☑️")
                 mock_react.assert_any_call(mock_bot, 1, 702, "☑️")
         finally:
-            bot.clear_pending_delayed_commands()
+            dc_helpers.clear_pending_delayed_commands()
 
     def test_transport_stats_buffering_and_flushing(self):
         """Verify transport sent/received stats are buffered and written to DB on flush."""
@@ -1461,8 +1476,8 @@ class TestBouncerBot(unittest.TestCase):
             return c
         mock_bot.rpc.get_contact.side_effect = get_contact_mock
 
-        with patch('bot._is_dc_admin', side_effect=lambda b, a, cid: cid == 10):
-            overview = bot._get_chat_autokick_overview(mock_bot, 1, chat_id, 90)
+        with patch('dc_helpers._is_dc_admin', side_effect=lambda b, a, cid: cid == 10):
+            overview = moderation._get_chat_autokick_overview(mock_bot, 1, chat_id, 90)
             self.assertEqual(overview["monitored_days"], 15)
             self.assertEqual(overview["total_members"], 3) # 20, 30, 40 (excluding self and admin)
             self.assertEqual(overview["active_count"], 1) # 20
@@ -1478,8 +1493,8 @@ class TestBouncerBot(unittest.TestCase):
             mock_event.msg.quote = None
             mock_event.payload = ""
 
-            with patch.object(bot, '_send') as mock_send:
-                bot.bounce_command(mock_bot, 1, mock_event)
+            with patch.object(dc_helpers, '_send') as mock_send:
+                commands.bounce_command(mock_bot, 1, mock_event)
                 mock_send.assert_called_once()
                 msg_text = mock_send.call_args[0][3]
                 self.assertIn("Observation in progress", msg_text)
@@ -1489,9 +1504,9 @@ class TestBouncerBot(unittest.TestCase):
 
             # Test /autokick status output includes monitored days & observation count
             mock_bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Group"}
-            with patch.object(bot, '_send') as mock_send:
+            with patch.object(dc_helpers, '_send') as mock_send:
                 mock_event.payload = "status"
-                bot.autokick_command(mock_bot, 1, mock_event)
+                moderation.autokick_command(mock_bot, 1, mock_event)
                 mock_send.assert_called_once()
                 status_text = mock_send.call_args[0][3]
                 self.assertIn("Group monitored for: **15 days**", status_text)
@@ -1523,8 +1538,8 @@ class TestBouncerBot(unittest.TestCase):
         mock_event.msg.quote = None
         mock_event.payload = ""
 
-        with patch('bot._is_dc_admin', side_effect=lambda b, a, cid: cid == 10), patch.object(bot, '_send') as mock_send:
-            bot.bounce_command(mock_bot, 1, mock_event)
+        with patch('dc_helpers._is_dc_admin', side_effect=lambda b, a, cid: cid == 10), patch.object(dc_helpers, '_send') as mock_send:
+            commands.bounce_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             msg_text = mock_send.call_args[0][3]
             self.assertIn("All 2 members are active", msg_text)
@@ -1536,9 +1551,9 @@ class TestBouncerBot(unittest.TestCase):
         user_id = 42  # non-admin
         now = time.time()
 
-        bot._chat_bounce_anti_spam.clear()
-        bot._chat_top_anti_spam.clear()
-        bot._chat_invite_anti_spam.clear()
+        state._chat_bounce_anti_spam.clear()
+        state._chat_top_anti_spam.clear()
+        state._chat_invite_anti_spam.clear()
 
         mock_event = MagicMock()
         mock_event.msg.chat_id = chat_id
@@ -1556,27 +1571,27 @@ class TestBouncerBot(unittest.TestCase):
         mock_bot.rpc.get_chat_contacts.return_value = [user_id]
         mock_bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Group"}
 
-        with patch('bot._is_dc_admin', return_value=False), \
-             patch.object(bot, '_send') as mock_send, \
-             patch.object(bot, '_react') as mock_react:
+        with patch('dc_helpers._is_dc_admin', return_value=False), \
+             patch.object(dc_helpers, '_send') as mock_send, \
+             patch.object(dc_helpers, '_react') as mock_react:
             # 1. Run /bounce
-            bot.bounce_command(mock_bot, 1, mock_event)
-            self.assertIn(chat_id, bot._chat_bounce_anti_spam)
-            self.assertNotIn(chat_id, bot._chat_top_anti_spam)
-            self.assertNotIn(chat_id, bot._chat_invite_anti_spam)
+            commands.bounce_command(mock_bot, 1, mock_event)
+            self.assertIn(chat_id, state._chat_bounce_anti_spam)
+            self.assertNotIn(chat_id, state._chat_top_anti_spam)
+            self.assertNotIn(chat_id, state._chat_invite_anti_spam)
 
             # Running /bounce again triggers cooldown and reacts with ⏳
             mock_send.reset_mock()
             mock_react.reset_mock()
             mock_event.msg.id = 101
-            bot.bounce_command(mock_bot, 1, mock_event)
+            commands.bounce_command(mock_bot, 1, mock_event)
             mock_react.assert_called_with(mock_bot, 1, 101, "⏳")
             mock_send.assert_not_called()
 
             # 2. Running /top is NOT blocked by /bounce cooldown
             mock_send.reset_mock()
-            bot.top_command(mock_bot, 1, mock_event)
-            self.assertIn(chat_id, bot._chat_top_anti_spam)
+            moderation.top_command(mock_bot, 1, mock_event)
+            self.assertIn(chat_id, state._chat_top_anti_spam)
             self.assertTrue(mock_send.called)
 
             # 3. Running /invite is NOT blocked by /bounce or /top cooldowns
@@ -1585,8 +1600,8 @@ class TestBouncerBot(unittest.TestCase):
             mock_bot.rpc.get_chat_securejoin_qr_code.return_value = "https://i.delta.chat/#invite"
             database.add_catalog_chat(chat_id, "Test Chat", "Desc", "https://i.delta.chat/#invite")
             mock_event.payload = ""
-            bot.invite_command(mock_bot, 1, mock_event)
-            self.assertIn(chat_id, bot._chat_invite_anti_spam)
+            commands.invite_command(mock_bot, 1, mock_event)
+            self.assertIn(chat_id, state._chat_invite_anti_spam)
             mock_bot.rpc.send_msg.assert_called()
             sent_msg = mock_bot.rpc.send_msg.call_args[0][2]
             self.assertIn("Invite to group", sent_msg.text)
@@ -1604,9 +1619,9 @@ class TestBouncerBot(unittest.TestCase):
         c.display_name = "Alice"
         mock_bot.rpc.get_contact.return_value = c
 
-        with patch.object(bot, '_send') as mock_send:
+        with patch.object(dc_helpers, '_send') as mock_send:
             # Case 1: user is NOT away -> shows usage, remains not away
-            bot.away_command(mock_bot, 1, mock_event)
+            commands.away_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             sent = mock_send.call_args[0][3]
             self.assertIn("You are not currently away", sent)
@@ -1617,7 +1632,7 @@ class TestBouncerBot(unittest.TestCase):
             # Set away status
             mock_send.reset_mock()
             mock_event.payload = "at lunch"
-            bot.away_command(mock_bot, 1, mock_event)
+            commands.away_command(mock_bot, 1, mock_event)
             self.assertEqual(database.get_away_status(200), "at lunch")
             mock_send.assert_called_once()
             self.assertIn("is now away: at lunch", mock_send.call_args[0][3])
@@ -1625,7 +1640,7 @@ class TestBouncerBot(unittest.TestCase):
             # Case 2: bare /away when already away -> shows current away status, does NOT clear it
             mock_send.reset_mock()
             mock_event.payload = ""
-            bot.away_command(mock_bot, 1, mock_event)
+            commands.away_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             sent2 = mock_send.call_args[0][3]
             self.assertIn("You are currently away: _at lunch_", sent2)
@@ -1634,7 +1649,7 @@ class TestBouncerBot(unittest.TestCase):
 
             # Case 3: /back clears away status
             mock_send.reset_mock()
-            bot.back_command(mock_bot, 1, mock_event)
+            commands.back_command(mock_bot, 1, mock_event)
             self.assertIsNone(database.get_away_status(200))
             mock_send.assert_called()
             self.assertIn("is back", mock_send.call_args[0][3])
@@ -1650,14 +1665,14 @@ class TestBouncerBot(unittest.TestCase):
         database.ensure_contact_first_seen(303, now - (70 * 86400))
 
         # Single-chat (circles)
-        self.assertEqual(bot._get_contact_age_indicator(301, is_multi_chat=False), "🔴")
-        self.assertEqual(bot._get_contact_age_indicator(302, is_multi_chat=False), "🟡")
-        self.assertEqual(bot._get_contact_age_indicator(303, is_multi_chat=False), "⚪")
+        self.assertEqual(dc_helpers._get_contact_age_indicator(301, is_multi_chat=False), "🔴")
+        self.assertEqual(dc_helpers._get_contact_age_indicator(302, is_multi_chat=False), "🟡")
+        self.assertEqual(dc_helpers._get_contact_age_indicator(303, is_multi_chat=False), "⚪")
 
         # Multi-chat (squares)
-        self.assertEqual(bot._get_contact_age_indicator(301, is_multi_chat=True), "🟥")
-        self.assertEqual(bot._get_contact_age_indicator(302, is_multi_chat=True), "🟨")
-        self.assertEqual(bot._get_contact_age_indicator(303, is_multi_chat=True), "⬜")
+        self.assertEqual(dc_helpers._get_contact_age_indicator(301, is_multi_chat=True), "🟥")
+        self.assertEqual(dc_helpers._get_contact_age_indicator(302, is_multi_chat=True), "🟨")
+        self.assertEqual(dc_helpers._get_contact_age_indicator(303, is_multi_chat=True), "⬜")
 
     def test_away_mention_word_boundary(self):
         """Verify away mention detection matches whole words and avoids substring false positives."""
@@ -1691,15 +1706,15 @@ class TestBouncerBot(unittest.TestCase):
         mock_bot.rpc.get_chat_contacts.return_value = [1, 401, 402]
         mock_bot.rpc.create_chat_by_contact_id.return_value = 9201
 
-        with patch.object(bot, '_send') as mock_send:
+        with patch.object(dc_helpers, '_send') as mock_send:
             # 1. Message "Hello Daniel" contains substring "Dan", but should NOT trigger notification
             mock_event.msg.text = "Hello Daniel, how are you?"
-            bot.handle_all_messages(mock_bot, 1, mock_event)
+            handlers.handle_all_messages(mock_bot, 1, mock_event)
             mock_send.assert_not_called()
 
             # 2. Message "Hello Dan! How are you?" contains whole word "Dan" -> MUST trigger away notification
             mock_event.msg.text = "Hello Dan! How are you?"
-            bot.handle_all_messages(mock_bot, 1, mock_event)
+            handlers.handle_all_messages(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             notif_text = mock_send.call_args[0][3]
             self.assertIn("Dan is away: working on release", notif_text)
@@ -1710,24 +1725,24 @@ class TestBouncerBot(unittest.TestCase):
         accid = 1
         cid = 501
 
-        with patch('bot._is_dc_admin', return_value=False), \
-             patch('bot._is_contact_autokick_ignored', return_value=False):
+        with patch('dc_helpers._is_dc_admin', return_value=False), \
+             patch('dc_helpers._is_contact_autokick_ignored', return_value=False):
             # Normal user: no badges
-            self.assertEqual(bot._get_user_badges(mock_bot, accid, cid), "")
+            self.assertEqual(dc_helpers._get_user_badges(mock_bot, accid, cid), "")
 
             # Away user: 💤
             database.set_away_status(cid, "afk")
-            self.assertEqual(bot._get_user_badges(mock_bot, accid, cid), "💤")
+            self.assertEqual(dc_helpers._get_user_badges(mock_bot, accid, cid), "💤")
 
         # Admin user
-        with patch('bot._is_dc_admin', return_value=True), \
-             patch('bot._is_contact_autokick_ignored', return_value=False):
-            self.assertEqual(bot._get_user_badges(mock_bot, accid, cid), "👑 💤")
+        with patch('dc_helpers._is_dc_admin', return_value=True), \
+             patch('dc_helpers._is_contact_autokick_ignored', return_value=False):
+            self.assertEqual(dc_helpers._get_user_badges(mock_bot, accid, cid), "👑 💤")
 
         # Admin + Autokick Ignored + Away
-        with patch('bot._is_dc_admin', return_value=True), \
-             patch('bot._is_contact_autokick_ignored', return_value=True):
-            self.assertEqual(bot._get_user_badges(mock_bot, accid, cid), "👑 ⭐ 💤")
+        with patch('dc_helpers._is_dc_admin', return_value=True), \
+             patch('dc_helpers._is_contact_autokick_ignored', return_value=True):
+            self.assertEqual(dc_helpers._get_user_badges(mock_bot, accid, cid), "👑 ⭐ 💤")
 
     def test_help_command_wording(self):
         """Verify /contact<ID> and /relays descriptions in /help text."""
@@ -1736,8 +1751,8 @@ class TestBouncerBot(unittest.TestCase):
         mock_event.msg.chat_id = 9300
         mock_event.msg.from_id = 10
 
-        with patch('bot._is_dc_admin', return_value=True), patch.object(bot, '_send') as mock_send:
-            bot.help_command(mock_bot, 1, mock_event)
+        with patch('dc_helpers._is_dc_admin', return_value=True), patch.object(dc_helpers, '_send') as mock_send:
+            commands.help_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             help_text = mock_send.call_args[0][3]
             self.assertIn("/contact<ID> — Share contact card", help_text)
@@ -1797,17 +1812,17 @@ class TestBouncerBot(unittest.TestCase):
 
         domain = "broken.server.org"
         database.add_cmping_monitor(domain)
-        bot._cmping_server_status[domain] = False
-        bot._cmping_server_errors[domain] = "Connection timed out"
-        bot._cmping_last_results[(domain, "other.server.org")] = {"latency": 999}
+        state._cmping_server_status[domain] = False
+        state._cmping_server_errors[domain] = "Connection timed out"
+        state._cmping_last_results[(domain, "other.server.org")] = {"latency": 999}
 
-        with patch('bot._is_dc_admin', return_value=True), patch.object(bot, '_send') as mock_send:
-            bot.cmpingdel_command(mock_bot, 1, mock_event)
+        with patch('dc_helpers._is_dc_admin', return_value=True), patch.object(dc_helpers, '_send') as mock_send:
+            cmping_commands.cmpingdel_command(mock_bot, 1, mock_event)
             mock_send.assert_called_once()
             self.assertIn("removed from monitoring", mock_send.call_args[0][3])
-            self.assertNotIn(domain, bot._cmping_server_status)
-            self.assertNotIn(domain, bot._cmping_server_errors)
-            self.assertNotIn((domain, "other.server.org"), bot._cmping_last_results)
+            self.assertNotIn(domain, state._cmping_server_status)
+            self.assertNotIn(domain, state._cmping_server_errors)
+            self.assertNotIn((domain, "other.server.org"), state._cmping_last_results)
 
     def test_database_file_permissions_restricted(self):
         """Verify database file has 0o600 permissions upon initialization."""
@@ -1824,10 +1839,10 @@ class TestBouncerBot(unittest.TestCase):
         # Non-whitelisted paths
         for bad_path in ["/etc/passwd", "/secret.txt", "/static/../../etc/shadow", "/avatar.webp", "/hack.png"]:
             req.path = bad_path
-            res = asyncio.run(bot.handle_icon(req))
+            res = asyncio.run(web.routes.handle_icon(req))
             self.assertEqual(res.status, 404)
 
-            res_bg = asyncio.run(bot.handle_background(req))
+            res_bg = asyncio.run(web.routes.handle_background(req))
             self.assertEqual(res_bg.status, 404)
 
     def test_rss_cdata_breakout_escaped(self):
@@ -1838,7 +1853,7 @@ class TestBouncerBot(unittest.TestCase):
             {"id": 1, "msg_id": 101, "timestamp": time.time(), "text": "Hello world ]]> with CDATA breakout"},
             {"id": 2, "msg_id": 102, "timestamp": time.time() - 60, "text": "Normal post"}
         ]
-        xml_str = bot.get_channel_rss_xml(ch, posts, "https://example.com")
+        xml_str = web.templates.feed.get_channel_rss_xml(ch, posts, "https://example.com")
         self.assertIn("]]]]><![CDATA[>", xml_str)
         # Parse XML to guarantee well-formedness
         root = ET.fromstring(xml_str)
@@ -1850,11 +1865,11 @@ class TestBouncerBot(unittest.TestCase):
         """Verify RSS items have per-post permalink URIs and HTML preview articles have anchor IDs."""
         ch = {"token": "anchortok123", "name": "Anchor Channel", "description": "Desc"}
         posts = [{"id": 1, "msg_id": 777, "timestamp": time.time(), "text": "Anchor post content"}]
-        xml_str = bot.get_channel_rss_xml(ch, posts, "https://example.com")
+        xml_str = web.templates.feed.get_channel_rss_xml(ch, posts, "https://example.com")
         self.assertIn("<link>https://example.com/c/anchortok123#post-777</link>", xml_str)
         self.assertIn('<guid isPermaLink="true">https://example.com/c/anchortok123#post-777</guid>', xml_str)
 
-        html_out = bot.get_channel_preview_html(ch, posts, "https://example.com")
+        html_out = web.templates.channel.get_channel_preview_html(ch, posts, "https://example.com")
         self.assertIn('id="post-777"', html_out)
 
     def test_ap_follow_foreign_inbox_rejected(self):
@@ -1898,7 +1913,7 @@ class TestBouncerBot(unittest.TestCase):
              patch('activitypub.fetch_remote_actor', return_value=foreign_actor_doc), \
              patch('activitypub.deliver_to_inbox') as mock_deliver, \
              patch('activitypub.deliver_backfill_posts') as mock_backfill:
-            res = asyncio.run(bot.handle_ap_inbox(req))
+            res = asyncio.run(web.ap_routes.handle_ap_inbox(req))
             self.assertEqual(res.status, 202)
             # Crucial: deliveries to victim-server.com MUST NOT be called!
             mock_deliver.assert_not_called()
@@ -1911,15 +1926,15 @@ class TestBouncerBot(unittest.TestCase):
         req = MagicMock()
         req.headers = {"Host": "chat.example.org"}
         req.host = "chat.example.org"
-        res = asyncio.run(bot.handle_api_v1_instance(req))
+        res = asyncio.run(web.ap_routes.handle_api_v1_instance(req))
         self.assertEqual(res.status, 200)
         data = json.loads(res.text)
         self.assertEqual(data.get("email"), "admin@deltachat.org")
 
     def test_web_templates_light_mode_and_zero_repaint(self):
         """Verify landing and channel preview HTML templates include light mode and zero repaint styles."""
-        bot.index_page_html_cache = None
-        landing_html = bot.get_landing_page_html()
+        state.index_page_html_cache = None
+        landing_html = web.templates.landing.get_landing_page_html()
         self.assertIn("@media (prefers-color-scheme: light)", landing_html)
         self.assertIn("body::before", landing_html)
         self.assertNotIn("background-attachment: fixed", landing_html)
@@ -1927,7 +1942,7 @@ class TestBouncerBot(unittest.TestCase):
         self.assertIn("--text-muted: #aebac1;", landing_html)
 
         ch = {"token": "themepreview", "name": "Theme Channel", "description": "Desc"}
-        preview_html = bot.get_channel_preview_html(ch, [], "https://example.com")
+        preview_html = web.templates.channel.get_channel_preview_html(ch, [], "https://example.com")
         self.assertIn("@media (prefers-color-scheme: light)", preview_html)
         self.assertIn("body::before", preview_html)
         self.assertNotIn("background-attachment: fixed", preview_html)
@@ -2034,11 +2049,11 @@ class TestPerformanceAndPooling(unittest.TestCase):
             mock_thread_instance = MagicMock()
             mock_thread_cls.return_value = mock_thread_instance
 
-            bot.handle_all_messages(mock_bot, 1, mock_event)
+            handlers.handle_all_messages(mock_bot, 1, mock_event)
 
             mock_thread_cls.assert_called()
             called_targets = [c.kwargs.get('target') for c in mock_thread_cls.call_args_list if 'target' in c.kwargs]
-            self.assertIn(bot._ingest_channel_post, called_targets)
+            self.assertIn(channels._ingest_channel_post, called_targets)
             mock_thread_instance.start.assert_called()
 
     def test_cmping_bounded_thread_pool(self):
@@ -2054,7 +2069,7 @@ class TestPerformanceAndPooling(unittest.TestCase):
             mock_executor.return_value = mock_exec_instance
 
             with patch('concurrent.futures.as_completed', return_value=[]):
-                bot._bg_cmping_worker_inner(MagicMock(), 1, 100, 200, bot_domains, ["target.org"])
+                cmping_commands._bg_cmping_worker_inner(MagicMock(), 1, 100, 200, bot_domains, ["target.org"])
                 mock_executor.assert_called_once_with(max_workers=4)
 
     def test_qr_web_handlers_use_asyncio_to_thread(self):
@@ -2064,14 +2079,14 @@ class TestPerformanceAndPooling(unittest.TestCase):
         mock_web.Response = MagicMock(side_effect=lambda *args, **kwargs: MagicMock(status=200, **kwargs))
         with patch.object(bot, 'web', mock_web), \
              patch('asyncio.to_thread') as mock_to_thread, \
-             patch.object(bot, 'get_bot_invite_link', return_value="https://i.delta.chat/#invite"):
+             patch.object(state, 'get_bot_invite_link', return_value="https://i.delta.chat/#invite"):
             mock_to_thread.return_value = (b"<svg></svg>", "image/svg+xml")
 
             req = MagicMock()
             req.headers = {}
-            res = asyncio.run(bot.handle_qr_svg(req))
+            res = asyncio.run(web.routes.handle_qr_svg(req))
             mock_to_thread.assert_called_once()
-            self.assertEqual(mock_to_thread.call_args[0][0], bot._generate_qr_bytes)
+            self.assertEqual(mock_to_thread.call_args[0][0], web.routes._generate_qr_bytes)
             self.assertEqual(res.status, 200)
 
 

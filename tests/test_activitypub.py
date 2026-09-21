@@ -98,9 +98,17 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import database
 import activitypub
 import bot
+import security
+import state
+import web.ap_routes as pw_ap_routes
+import web.routes as pw_routes
 
-if bot.web is None:
-    bot.web = sys.modules.get('aiohttp.web', MagicMock())
+if security.web is None:
+    security.web = sys.modules.get('aiohttp.web', MagicMock())
+if pw_routes.web is None:
+    pw_routes.web = sys.modules.get('aiohttp.web', MagicMock())
+if pw_ap_routes.web is None:
+    pw_ap_routes.web = sys.modules.get('aiohttp.web', MagicMock())
 
 
 class TestActivityPub(unittest.TestCase):
@@ -108,10 +116,10 @@ class TestActivityPub(unittest.TestCase):
         database.close_db()
         database.DB_PATH = TEST_DB
         database.init_db()
-        bot.CHANNEL_MEDIA_DIR = "test_media_dir"
-        bot.index_page_html_cache = None
-        if os.path.exists(bot.CHANNEL_MEDIA_DIR):
-            shutil.rmtree(bot.CHANNEL_MEDIA_DIR, ignore_errors=True)
+        state.CHANNEL_MEDIA_DIR = "test_media_dir"
+        state.index_page_html_cache = None
+        if os.path.exists(state.CHANNEL_MEDIA_DIR):
+            shutil.rmtree(state.CHANNEL_MEDIA_DIR, ignore_errors=True)
 
     def tearDown(self):
         database.close_db()
@@ -416,7 +424,7 @@ class TestActivityPub(unittest.TestCase):
         req = MagicMock()
         req.query = {"resource": f"acct:{token}@dc.gluek.info"}
         req.headers = {}
-        resp = asyncio.run(bot.handle_webfinger(req))
+        resp = asyncio.run(pw_ap_routes.handle_webfinger(req))
         self.assertEqual(resp.status, 200)
         self.assertEqual(resp.content_type, "application/jrd+json")
         data = json.loads(resp.text)
@@ -426,18 +434,18 @@ class TestActivityPub(unittest.TestCase):
 
         # Missing resource query param
         req.query = {}
-        resp = asyncio.run(bot.handle_webfinger(req))
+        resp = asyncio.run(pw_ap_routes.handle_webfinger(req))
         self.assertEqual(resp.status, 400)
 
         # Unknown user
         req.query = {"resource": "acct:unknownuser@dc.gluek.info"}
-        resp = asyncio.run(bot.handle_webfinger(req))
+        resp = asyncio.run(pw_ap_routes.handle_webfinger(req))
         self.assertEqual(resp.status, 404)
 
         # Soft-deleted channel
         database.remove_catalog_channel(101)
         req.query = {"resource": f"acct:{token}@dc.gluek.info"}
-        resp = asyncio.run(bot.handle_webfinger(req))
+        resp = asyncio.run(pw_ap_routes.handle_webfinger(req))
         self.assertEqual(resp.status, 404)
 
     def test_handle_ap_actor(self):
@@ -448,7 +456,7 @@ class TestActivityPub(unittest.TestCase):
         req = MagicMock()
         req.match_info = {"token": token}
         req.headers = {}
-        resp = asyncio.run(bot.handle_ap_actor(req))
+        resp = asyncio.run(pw_ap_routes.handle_ap_actor(req))
         self.assertEqual(resp.status, 200)
         self.assertEqual(resp.content_type, "application/activity+json")
         actor = json.loads(resp.text)
@@ -466,7 +474,7 @@ class TestActivityPub(unittest.TestCase):
         req_html = MagicMock()
         req_html.match_info = {"token": token}
         req_html.headers = {"Accept": "text/html,application/xhtml+xml"}
-        resp_html = asyncio.run(bot.handle_channel_preview(req_html))
+        resp_html = asyncio.run(pw_routes.handle_channel_preview(req_html))
         self.assertEqual(resp_html.status, 200)
         self.assertEqual(resp_html.content_type, "text/html")
 
@@ -474,7 +482,7 @@ class TestActivityPub(unittest.TestCase):
         req_ap = MagicMock()
         req_ap.match_info = {"token": token}
         req_ap.headers = {"Accept": "application/activity+json, application/ld+json"}
-        resp_ap = asyncio.run(bot.handle_channel_preview(req_ap))
+        resp_ap = asyncio.run(pw_routes.handle_channel_preview(req_ap))
         self.assertEqual(resp_ap.status, 200)
         self.assertEqual(resp_ap.content_type, "application/activity+json")
         data = json.loads(resp_ap.text)
@@ -491,7 +499,7 @@ class TestActivityPub(unittest.TestCase):
         req.match_info = {"token": token}
         req.query = {}
         req.headers = {}
-        resp = asyncio.run(bot.handle_ap_outbox(req))
+        resp = asyncio.run(pw_ap_routes.handle_ap_outbox(req))
         self.assertEqual(resp.status, 200)
         self.assertEqual(resp.content_type, "application/activity+json")
         outbox = json.loads(resp.text)
@@ -505,7 +513,7 @@ class TestActivityPub(unittest.TestCase):
         req_page.match_info = {"token": token}
         req_page.query = {"page": "true"}
         req_page.headers = {}
-        resp_page = asyncio.run(bot.handle_ap_outbox(req_page))
+        resp_page = asyncio.run(pw_ap_routes.handle_ap_outbox(req_page))
         self.assertEqual(resp_page.status, 200)
         page = json.loads(resp_page.text)
         self.assertEqual(page["type"], "OrderedCollectionPage")
@@ -522,7 +530,7 @@ class TestActivityPub(unittest.TestCase):
         req = MagicMock()
         req.match_info = {"token": token}
         req.headers = {}
-        resp = asyncio.run(bot.handle_ap_followers(req))
+        resp = asyncio.run(pw_ap_routes.handle_ap_followers(req))
         self.assertEqual(resp.status, 200)
         data = json.loads(resp.text)
         self.assertEqual(data["type"], "OrderedCollection")
@@ -538,7 +546,7 @@ class TestActivityPub(unittest.TestCase):
         req = MagicMock()
         req.match_info = {"token": token, "msg_id": "777"}
         req.headers = {}
-        resp = asyncio.run(bot.handle_ap_post(req))
+        resp = asyncio.run(pw_ap_routes.handle_ap_post(req))
         self.assertEqual(resp.status, 200)
         self.assertEqual(resp.content_type, "application/activity+json")
         note = json.loads(resp.text)
@@ -547,7 +555,7 @@ class TestActivityPub(unittest.TestCase):
 
         # Non-existing post
         req.match_info = {"token": token, "msg_id": "999"}
-        resp = asyncio.run(bot.handle_ap_post(req))
+        resp = asyncio.run(pw_ap_routes.handle_ap_post(req))
         self.assertEqual(resp.status, 404)
 
     def test_nodeinfo_endpoints(self):
@@ -556,13 +564,13 @@ class TestActivityPub(unittest.TestCase):
         req.headers = {}
 
         # Discovery
-        resp_disc = asyncio.run(bot.handle_nodeinfo_discovery(req))
+        resp_disc = asyncio.run(pw_ap_routes.handle_nodeinfo_discovery(req))
         self.assertEqual(resp_disc.status, 200)
         data = json.loads(resp_disc.text)
         self.assertEqual(data["links"][0]["href"], "https://dc.gluek.info/nodeinfo/2.0")
 
         # Nodeinfo 2.0
-        resp_ni = asyncio.run(bot.handle_nodeinfo(req))
+        resp_ni = asyncio.run(pw_ap_routes.handle_nodeinfo(req))
         self.assertEqual(resp_ni.status, 200)
         ni_data = json.loads(resp_ni.text)
         self.assertEqual(ni_data["version"], "2.0")
@@ -576,7 +584,7 @@ class TestActivityPub(unittest.TestCase):
         req = MagicMock()
         req.match_info = {"token": token}
         req.headers = {}
-        resp = asyncio.run(bot.handle_ap_following(req))
+        resp = asyncio.run(pw_ap_routes.handle_ap_following(req))
         self.assertEqual(resp.status, 200)
         data = json.loads(resp.text)
         self.assertEqual(data["type"], "OrderedCollection")
@@ -646,7 +654,7 @@ class TestActivityPub(unittest.TestCase):
                 "endpoints": {"sharedInbox": "https://remote.social/inbox"}
             }
 
-            resp = asyncio.run(bot.handle_ap_inbox(req_direct))
+            resp = asyncio.run(pw_ap_routes.handle_ap_inbox(req_direct))
             self.assertEqual(resp.status, 202)
             followers = database.get_ap_followers(token)
             self.assertEqual(len(followers), 1)
@@ -676,7 +684,7 @@ class TestActivityPub(unittest.TestCase):
                 "endpoints": {"sharedInbox": "https://remote.social/inbox"}
             }
 
-            resp = asyncio.run(bot.handle_ap_inbox(req_shared))
+            resp = asyncio.run(pw_ap_routes.handle_ap_inbox(req_shared))
             self.assertEqual(resp.status, 202)
             followers = database.get_ap_followers(token)
             self.assertEqual(len(followers), 1)
@@ -702,13 +710,13 @@ class TestActivityPub(unittest.TestCase):
 
         with patch("activitypub.resolve_public_key", new_callable=AsyncMock) as mock_resolve:
             mock_resolve.return_value = (remote_pub, {"id": remote_actor_id})
-            resp = asyncio.run(bot.handle_ap_inbox(req_undo))
+            resp = asyncio.run(pw_ap_routes.handle_ap_inbox(req_undo))
             self.assertEqual(resp.status, 202)
             self.assertEqual(database.get_ap_followers_count(token), 0)
 
     def test_robots_txt_gotosocial(self):
         req = MagicMock()
-        resp = asyncio.run(bot.handle_robots_txt(req))
+        resp = asyncio.run(pw_routes.handle_robots_txt(req))
         self.assertEqual(resp.status, 200)
         self.assertIn("User-agent: GPTBot", resp.text)
         self.assertIn("User-agent: ClaudeBot", resp.text)
@@ -732,11 +740,11 @@ class TestActivityPub(unittest.TestCase):
         self.assertEqual(note["attributedTo"], f"https://dc.gluek.info/c/{token}")
         self.assertNotIn("//c/", note["attributedTo"])
 
-        # 3. bot._get_base_url strips trailing slashes and whitespace
+        # 3. security._get_base_url strips trailing slashes and whitespace
         database.set_config("base_url", "  https://dc.gluek.info///  ")
         req = MagicMock()
         req.headers = {}
-        self.assertEqual(bot._get_base_url(req), "https://dc.gluek.info")
+        self.assertEqual(security._get_base_url(req), "https://dc.gluek.info")
 
     def test_actor_header_banner_image(self):
         token = "bannertok123"
@@ -790,7 +798,7 @@ class TestActivityPub(unittest.TestCase):
         database.set_config("base_url", "https://dc.gluek.info")
         req = MagicMock()
         req.headers = {}
-        resp = asyncio.run(bot.handle_api_v1_instance(req))
+        resp = asyncio.run(pw_ap_routes.handle_api_v1_instance(req))
         self.assertEqual(resp.status, 200)
         data = json.loads(resp.text)
         self.assertEqual(data["uri"], "dc.gluek.info")
@@ -930,7 +938,7 @@ class TestActivityPub(unittest.TestCase):
 
         with patch("activitypub.resolve_public_key", new_callable=AsyncMock) as mock_resolve:
             mock_resolve.return_value = (None, None)
-            resp = asyncio.run(bot.handle_ap_inbox(req))
+            resp = asyncio.run(pw_ap_routes.handle_ap_inbox(req))
             self.assertEqual(resp.status, 202)
             self.assertEqual(database.get_ap_followers_count(token), 0)
 
