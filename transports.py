@@ -6,6 +6,7 @@ Note: imports state.py as `bot_state` (not `state`) because on_msg_failed's
 own local failover-tracking variable is named `state`, which would shadow a
 bare `state` module reference within that function.
 """
+import threading
 import time
 
 from deltachat2 import events

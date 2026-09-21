@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.15.1] - 2026-09-21
+
+### Fixes (post-modularization hotfixes)
+- Fixed `NameError: name 'events' is not defined` crashing every incoming message: `bot.py`'s `custom_process_message` fallback branch used `events.NewMessage` without importing `events`.
+- Fixed `activitypub` not being imported in `web/routes.py`, breaking ActivityPub delivery worker initialization at web-server startup (`Could not initialize ActivityPub delivery worker: name 'activitypub' is not defined`).
+- Fixed `threading` not being imported in `transports.py`, which would crash both the resilient-send background thread spawn and the MSG_FAILED failover's scheduled resend timer.
+- Added the bot version to `/help` output (was missing, unlike the other bots in this repo).
+- These were all latent gaps from the v2.15.0 module split (each name used to be available via the old monolith's top-level imports); a custom scope-aware AST checker was added to the review process and confirmed no further instances remain across all 22 modules.
+
 ## [2.15.0] - 2026-09-21
 
 ### Internal Refactor: Modularization

@@ -17,6 +17,7 @@ try:
 except ImportError:
     web = None
 
+import activitypub
 import config
 import database
 import security
