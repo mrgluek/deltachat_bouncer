@@ -571,6 +571,25 @@ def search_command(bot, accid, event, skip_cooldown: bool = False):
         else:
             dc_helpers._send(bot, accid, msg.chat_id, f"🔍 No members matching {queries_str} found in this group.")
 
+HELP_PRIVATE_NOTE = "\n\n💬 Sent privately because you asked in a group. Use /help@bouncer there to show it to everyone."
+
+
+def _get_help_chat_id(bot, accid, msg):
+    """Plain /help in a group is answered privately to the sender so several bots
+    don't flood the group; /help@<bot> is still answered in the group itself."""
+    cmd = msg.text.split(maxsplit=1)[0] if msg.text else ""
+    if "@" in cmd:
+        return msg.chat_id
+    try:
+        chat = bot.rpc.get_basic_chat_info(accid, msg.chat_id)
+        chat_type = chat.get('chat_type', 'Single') if isinstance(chat, dict) else getattr(chat, 'chat_type', 'Single')
+    except Exception:
+        chat_type = 'Single'
+    if str(chat_type) == "Single":
+        return msg.chat_id
+    return bot.rpc.create_chat_by_contact_id(accid, msg.from_id)
+
+
 @config.dc_cli.on(events.NewMessage(command="/help"))
 def help_command(bot, accid, event):
     msg = event.msg
@@ -647,8 +666,11 @@ def help_command(bot, accid, event):
         help_text += "/cmpingdel <server> — Remove server from monitoring\n"
         help_text += "/cmreport <on/off> — Toggle monitoring alerts in this chat"
 
-        
-    dc_helpers._send(bot, accid, msg.chat_id, help_text)
+
+    chat_id = _get_help_chat_id(bot, accid, msg)
+    if chat_id != msg.chat_id:
+        help_text += HELP_PRIVATE_NOTE
+    dc_helpers._send(bot, accid, chat_id, help_text)
 
 @config.dc_cli.on(events.NewMessage(command="/donate"))
 def donate_command(bot, accid, event):
