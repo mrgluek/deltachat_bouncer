@@ -1176,14 +1176,22 @@ class TestBouncerBot(unittest.TestCase):
             self.assertNotIn(70, c_ids)
             self.assertEqual(len(kick_candidates), 0)
 
-    def test_resilient_lock_defined_and_usable(self):
-        """Verify resilient_lock exists as a threading.Lock and functions properly."""
-        self.assertTrue(hasattr(bot, 'resilient_lock'))
-        import threading
-        # Ensure it behaves as a lock
-        acquired = state.resilient_lock.acquire(timeout=1.0)
-        self.assertTrue(acquired)
-        state.resilient_lock.release()
+    def test_deprecated_relay_commands(self):
+        """/setprimary and /resilient only reply with a deprecation note."""
+        import transports
+        mock_bot = MagicMock()
+        mock_event = MagicMock()
+        mock_event.msg.chat_id = 9020
+        mock_event.msg.from_id = 10
+        with patch('dc_helpers._is_dc_admin', return_value=True), patch.object(dc_helpers, '_send') as mock_send:
+            for handler, cmd in ((transports.resilient_command, "/resilient"), (transports.setprimary_command, "/setprimary")):
+                mock_event.payload = "on" if cmd == "/resilient" else "relay@example.org"
+                handler(mock_bot, 1, mock_event)
+                text = mock_send.call_args[0][3]
+                self.assertIn(f"{cmd} is deprecated and disabled", text)
+                self.assertIn("/rmtransport", text)
+        mock_bot.rpc.set_config.assert_not_called()
+        self.assertFalse(hasattr(transports, "on_msg_failed"))
 
     def test_cmping_domain_validation(self):
         """Verify domain validation rejects invalid strings and potential command injections."""

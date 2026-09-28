@@ -199,7 +199,6 @@ from state import (
     _cmping_server_status,
     _domain_locks,
     _domain_locks_lock,
-    _message_failover_attempts,
     _pending_delayed_commands,
     _pending_delayed_lock,
     _qr_cache,
@@ -212,7 +211,6 @@ from state import (
     dc_bot_instance,
     get_bot_invite_link,
     index_page_html_cache,
-    resilient_lock,
 )
 from stickers import (
     _bg_sticker_worker,
@@ -224,9 +222,7 @@ from stickers import (
     stickernobg_command,
 )
 from transports import (
-    _setup_resilient_mode,
     addtransport_command,
-    on_msg_failed,
     resilient_command,
     rmtransport_command,
     setprimary_command,
@@ -312,7 +308,6 @@ from web.templates.theme import (
 def on_init(bot, args):
     bot.logger.info(f"Initializing Bouncer Bot v{config.VERSION}...")
     state.dc_bot_instance = bot
-    transports._setup_resilient_mode(bot)
     
     config.log_version_info(bot)
     

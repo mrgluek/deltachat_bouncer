@@ -648,8 +648,6 @@ def help_command(bot, accid, event):
         help_text += "/transports — Show configured mail relays & stats\n"
         help_text += "/addtransport — Add a backup mail relay\n"
         help_text += "/rmtransport <addr> — Remove a mail relay\n"
-        help_text += "/setprimary <addr> — Switch the primary mail relay\n"
-        help_text += "/resilient — Toggle resilient sending mode (all relays)\n"
         help_text += "/autokick [on/off/days/ignore/unignore] — Auto-kick inactive members with warnings & fingerprint ignore\n"
         help_text += "/kick <user_id> — Remove a member from the current group\n"
         help_text += "/chatadd [desc] — Add current chat to catalog\n"

@@ -22,7 +22,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - 🏓 **ChatMail Ping (`/cmping`):** Ping mail relays (transports) to/from specified target servers using the `cmping` utility. Features real-time reaction-based progress tracking (`⏳`, `☑️`, `❌`) and runs asynchronously.
 - 📡 **Server Connectivity Monitoring:** Automatic periodic monitoring of server connectivity using a round-robin algorithm. Employs an **incident-based alerting system** with in-place dynamic message editing (`🚨 Ongoing` → `⚠️ Ongoing (Partial Recovery)` → `✅ Resolved`) to prevent notification noise, along with accurate root-cause fault isolation. Configurable interval via `CMPING_MONITOR_INTERVAL` env var (default: 30 min).
 - 👤 **Contact Sharing:** Reports include `/contact<ID>` links to quickly share a contact card for any user.
-- 🔄 **Automatic Transport Failover:** Supports multiple mail servers. The bot automatically detects message delivery failures via raw core events, switches `configured_addr` to a backup transport in round-robin fashion, and schedules a resend of the message using exponential backoff (5s, 10s, 20s, 40s...) via an asynchronous timer thread (up to a maximum of 10 attempts per message) to prevent loop propagation and CPU spikes.
+- 🔄 **Multiple Mail Relays:** Supports multiple mail servers. Relay selection and failover are handled by the Delta Chat core (2.61+), which sends via the newest relay first and falls back to the next one if a relay is unreachable.
 - ⏳ **21-Day Grace Period:** The bot tracks group activity in the background and requires 21 days of observation before reporting "never seen" users.
 - 🛡️ **Secure Administration & Rate Limiting:** Claim ownership with `/initadmin`. Admins bypass rate limits and have exclusive control over bot settings. All public web endpoints are rate-limited per client IP (with trusted reverse-proxy X-Forwarded-For extraction), returning HTTP 429 on excess. QR code cache is bounded at 200 entries (FIFO eviction).
 - 📱 **QR Code Link:** Generates a SecureJoin QR code in the logs for easy device linking.
@@ -99,8 +99,6 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/transports` — Show configured mail relays & stats (Admin only).
 - `/addtransport` — Add a backup mail relay (Admin only, private 1-on-1 chat only for credential security).
 - `/rmtransport <addr>` — Remove a mail relay (Admin only).
-- `/setprimary <addr>` — Switch the primary mail relay (Admin only).
-- `/resilient` — Toggle resilient sending mode across all relays (Admin only).
 - `/cmpingadd <server>` — Add a server to connectivity monitoring rotation (Admin only).
 - `/cmpingdel <server>` — Remove a server from monitoring (Admin only).
 - `/cmpinglist` — Show all monitored servers, pair count, and rotation info.
@@ -109,6 +107,8 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/cmpingevents [id]` — Show CMPing incident log or detailed incident breakdown (aliases: `/cmpingincidents`, `/cmevents`).
 - `/cmpinghistory [server]` — Show downtime records and outage durations for monitored servers (alias: `/cmhistory`).
 - `/cmreport <on/off>` — Toggle monitoring alerts for current chat (Admin only).
+
+Relay selection and failover are handled by the Delta Chat core (2.61+): it sends via the newest relay first and falls back to the next one if a relay is unreachable. `/transports` lists relays in that order. The former `/setprimary` and `/resilient` commands are deprecated and only reply with this explanation.
 
 ### Target-Specific Commands in Group Chats
 

@@ -31,7 +31,6 @@ _rembg_global_lock = threading.Lock()
 _domain_locks: dict[str, threading.Lock] = {}
 _domain_locks_lock = threading.Lock()
 _cmping_global_lock = threading.Lock()
-resilient_lock = threading.Lock()
 
 # Persistent rembg / u2net models storage
 if os.getenv("DC_DB_DIR"):
@@ -75,9 +74,6 @@ def _set_cmping_server_status(server: str, is_healthy: bool, error: str | None =
 # Delayed-command debouncing (e.g. /bounce retried before its cooldown queue fires)
 _pending_delayed_commands: dict[str, tuple[threading.Timer, list[int]]] = {}
 _pending_delayed_lock = threading.Lock()
-
-# Failover retry bookkeeping for MSG_FAILED events
-_message_failover_attempts = {}
 
 # Channel web-preview caches
 _channel_preview_cache: dict[str, tuple[float, str, str]] = {}  # key -> (expires_at, etag, html)
