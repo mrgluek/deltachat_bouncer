@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.17.1] - 2026-10-05
+
+### Fixed
+- **`/cmcall` TURN Test Could Skip TURN**: Updated `cmcall` to 0.1.1. Its relay-only ICE mode left out host candidates but still gathered STUN (server-reflexive) ones, so with a relay that also announces a STUN server the test could connect via STUN and report a TURN relay as working without using it. Now only TURN relay candidates are used. The echo call service is unaffected.
+
 ## [2.17.0] - 2026-10-05
 
 ### Added
