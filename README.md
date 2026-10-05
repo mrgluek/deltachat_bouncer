@@ -20,13 +20,15 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - 📬 **Relay Check (`/relays`):** Scan for group members using public Russian mail providers (Yandex, Mail.ru, etc.).
 - 🏆 **Activity Ranking (`/top`):** Show the 10 most active members in the last 24 hours (independent 60s cooldown).
 - 🏓 **ChatMail Ping (`/cmping`):** Ping mail relays (transports) to/from specified target servers using the `cmping` utility. Features real-time reaction-based progress tracking (`⏳`, `☑️`, `❌`) and runs asynchronously.
+- 📞 **Echo Calls:** Call the bot from any Delta Chat app to test calls: it answers, plays a short two-tone greeting and echoes your voice back. After you hang up it sends a `📞 Echo call report` with the call duration, the media path (direct / peer-to-peer via STUN / TURN relay), how much of your voice it heard, packet loss, jitter and round-trip time. The WebRTC side is [`cmcall`](https://github.com/mrgluek/cmcall)'s `EchoPeer` (aiortc) running on a dedicated event-loop thread, so bot work never stalls call audio. Calls are capped (`CALL_ECHO_MAX_SECONDS`, default 300) and limited in parallel (`CALL_ECHO_MAX_CONCURRENT`, default 2; further callers get a "line busy" message). See [Echo Call Settings](#echo-call-settings).
+- 📲 **Call Test Between Relays (`/cmcall`):** Runs the `cmcall` utility: a test profile on the first relay calls a profile on the second one, which echoes. Reports signaling delivery in both directions, the TURN servers used (media is forced through the relays' TURN), ICE connect time, echoed-audio round trip and RTP loss/jitter.
 - 📡 **Server Connectivity Monitoring:** Automatic periodic monitoring of server connectivity using a round-robin algorithm. Employs an **incident-based alerting system** with in-place dynamic message editing (`🚨 Ongoing` → `⚠️ Ongoing (Partial Recovery)` → `✅ Resolved`) to prevent notification noise, along with accurate root-cause fault isolation. Configurable interval via `CMPING_MONITOR_INTERVAL` env var (default: 30 min).
 - 👤 **Contact Sharing:** Reports include `/contact<ID>` links to quickly share a contact card for any user.
 - 🔄 **Multiple Mail Relays:** Supports multiple mail servers. Relay selection and failover are handled by the Delta Chat core (2.61+), which sends via the newest relay first and falls back to the next one if a relay is unreachable.
 - ⏳ **21-Day Grace Period:** The bot tracks group activity in the background and requires 21 days of observation before reporting "never seen" users.
 - 🛡️ **Secure Administration & Rate Limiting:** Claim ownership with `/initadmin`. Admins bypass rate limits and have exclusive control over bot settings. All public web endpoints are rate-limited per client IP (with trusted reverse-proxy X-Forwarded-For extraction), returning HTTP 429 on excess. QR code cache is bounded at 200 entries (FIFO eviction).
 - 📱 **QR Code Link:** Generates a SecureJoin QR code in the logs for easy device linking.
-- 📋 **Startup Version Check:** Automatically checks and logs versions of Bouncer Bot, DeltaChat Core, RPC Client, `deltabot-cli`, and `cmping` at startup.
+- 📋 **Startup Version Check:** Automatically checks and logs versions of Bouncer Bot, DeltaChat Core, RPC Client, `deltabot-cli`, `cmping` and `cmcall` at startup.
 - 🦠 **VirusTotal Inspection (`/virus`):** Inspect links or attached files for malware, phishing, and security threats using the VirusTotal API v3. Supports direct URL scans (`/virus <url>`), replies to messages containing links, or replies to messages with attached files. Employs a global FIFO queue and rate limiter (1 check every 15 seconds) to strictly adhere to VirusTotal free tier limits, with live in-place message updates as scans complete.
 - 🎨 **Sticker Creation (`/sticker`, `/stickernobg`):** Convert any image into a standard WebP sticker compatible with Delta Chat, Telegram, and Signal with proportional 512px dimension scaling and automatic EXIF orientation transpose. Triggered either by replying to an image with `/sticker` or `/stickernobg`, or by sending an image with the command in its caption. `/sticker` preserves the original image and background (5s cooldown), while `/stickernobg` (or `/sticker nobg`) uses `rembg` with the lightweight `u2netp` model (only 4.7 MB) and a 15s cooldown with a global concurrency lock. Images are automatically pre-scaled down to 512px *before* AI segmentation to minimize CPU and memory usage, and background removal runs in an isolated subprocess (`sticker_tool.py`) with disabled memory arenas, ensuring 100% of memory is immediately reclaimed by the OS and the main bot daemon remains at ~75–80 MB. Background removal can be disabled via `ENABLE_REMBG=false` or configured with other models via `REMBG_MODEL`. Downloaded models are cached persistently in `./data/u2net` so they are never re-downloaded across restarts or updates.
 - ⚡ **High-Performance Architecture & Read Pool:** Optimized SQLite read connection pool (`_ReaderConnectionPool`) supporting concurrent non-blocking reads in WAL mode, eliminating N+1 connection overhead and reducing latency by >12x. Intensive I/O and media processing (VirusTotal inspection, channel post media ingestion, Pillow WebP image optimization, and QR code generation) are fully offloaded to asynchronous background worker threads (`asyncio.to_thread` and dedicated daemon workers), keeping the Delta Chat event loop completely non-blocking.
@@ -74,6 +76,9 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/dchannels` — Show the catalog of registered Delta Chat channels with invite links and web preview URLs.
 - `/dchannel<ID>` — Request the invite link and web preview URL for a channel.
 - `/cmping <server1> ...` — Ping mail relays to/from specified target servers (15s cooldown, domain-validated).
+- `/cmcall <server1> [server2]` — Test a Delta Chat call from server1 to server2 (or within one server): signaling, TURN, audio echo and RTP statistics (60s cooldown, one test at a time).
+- `/callstats` — Your recent echo calls to this bot; admins also get 24h/7d totals and the last 10 calls.
+- 📞 **Call the bot** — It answers and echoes your audio, then sends call statistics into the chat.
 - `/virus <url>` — Scan a URL, or reply to a message containing a link or attached file with `/virus` to inspect with VirusTotal (15s global rate limit).
 - `/sticker` — Convert replied or attached image to a WebP sticker (preserves original image/background; 5s cooldown).
 - `/stickernobg` — Convert replied or attached image to a WebP sticker with background removed (15s cooldown, serialized).
@@ -118,6 +123,22 @@ In group chats where multiple bots are present, you can address this bot specifi
 - `/stats@boun` or `/stats@stew`
 
 A plain `/help` sent in a group chat is answered in a private 1:1 chat with the sender, so several bots don't flood the group with help texts. Use `/help@boun` to show the help in the group itself.
+
+## Echo Call Settings
+
+Environment variables (all optional):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CALL_ECHO` | `1` | Set to `0` to stop answering calls. |
+| `CALL_ECHO_WHO` | `everybody` | `everybody` lets any non-blocked contact call (also contact requests); `contacts` only accepted contacts. Applied to the core's `who_can_call_me` at start. |
+| `CALL_ECHO_DELAY` | `0` | Seconds of playback delay. `0` is a live echo (like Asterisk's `Echo()`); e.g. `1.5` lets you finish a sentence before hearing it. |
+| `CALL_ECHO_MAX_SECONDS` | `300` | The bot hangs up after this many seconds. |
+| `CALL_ECHO_MAX_CONCURRENT` | `2` | Parallel echo calls; extra callers are declined with a "line busy" message. |
+
+Call media uses the TURN server the bot's relay announces (Delta Chat core's `ice_servers`), so the container needs no extra ports. `cmcall` test profiles for `/cmcall` are cached in `./data/cmcall_cache` (mounted to `/root/.cache/cmcall`).
+
+To test the echo service end to end from the command line: `cmcall <your relay> --to '<bot invite link>'` calls the bot, probes the echo and prints the bot's report.
 
 ## Admin Management
 
@@ -188,6 +209,7 @@ As of v2.15.0, the bot logic is split into focused modules instead of one monoli
 - `state.py` — mutable runtime state: locks, caches, the live bot handle. Other modules always read/write it as `state.<name>`.
 - `dc_helpers.py` — generic Delta Chat RPC helpers (admin/fingerprint checks, `_send`/`_react`, the delayed-command debouncer, message-attachment extraction).
 - `formatting.py` / `security.py` — Delta Chat markdown → HTML rendering; web-layer rate limiting and safe host/URL resolution.
+- `calls.py` — echo call service (`EchoCallManager`, `IncomingCall`/`CallEnded` raw-event hooks) and the `/cmcall` / `/callstats` commands.
 - `moderation.py`, `transports.py`, `cmping.py` + `cmping_commands.py`, `channels.py`, `virustotal.py`, `stickers.py` — one module per subsystem, each owning its background workers and `/command` handlers.
 - `commands.py` / `handlers.py` — the remaining general commands (`/help`, `/bounce`, `/search`, …) and the global Delta Chat event handlers (system messages, the catch-all `NewMessage` dispatcher).
 - `web/` — the aiohttp channel-preview + ActivityPub server: `web/routes.py`, `web/ap_routes.py`, and `web/templates/` (landing page, channel preview, RSS feed, tombstone/404, shared theme snippets).

@@ -550,6 +550,26 @@ def init_db():
             )
         ''')
 
+        # Echo call service log (one row per answered call)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS call_echo_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                contact_id INTEGER,
+                chat_id INTEGER,
+                started_at REAL,
+                duration_s REAL,
+                connected INTEGER,
+                path TEXT,
+                loss_pct REAL,
+                rtt_ms REAL,
+                jitter_ms REAL,
+                voice_s REAL,
+                end_reason TEXT,
+                error TEXT
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_call_echo_started ON call_echo_log(started_at)')
+
         # Additional query performance indexes
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_autokick_warnings_chat ON autokick_warnings(chat_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_pending_requests_chat ON pending_requests(chat_id, approved)')
@@ -1787,3 +1807,72 @@ def delete_ap_followers_for_channel(actor_token: str) -> int:
         return cursor.rowcount
 
 init_db()
+
+
+# --- Echo call log ---
+
+_CALL_ECHO_COLUMNS = (
+    "contact_id", "chat_id", "started_at", "duration_s", "connected", "path",
+    "loss_pct", "rtt_ms", "jitter_ms", "voice_s", "end_reason", "error",
+)
+CALL_ECHO_LOG_KEEP = 1000
+
+
+def add_call_echo_log(contact_id, chat_id, started_at, duration_s, connected, path,
+                      loss_pct, rtt_ms, jitter_ms, voice_s, end_reason, error):
+    """Record one answered echo call and keep only the newest CALL_ECHO_LOG_KEEP rows."""
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"INSERT INTO call_echo_log ({', '.join(_CALL_ECHO_COLUMNS)}) "
+            f"VALUES ({', '.join('?' * len(_CALL_ECHO_COLUMNS))})",
+            (contact_id, chat_id, started_at, duration_s, 1 if connected else 0, path,
+             loss_pct, rtt_ms, jitter_ms, voice_s, end_reason, error),
+        )
+        cursor.execute(
+            "DELETE FROM call_echo_log WHERE id NOT IN "
+            "(SELECT id FROM call_echo_log ORDER BY id DESC LIMIT ?)",
+            (CALL_ECHO_LOG_KEEP,),
+        )
+
+
+def get_recent_call_echo_logs(limit: int = 10, contact_id: int | None = None) -> list[dict]:
+    """Newest echo calls first, optionally only those of one contact."""
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        query = f"SELECT {', '.join(_CALL_ECHO_COLUMNS)} FROM call_echo_log"
+        params: tuple = ()
+        if contact_id is not None:
+            query += " WHERE contact_id = ?"
+            params = (contact_id,)
+        query += " ORDER BY started_at DESC, id DESC LIMIT ?"
+        cursor.execute(query, params + (limit,))
+        rows = [dict(zip(_CALL_ECHO_COLUMNS, r)) for r in cursor.fetchall()]
+    for r in rows:
+        r["connected"] = bool(r["connected"])
+    return rows
+
+
+def get_call_echo_aggregate(since: float) -> dict:
+    """Totals for echo calls started after `since`: counts, averages, path mix."""
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*), SUM(connected), AVG(CASE WHEN connected THEN loss_pct END), "
+            "AVG(CASE WHEN connected THEN rtt_ms END) FROM call_echo_log WHERE started_at >= ?",
+            (since,),
+        )
+        calls, connected, avg_loss, avg_rtt = cursor.fetchone()
+        cursor.execute(
+            "SELECT path, COUNT(*) FROM call_echo_log WHERE started_at >= ? AND connected = 1 "
+            "GROUP BY path ORDER BY COUNT(*) DESC",
+            (since,),
+        )
+        paths = {p or "?": n for p, n in cursor.fetchall()}
+    return {
+        "calls": calls or 0,
+        "connected": connected or 0,
+        "avg_loss_pct": avg_loss,
+        "avg_rtt_ms": avg_rtt,
+        "paths": paths,
+    }

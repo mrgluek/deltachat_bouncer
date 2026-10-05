@@ -18,6 +18,7 @@ import threading
 import qrcode
 
 import activitypub
+import calls
 import channels
 import cmping
 import cmping_commands
@@ -596,6 +597,8 @@ def on_start(bot, args):
 
     t2 = threading.Thread(target=cmping._cmping_monitor_loop, args=(bot, accid), daemon=True)
     t2.start()
+
+    calls.setup_echo_calls(bot, accid)
 
     t_web = threading.Thread(target=web.routes.start_web_server_thread, daemon=True)
     t_web.start()

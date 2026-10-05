@@ -627,11 +627,14 @@ def help_command(bot, accid, event):
         f"/cmpingevents [id] — Show CMPing incident log or incident details.\n"
         f"/cmpinghistory [server] — Show downtime history for monitored servers.\n"
         f"/cmping <server1> ... — Ping relays to/from specified servers.\n"
+        f"/cmcall <server1> [server2] — Test a Delta Chat call between relays.\n"
+        f"/callstats — Your echo call results.\n"
+        f"📞 Call me — I answer, echo your voice back and send call statistics.\n"
         f"/virus <url> — Scan URL or replied file/link with VirusTotal.\n"
         f"/sticker — Convert replied or attached image to a WebP sticker.\n"
         f"/stickernobg — Convert image to a sticker with background removed.\n\n"
         f"/donate — Support development ❤️\n\n"
-        f"💡 _Commands have a 1-minute cooldown per group (15s for cmping/slap/stickernobg, 10s for search, 5s for sticker; admins are exempt)._\n\n"
+        f"💡 _Commands have a 1-minute cooldown per group (15s for cmping/slap/stickernobg, 60s for cmcall, 10s for search, 5s for sticker; admins are exempt)._\n\n"
         f"🤖 **Source:** Run your own bot: https://git.gluek.info/gluek/deltachat_bouncer"
     )
     

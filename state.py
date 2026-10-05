@@ -31,6 +31,11 @@ _rembg_global_lock = threading.Lock()
 _domain_locks: dict[str, threading.Lock] = {}
 _domain_locks_lock = threading.Lock()
 _cmping_global_lock = threading.Lock()
+_chat_cmcall_anti_spam: dict[int, float] = {}
+_cmcall_global_lock = threading.Lock()
+
+# Echo call service (calls.EchoCallManager), set in on_start when enabled
+echo_call_manager = None
 
 # Persistent rembg / u2net models storage
 if os.getenv("DC_DB_DIR"):

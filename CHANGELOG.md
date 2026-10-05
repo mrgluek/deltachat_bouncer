@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.17.0] - 2026-10-05
+
+### Added
+- **Echo Calls**: The bot answers Delta Chat calls, plays a short greeting and echoes the caller's audio back. After the hangup it sends a `📞 Echo call report` with duration, media path (direct / STUN / TURN relay), detected voice, packet loss, jitter and RTCP round-trip time, or the reason media could not connect (offered ICE candidates included). Built on `cmcall.rtc.EchoPeer` (aiortc) on a dedicated event-loop thread. Configurable via `CALL_ECHO`, `CALL_ECHO_WHO`, `CALL_ECHO_DELAY`, `CALL_ECHO_MAX_SECONDS`, `CALL_ECHO_MAX_CONCURRENT`; the bot sets the core's `who_can_call_me` accordingly at start.
+- **`/cmcall <server1> [server2]`**: Call test between relays via the new `cmcall` utility (signaling delivery both ways, TURN servers, ICE connect time, echoed-audio RTT, RTP loss/jitter). 60s cooldown, one test at a time.
+- **`/callstats`**: Recent echo calls of the sender; admins also get 24h/7d totals, path mix and the last 10 calls. Calls are logged in the new `call_echo_log` table (newest 1000 kept).
+- **Startup Version Check** now also logs the `cmcall` version.
+
+### Changed
+- **Dependencies**: `requirements.txt` adds `aiortc>=1.9.0` and `cmcall` (git). `docker-compose.yml` mounts `./data/cmcall_cache` for cmcall's test profiles and passes the `CALL_ECHO_*` variables.
+
 ## [2.16.0] - 2026-09-28
 
 ### Removed

@@ -13,6 +13,7 @@ services:
       - ./data:/app/data
       - ./data/bouncer:/root/.config/bouncer
       - ./data/cmping_cache:/root/.cache/cmping
+      - ./data/cmcall_cache:/root/.cache/cmcall
     ports:
       - "127.0.0.1:8080:8080"
     environment:
@@ -25,6 +26,11 @@ services:
       - STATUS_TEXT
       - AVATAR_PATH
       - CMPING_MONITOR_INTERVAL
+      - CALL_ECHO
+      - CALL_ECHO_WHO
+      - CALL_ECHO_DELAY
+      - CALL_ECHO_MAX_SECONDS
+      - CALL_ECHO_MAX_CONCURRENT
       - VIRUSTOTAL_API_KEY
       - U2NET_HOME=/app/data/u2net
       - REMBG_HOME=/app/data/u2net

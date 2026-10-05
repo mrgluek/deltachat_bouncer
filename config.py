@@ -34,7 +34,7 @@ for _ext, _mt in (
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.16.0"
+VERSION = "2.17.0"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -56,6 +56,7 @@ def log_version_info(bot):
         rpc_client_ver = get_pkg_ver("deltachat-rpc-client") or get_pkg_ver("deltachat2") or "unknown"
         cli_ver = get_pkg_ver("deltabot-cli") or "unknown"
         cmping_ver = get_pkg_ver("cmping") or "unknown"
+        cmcall_ver = get_pkg_ver("cmcall") or "unknown"
 
         core_ver = "unknown"
         try:
@@ -70,7 +71,8 @@ def log_version_info(bot):
         bot.logger.info(f"=== Bouncer Bot v{VERSION} Startup Version Check ===")
         bot.logger.info(
             f"Bouncer Bot: {VERSION} | DeltaChat Core: {core_ver} | "
-            f"RPC Client: {rpc_client_ver} | deltabot-cli: {cli_ver} | cmping: {cmping_ver}"
+            f"RPC Client: {rpc_client_ver} | deltabot-cli: {cli_ver} | cmping: {cmping_ver} | "
+            f"cmcall: {cmcall_ver}"
         )
     except Exception as e:
         bot.logger.warning(f"Failed to check versions on startup: {e}")
@@ -119,6 +121,20 @@ CMPING_COOLDOWN_SECONDS = 15   # 15 seconds for /cmping command
 SLAP_COOLDOWN_SECONDS = 15     # 15 seconds for /slap command
 STICKER_COOLDOWN_SECONDS = 5   # 5 seconds for /sticker commands
 STICKER_NOBG_COOLDOWN_SECONDS = 15 # 15 seconds for /stickernobg commands
+CMCALL_COOLDOWN_SECONDS = 60   # 60 seconds for /cmcall (a call test takes ~30-60s)
+
+
+def _env_flag(name: str, default: str) -> bool:
+    return os.environ.get(name, default).strip().lower() not in ("0", "false", "no", "off", "")
+
+
+# Echo calls: the bot answers Delta Chat calls and echoes the caller's audio
+CALL_ECHO_ENABLED = _env_flag("CALL_ECHO", "1")
+CALL_ECHO_WHO = os.environ.get("CALL_ECHO_WHO", "everybody").strip().lower()  # everybody | contacts
+CALL_ECHO_DELAY = float(os.environ.get("CALL_ECHO_DELAY", "0"))  # seconds of playback delay
+CALL_ECHO_MAX_SECONDS = int(os.environ.get("CALL_ECHO_MAX_SECONDS", "300"))
+CALL_ECHO_MAX_CONCURRENT = int(os.environ.get("CALL_ECHO_MAX_CONCURRENT", "2"))
+CALL_ECHO_CONNECT_TIMEOUT = 20
 
 DOMAIN_REGEX = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)+$')
 
