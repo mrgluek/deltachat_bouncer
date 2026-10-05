@@ -22,6 +22,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - 🏓 **ChatMail Ping (`/cmping`):** Ping mail relays (transports) to/from specified target servers using the `cmping` utility. Features real-time reaction-based progress tracking (`⏳`, `☑️`, `❌`) and runs asynchronously.
 - 📞 **Echo Calls:** Call the bot from any Delta Chat app to test calls: it answers, plays a short two-tone greeting and echoes your voice back. After you hang up it sends a `📞 Echo call report` with the call duration, the media path (direct / peer-to-peer via STUN / TURN relay), how much of your voice it heard, packet loss, jitter and round-trip time. The WebRTC side is [`cmcall`](https://github.com/mrgluek/cmcall)'s `EchoPeer` (aiortc) running on a dedicated event-loop thread, so bot work never stalls call audio. Calls are capped (`CALL_ECHO_MAX_SECONDS`, default 300) and limited in parallel (`CALL_ECHO_MAX_CONCURRENT`, default 2; further callers get a "line busy" message). See [Echo Call Settings](#echo-call-settings).
 - 📲 **Call Test Between Relays (`/cmcall`):** Runs the `cmcall` utility: a test profile on the first relay calls a profile on the second one, which echoes. Reports signaling delivery in both directions, the TURN servers used (media is forced through the relays' TURN), ICE connect time, echoed-audio round trip and RTP loss/jitter.
+- 📞 **Call Monitoring Between Relays:** The call-side twin of the cmping monitor, over the same server list. Every hour (`CMCALL_MONITOR_INTERVAL`) one source relay calls every other relay with `cmcall` (TURN-only media, 5 s of audio); one call per pair covers both mail directions and both TURN servers, and the direction alternates each cycle. A lone relay calls itself. Hard failures are retried once and then raise a `📞🚨 Calls failing` alert in the `/cmreport` chats, edited in place when it resolves; packet loss ≥ `CMCALL_DEGRADED_LOSS_PCT` (10 %) in two checks in a row raises `📞⚠️ Calls degraded`. Relays without a TURN server are shown as "no TURN" and never alert. Quality is measured from the bot's host, so it never counts as an outage.
 - 📡 **Server Connectivity Monitoring:** Automatic periodic monitoring of server connectivity using a round-robin algorithm. Employs an **incident-based alerting system** with in-place dynamic message editing (`🚨 Ongoing` → `⚠️ Ongoing (Partial Recovery)` → `✅ Resolved`) to prevent notification noise, along with accurate root-cause fault isolation. Configurable interval via `CMPING_MONITOR_INTERVAL` env var (default: 30 min).
 - 👤 **Contact Sharing:** Reports include `/contact<ID>` links to quickly share a contact card for any user.
 - 🔄 **Multiple Mail Relays:** Supports multiple mail servers. Relay selection and failover are handled by the Delta Chat core (2.61+), which sends via the newest relay first and falls back to the next one if a relay is unreachable.
@@ -106,11 +107,14 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/rmtransport <addr>` — Remove a mail relay (Admin only).
 - `/cmpingadd <server>` — Add a server to connectivity monitoring rotation (Admin only).
 - `/cmpingdel <server>` — Remove a server from monitoring (Admin only).
-- `/cmpinglist` — Show all monitored servers, pair count, and rotation info.
+- `/cmpinglist` — Show all monitored servers, pair count, and rotation info; each server also shows its call-monitoring badge (📞✅ / ⚠️ / 🚨 / ➖ no TURN / ⏭ skipped).
 - `/cmpingstatus [server]` — Show full monitoring results sorted from newest to oldest, with an optional server filter.
 - `/cmpingfail [server]` — Show currently failed links with an optional server filter.
 - `/cmpingevents [id]` — Show CMPing incident log or detailed incident breakdown (aliases: `/cmpingincidents`, `/cmevents`).
 - `/cmpinghistory [server]` — Show downtime records and outage durations for monitored servers (alias: `/cmhistory`).
+- `/cmcallstatus [server]` — Call monitoring: per-relay call health (✅ ok, ⚠️ degraded, 🚨 failing, ➖ no TURN), TURN server, and the latest call per pair with RTT, loss and signaling time.
+- `/cmcallhistory [server]` — Call incidents (failing / degraded episodes) with durations.
+- `/cmcallskip [server]` — Exclude a server from call monitoring only, e.g. a mail server without calls (Admin only; no argument lists skipped servers). `/cmcallunskip <server>` puts it back.
 - `/cmreport <on/off>` — Toggle monitoring alerts for current chat (Admin only).
 
 Relay selection and failover are handled by the Delta Chat core (2.61+): it sends via the newest relay first and falls back to the next one if a relay is unreachable. `/transports` lists relays in that order. The former `/setprimary` and `/resilient` commands are deprecated and only reply with this explanation.
@@ -135,6 +139,9 @@ Environment variables (all optional):
 | `CALL_ECHO_DELAY` | `0` | Seconds of playback delay. `0` is a live echo (like Asterisk's `Echo()`); e.g. `1.5` lets you finish a sentence before hearing it. |
 | `CALL_ECHO_MAX_SECONDS` | `300` | The bot hangs up after this many seconds. |
 | `CALL_ECHO_MAX_CONCURRENT` | `2` | Parallel echo calls; extra callers are declined with a "line busy" message. |
+| `CMCALL_MONITOR_INTERVAL` | `3600` | Seconds between call-monitoring cycles; `0` disables. The first cycle starts a quarter interval (max 15 min) after boot, offset from cmping. |
+| `CMCALL_MONITOR_DURATION` | `5` | Seconds of test audio per monitored call. |
+| `CMCALL_DEGRADED_LOSS_PCT` | `10` | Packet loss (%) that, in two checks in a row, marks a relay's calls as degraded. |
 
 Call media uses the TURN server the bot's relay announces (Delta Chat core's `ice_servers`), so the container needs no extra ports. `cmcall` test profiles for `/cmcall` are cached in `./data/cmcall_cache` (mounted to `/root/.cache/cmcall`).
 
@@ -209,6 +216,7 @@ As of v2.15.0, the bot logic is split into focused modules instead of one monoli
 - `state.py` — mutable runtime state: locks, caches, the live bot handle. Other modules always read/write it as `state.<name>`.
 - `dc_helpers.py` — generic Delta Chat RPC helpers (admin/fingerprint checks, `_send`/`_react`, the delayed-command debouncer, message-attachment extraction).
 - `formatting.py` / `security.py` — Delta Chat markdown → HTML rendering; web-layer rate limiting and safe host/URL resolution.
+- `cmcall_monitor.py` — periodic call monitoring between relays (round-robin cycle, health evaluation, `📞` alerts) and `/cmcallstatus`, `/cmcallhistory`, `/cmcallskip`, `/cmcallunskip`.
 - `calls.py` — echo call service (`EchoCallManager`, `IncomingCall`/`CallEnded` raw-event hooks) and the `/cmcall` / `/callstats` commands.
 - `moderation.py`, `transports.py`, `cmping.py` + `cmping_commands.py`, `channels.py`, `virustotal.py`, `stickers.py` — one module per subsystem, each owning its background workers and `/command` handlers.
 - `commands.py` / `handlers.py` — the remaining general commands (`/help`, `/bounce`, `/search`, …) and the global Delta Chat event handlers (system messages, the catch-all `NewMessage` dispatcher).

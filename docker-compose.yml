@@ -31,6 +31,9 @@ services:
       - CALL_ECHO_DELAY
       - CALL_ECHO_MAX_SECONDS
       - CALL_ECHO_MAX_CONCURRENT
+      - CMCALL_MONITOR_INTERVAL
+      - CMCALL_MONITOR_DURATION
+      - CMCALL_DEGRADED_LOSS_PCT
       - VIRUSTOTAL_API_KEY
       - U2NET_HOME=/app/data/u2net
       - REMBG_HOME=/app/data/u2net

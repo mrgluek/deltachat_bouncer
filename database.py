@@ -550,6 +550,61 @@ def init_db():
             )
         ''')
 
+        # CMCall monitor: latest result per directed pair
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cmcall_results (
+                src TEXT,
+                dst TEXT,
+                success INTEGER,
+                stage TEXT,
+                error TEXT,
+                rtt_ms REAL,
+                loss_pct REAL,
+                jitter_ms REAL,
+                signaling_ms REAL,
+                checked_at REAL,
+                PRIMARY KEY (src, dst)
+            )
+        ''')
+        # CMCall monitor: per-relay call health (ok / degraded / down / n/a)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cmcall_servers (
+                server TEXT PRIMARY KEY,
+                status TEXT,
+                error TEXT,
+                since REAL,
+                turn TEXT,
+                degraded_streak INTEGER DEFAULT 0,
+                updated_at REAL
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cmcall_skip (
+                server TEXT PRIMARY KEY,
+                added_at REAL
+            )
+        ''')
+        # CMCall monitor: down/degraded episodes and their alert messages
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cmcall_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                server TEXT,
+                kind TEXT,
+                error TEXT,
+                started_at REAL,
+                ended_at REAL
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cmcall_event_messages (
+                event_id INTEGER,
+                chat_id INTEGER,
+                msg_id INTEGER,
+                PRIMARY KEY (event_id, chat_id)
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_cmcall_events_server ON cmcall_events(server, started_at)')
+
         # Echo call service log (one row per answered call)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS call_echo_log (
@@ -1876,3 +1931,174 @@ def get_call_echo_aggregate(since: float) -> dict:
         "avg_rtt_ms": avg_rtt,
         "paths": paths,
     }
+
+
+# --- CMCall monitor ---
+
+_CMCALL_RESULT_COLS = ("src", "dst", "success", "stage", "error", "rtt_ms", "loss_pct",
+                       "jitter_ms", "signaling_ms", "checked_at")
+
+
+def save_cmcall_result(src: str, dst: str, result: dict):
+    """Store the latest `cmcall --json` result for the directed pair src -> dst."""
+    stats = result.get("caller_stats") or {}
+    echo = stats.get("echo") or {}
+    rtps = [(result.get(k) or {}).get("rtp") or {} for k in ("caller_stats", "callee_stats")]
+    losses = [r["loss_pct"] for r in rtps if r.get("loss_pct") is not None]
+    jitters = [r["jitter_ms"] for r in rtps if r.get("jitter_ms") is not None]
+    sig = (result.get("signaling") or {}).get("total_ms")
+    with _writer_transaction() as conn:
+        conn.cursor().execute(
+            f"INSERT OR REPLACE INTO cmcall_results ({', '.join(_CMCALL_RESULT_COLS)}) "
+            f"VALUES ({', '.join('?' * len(_CMCALL_RESULT_COLS))})",
+            (src.strip().lower(), dst.strip().lower(), 1 if result.get("ok") else 0,
+             result.get("stage"), result.get("error"), echo.get("rtt_avg_ms"),
+             max(losses) if losses else None, max(jitters) if jitters else None,
+             sig, result.get("checked_at") or time.time()),
+        )
+
+
+def get_cmcall_results(limit: int = 30) -> list[dict]:
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT {', '.join(_CMCALL_RESULT_COLS)} FROM cmcall_results ORDER BY checked_at DESC LIMIT ?",
+            (limit,),
+        )
+        rows = [dict(zip(_CMCALL_RESULT_COLS, r)) for r in cursor.fetchall()]
+    for r in rows:
+        r["success"] = bool(r["success"])
+    return rows
+
+
+def get_cmcall_server(server: str) -> dict:
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT status, error, since, turn, degraded_streak, updated_at FROM cmcall_servers WHERE server = ?",
+            (server.strip().lower(),),
+        )
+        row = cursor.fetchone()
+    if not row:
+        return {}
+    return dict(zip(("status", "error", "since", "turn", "degraded_streak", "updated_at"), row))
+
+
+def set_cmcall_server_status(server: str, status: str, error, degraded_streak: int | None = None):
+    """Set a relay's call health; `since` moves only when the status changes."""
+    server = server.strip().lower()
+    now = time.time()
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status, since, degraded_streak FROM cmcall_servers WHERE server = ?", (server,))
+        row = cursor.fetchone()
+        if row is None:
+            cursor.execute(
+                "INSERT INTO cmcall_servers (server, status, error, since, degraded_streak, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (server, status, error, now, degraded_streak or 0, now),
+            )
+            return
+        old_status, since, streak = row
+        cursor.execute(
+            "UPDATE cmcall_servers SET status = ?, error = ?, since = ?, degraded_streak = ?, updated_at = ? "
+            "WHERE server = ?",
+            (status, error, since if old_status == status else now,
+             streak if degraded_streak is None else degraded_streak, now, server),
+        )
+
+
+def set_cmcall_server_turn(server: str, turn: str):
+    server = server.strip().lower()
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR IGNORE INTO cmcall_servers (server, degraded_streak) VALUES (?, 0)", (server,))
+        cursor.execute("UPDATE cmcall_servers SET turn = ? WHERE server = ?", (turn, server))
+
+
+def add_cmcall_skip(server: str):
+    with _writer_transaction() as conn:
+        conn.cursor().execute(
+            "INSERT OR IGNORE INTO cmcall_skip (server, added_at) VALUES (?, ?)",
+            (server.strip().lower(), time.time()),
+        )
+
+
+def remove_cmcall_skip(server: str) -> bool:
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM cmcall_skip WHERE server = ?", (server.strip().lower(),))
+        return cursor.rowcount > 0
+
+
+def get_cmcall_skipped() -> list[str]:
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT server FROM cmcall_skip ORDER BY added_at ASC")
+        return [r[0] for r in cursor.fetchall()]
+
+
+_CMCALL_EVENT_COLS = ("id", "server", "kind", "error", "started_at", "ended_at")
+
+
+def open_cmcall_event(server: str, kind: str, error, started_at: float) -> int:
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO cmcall_events (server, kind, error, started_at) VALUES (?, ?, ?, ?)",
+            (server, kind, error, started_at),
+        )
+        return cursor.lastrowid
+
+
+def close_cmcall_event(event_id: int, ended_at: float):
+    with _writer_transaction() as conn:
+        conn.cursor().execute("UPDATE cmcall_events SET ended_at = ? WHERE id = ?", (ended_at, event_id))
+
+
+def update_cmcall_event_error(event_id: int, error):
+    with _writer_transaction() as conn:
+        conn.cursor().execute("UPDATE cmcall_events SET error = ? WHERE id = ?", (error, event_id))
+
+
+def get_cmcall_event(event_id: int) -> dict:
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT {', '.join(_CMCALL_EVENT_COLS)} FROM cmcall_events WHERE id = ?", (event_id,))
+        row = cursor.fetchone()
+    return dict(zip(_CMCALL_EVENT_COLS, row)) if row else {}
+
+
+def get_open_cmcall_events() -> list[dict]:
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT {', '.join(_CMCALL_EVENT_COLS)} FROM cmcall_events WHERE ended_at IS NULL")
+        return [dict(zip(_CMCALL_EVENT_COLS, r)) for r in cursor.fetchall()]
+
+
+def get_cmcall_events(limit: int = 20, server_filter: str | None = None) -> list[dict]:
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        query = f"SELECT {', '.join(_CMCALL_EVENT_COLS)} FROM cmcall_events"
+        params: tuple = ()
+        if server_filter:
+            query += " WHERE server LIKE ?"
+            params = (f"%{server_filter}%",)
+        query += " ORDER BY started_at DESC, id DESC LIMIT ?"
+        cursor.execute(query, params + (limit,))
+        return [dict(zip(_CMCALL_EVENT_COLS, r)) for r in cursor.fetchall()]
+
+
+def set_cmcall_event_msg_id(event_id: int, chat_id: int, msg_id: int):
+    with _writer_transaction() as conn:
+        conn.cursor().execute(
+            "INSERT OR REPLACE INTO cmcall_event_messages (event_id, chat_id, msg_id) VALUES (?, ?, ?)",
+            (event_id, chat_id, msg_id),
+        )
+
+
+def get_cmcall_event_msg_ids(event_id: int) -> dict[int, int]:
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT chat_id, msg_id FROM cmcall_event_messages WHERE event_id = ?", (event_id,))
+        return {c: m for c, m in cursor.fetchall()}

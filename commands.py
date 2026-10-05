@@ -629,6 +629,8 @@ def help_command(bot, accid, event):
         f"/cmping <server1> ... — Ping relays to/from specified servers.\n"
         f"/cmcall <server1> [server2] — Test a Delta Chat call between relays.\n"
         f"/callstats — Your echo call results.\n"
+        f"/cmcallstatus [server] — Call monitoring results between relays.\n"
+        f"/cmcallhistory [server] — Call incidents (failing / degraded) per relay.\n"
         f"📞 Call me — I answer, echo your voice back and send call statistics.\n"
         f"/virus <url> — Scan URL or replied file/link with VirusTotal.\n"
         f"/sticker — Convert replied or attached image to a WebP sticker.\n"
@@ -665,7 +667,9 @@ def help_command(bot, accid, event):
         help_text += "/url [base_url] — Set/view base web URL for channel previews\n"
         help_text += "/cmpingadd <server> — Add server to connectivity monitoring\n"
         help_text += "/cmpingdel <server> — Remove server from monitoring\n"
-        help_text += "/cmreport <on/off> — Toggle monitoring alerts in this chat"
+        help_text += "/cmreport <on/off> — Toggle monitoring alerts (messages and calls) in this chat\n"
+        help_text += "/cmcallskip [server] — Exclude a server from call monitoring (no arg: list)\n"
+        help_text += "/cmcallunskip <server> — Put a server back into call monitoring"
 
 
     chat_id = _get_help_chat_id(bot, accid, msg)

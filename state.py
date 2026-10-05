@@ -37,6 +37,11 @@ _cmcall_global_lock = threading.Lock()
 # Echo call service (calls.EchoCallManager), set in on_start when enabled
 echo_call_manager = None
 
+# CMCall monitoring state
+_cmcall_monitor_idx_db = database.get_config("cmcall_monitor_index")
+_cmcall_monitor_index = int(_cmcall_monitor_idx_db) if _cmcall_monitor_idx_db is not None else 0
+_cmcall_monitor_running = False
+
 # Persistent rembg / u2net models storage
 if os.getenv("DC_DB_DIR"):
     _default_u2net_dir = os.path.join(os.getenv("DC_DB_DIR"), "u2net")

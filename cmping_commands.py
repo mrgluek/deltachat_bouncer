@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 from deltachat2 import events
 
+import cmcall_monitor
 import cmping
 import config
 import database
@@ -443,6 +444,9 @@ def cmpinglist_command(bot, accid, event):
     lines = ["📡 **CMPing Monitor Servers:**\n"]
 
     def format_server_entry(idx, domain):
+        return _format_ping_entry(idx, domain) + f" · {cmcall_monitor.server_badge(domain)}"
+
+    def _format_ping_entry(idx, domain):
         avg_ping, count = database.get_average_ping_for_server(domain, limit=100)
         if avg_ping is not None:
             if avg_ping < 2000:
@@ -487,6 +491,12 @@ def cmpinglist_command(bot, accid, event):
         lines.append(f"Next check source: {next_source}")
         lines.append(f"Interval: {interval_min} min | Full rotation: ~{n * interval_min} min")
 
+    if config.CMCALL_MONITOR_INTERVAL > 0:
+        lines.append(
+            f"📞 Calls: checked every {config.CMCALL_MONITOR_INTERVAL // 60} min "
+            f"(✅ ok, ⚠️ degraded, 🚨 failing, ➖ no TURN, ⏭ skipped) — /cmcallstatus"
+        )
+
     dc_helpers._send(bot, accid, msg.chat_id, "\n".join(lines))
 
 @config.dc_cli.on(events.NewMessage(command="/cmreport"))
@@ -502,11 +512,11 @@ def cmreport_command(bot, accid, event):
 
     if arg == "on":
         database.add_cmping_report_chat(msg.chat_id)
-        dc_helpers._send(bot, accid, msg.chat_id, "✅ CMPing monitoring alerts **enabled** for this chat.")
+        dc_helpers._send(bot, accid, msg.chat_id, "✅ Monitoring alerts (messages and 📞 calls) **enabled** for this chat.")
     elif arg == "off":
         removed = database.remove_cmping_report_chat(msg.chat_id)
         if removed:
-            dc_helpers._send(bot, accid, msg.chat_id, "✅ CMPing monitoring alerts **disabled** for this chat.")
+            dc_helpers._send(bot, accid, msg.chat_id, "✅ Monitoring alerts (messages and 📞 calls) **disabled** for this chat.")
         else:
             dc_helpers._send(bot, accid, msg.chat_id, "ℹ️ CMPing monitoring alerts were not enabled for this chat.")
     else:

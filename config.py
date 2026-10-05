@@ -34,7 +34,7 @@ for _ext, _mt in (
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.17.1"
+VERSION = "2.18.0"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -135,6 +135,11 @@ CALL_ECHO_DELAY = float(os.environ.get("CALL_ECHO_DELAY", "0"))  # seconds of pl
 CALL_ECHO_MAX_SECONDS = int(os.environ.get("CALL_ECHO_MAX_SECONDS", "300"))
 CALL_ECHO_MAX_CONCURRENT = int(os.environ.get("CALL_ECHO_MAX_CONCURRENT", "2"))
 CALL_ECHO_CONNECT_TIMEOUT = 20
+
+# Call monitoring between relays (cmcall), the call-side twin of the cmping monitor
+CMCALL_MONITOR_INTERVAL = int(os.environ.get("CMCALL_MONITOR_INTERVAL", "3600"))  # 0 disables
+CMCALL_MONITOR_DURATION = int(os.environ.get("CMCALL_MONITOR_DURATION", "5"))  # seconds of beeps per call
+CMCALL_DEGRADED_LOSS_PCT = float(os.environ.get("CMCALL_DEGRADED_LOSS_PCT", "10"))
 
 DOMAIN_REGEX = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)+$')
 
