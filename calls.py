@@ -61,6 +61,7 @@ class EchoSession:
     peer: object
     started_at: float = field(default_factory=time.time)
     accepted_at: Optional[float] = None
+    media_ended_at: Optional[float] = None  # when the media connection closed
     finished: bool = False
     end_reason: str = ""
     error: Optional[str] = None
@@ -154,8 +155,16 @@ class EchoCallManager:
         deadline = session.accepted_at + config.CALL_ECHO_MAX_SECONDS
         while not session.finished and time.time() < deadline:
             if peer.pc is None or peer.pc.connectionState in ("failed", "closed"):
-                session.error = "media connection lost"
-                self.finish(session, "media-lost")
+                # A hangup closes the caller's media at once (DTLS close,
+                # ~0.1 s), while the "call ended" message still has to travel
+                # through the relays. Wait for it before calling this a drop.
+                session.media_ended_at = time.time()
+                grace_end = session.media_ended_at + config.CALL_ECHO_HANGUP_GRACE
+                while not session.finished and time.time() < grace_end:
+                    time.sleep(0.2)
+                if not session.finished:
+                    session.error = "media connection lost"
+                    self.finish(session, "media-lost")
                 return
             time.sleep(1)
         if not session.finished:
@@ -181,7 +190,9 @@ class EchoCallManager:
         if end_call and reason != "hangup":
             _end_call(self.bot.rpc, session.accid, session.msg_id)
 
-        duration = time.time() - session.accepted_at if session.accepted_at else 0.0
+        # end of the call = when media stopped, not when the hangup message arrived
+        ended = session.media_ended_at or time.time()
+        duration = max(0.0, ended - session.accepted_at) if session.accepted_at else 0.0
         rtp = summary.get("rtp", {})
         try:
             if config.CALL_ECHO_LOG_DAYS > 0:

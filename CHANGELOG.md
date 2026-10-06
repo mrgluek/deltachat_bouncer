@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.19.2] - 2026-10-06
+
+### Fixed
+- **False "media connection dropped" After a Normal Hangup**: Hanging up closes the caller's media within ~0.1 s, but the "call ended" message reaches the bot through the relays a second or more later. The watchdog saw the closed connection first and reported `⚠️ The media connection dropped during the call.` for ordinary hangups. It now waits up to 15 s for the hangup message before reporting a drop, and call durations end when the media stopped rather than when the hangup message arrived.
+
 ## [2.19.1] - 2026-10-06
 
 ### Privacy

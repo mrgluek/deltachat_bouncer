@@ -356,6 +356,59 @@ class TestEchoCallIntegration(unittest.TestCase):
         self.assertEqual(rows[0]["end_reason"], "hangup")
         self.assertEqual(manager.active_count(), 0)
 
+    def _connected_call(self, bot, manager, msg_id):
+        probe = rtc.ProbePeer([], interval=0.5)
+        offer = self.probe_loop.run(probe.offer(), timeout=20)
+        manager.on_incoming_call(1, self._incoming(offer, msg_id=msg_id))
+        deadline = time.time() + 20
+        while not self.answers and time.time() < deadline:
+            time.sleep(0.05)
+        self.probe_loop.run(probe.accept_answer(self.answers[-1]), timeout=10)
+        self.assertTrue(self.probe_loop.run(probe.wait_connected(15), timeout=20))
+        time.sleep(1.5)  # let the bot's watchdog reach its media loop
+        return probe
+
+    def _wait_report(self, mock_send):
+        deadline = time.time() + 20
+        while not mock_send.called and time.time() < deadline:
+            time.sleep(0.05)
+        return mock_send.call_args[0][3]
+
+    @patch("calls.dc_helpers._send")
+    def test_hangup_message_after_media_close_is_not_a_drop(self, mock_send):
+        bot = self._bot()
+        manager = calls.EchoCallManager(bot)
+        try:
+            probe = self._connected_call(bot, manager, 600)
+            hung_up = time.time()
+            self.probe_loop.run(probe.close(), timeout=10)   # media goes first...
+            time.sleep(2.0)                                   # ...the relay is slower
+            manager.on_call_ended(1, Ev(kind="CallEnded", msg_id=600, chat_id=42))
+            text = self._wait_report(mock_send)
+        finally:
+            manager.loop.stop()
+        self.assertNotIn("dropped", text)
+        row = database.get_recent_call_echo_logs()[0]
+        self.assertEqual(row["end_reason"], "hangup")
+        # duration ends at the media close, not 2 s later at the hangup message
+        accepted_to_hangup = hung_up - row["started_at"]
+        self.assertLess(row["duration_s"], accepted_to_hangup + 1.0)
+
+    @patch("calls.dc_helpers._send")
+    def test_media_lost_without_hangup_message(self, mock_send):
+        bot = self._bot()
+        manager = calls.EchoCallManager(bot)
+        try:
+            with patch.object(calls.config, "CALL_ECHO_HANGUP_GRACE", 1):
+                probe = self._connected_call(bot, manager, 601)
+                self.probe_loop.run(probe.close(), timeout=10)
+                text = self._wait_report(mock_send)
+        finally:
+            manager.loop.stop()
+        self.assertIn("The media connection dropped", text)
+        self.assertEqual(database.get_recent_call_echo_logs()[0]["end_reason"], "media-lost")
+        bot.rpc.end_call.assert_called_once_with(1, 601)
+
     @patch("calls.dc_helpers._send")
     def test_no_history_when_log_days_is_zero(self, mock_send):
         bot = self._bot()

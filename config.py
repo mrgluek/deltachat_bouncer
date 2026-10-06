@@ -41,7 +41,7 @@ logger = logging.getLogger("bouncer_bot")
 if os.environ.get("CALL_DEBUG_LOG", "").strip().lower() not in ("1", "true", "yes", "on"):
     for _webrtc_logger in ("aioice", "aiortc"):
         logging.getLogger(_webrtc_logger).setLevel(logging.WARNING)
-VERSION = "2.19.1"
+VERSION = "2.19.2"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -142,6 +142,9 @@ CALL_ECHO_DELAY = float(os.environ.get("CALL_ECHO_DELAY", "0"))  # seconds of pl
 CALL_ECHO_MAX_SECONDS = int(os.environ.get("CALL_ECHO_MAX_SECONDS", "300"))
 CALL_ECHO_MAX_CONCURRENT = int(os.environ.get("CALL_ECHO_MAX_CONCURRENT", "2"))
 CALL_ECHO_CONNECT_TIMEOUT = 20
+# Seconds to wait for the "call ended" message after the caller's media closed
+# before reporting a dropped connection (it travels through the relays)
+CALL_ECHO_HANGUP_GRACE = 15
 # STUN for echo calls: auto = the relay's TURN server doubles as STUN (like the
 # Delta Chat apps), off = TURN only, or an explicit host:port / stun:host:port
 CALL_ECHO_STUN = os.environ.get("CALL_ECHO_STUN", "auto").strip().lower()
