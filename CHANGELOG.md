@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [2.22.0] - 2026-10-06
 
 ### Changed
 - **`/stickernobg` at Idle CPU Priority**: The background-removal subprocess (`sticker_tool.py`) switches itself to Linux `SCHED_IDLE` (fallback: nice 19) before loading onnxruntime, whose worker threads inherit it. It now only gets CPU time nothing else wants, so it can no longer make voice meetings or echo calls stutter. `REMBG_PRIORITY=normal` restores the old behaviour.
