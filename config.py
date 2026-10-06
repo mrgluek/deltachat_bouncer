@@ -34,7 +34,14 @@ for _ext, _mt in (
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bouncer_bot")
-VERSION = "2.19.0"
+
+# Privacy: at INFO level aioice logs every ICE candidate pair it checks, i.e.
+# the IP addresses of everyone who calls the echo service. Keep the WebRTC
+# libraries at WARNING unless CALL_DEBUG_LOG=1 is set for troubleshooting.
+if os.environ.get("CALL_DEBUG_LOG", "").strip().lower() not in ("1", "true", "yes", "on"):
+    for _webrtc_logger in ("aioice", "aiortc"):
+        logging.getLogger(_webrtc_logger).setLevel(logging.WARNING)
+VERSION = "2.19.1"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -138,6 +145,8 @@ CALL_ECHO_CONNECT_TIMEOUT = 20
 # STUN for echo calls: auto = the relay's TURN server doubles as STUN (like the
 # Delta Chat apps), off = TURN only, or an explicit host:port / stun:host:port
 CALL_ECHO_STUN = os.environ.get("CALL_ECHO_STUN", "auto").strip().lower()
+# Days to keep the per-call statistics behind /callstats; 0 = keep none
+CALL_ECHO_LOG_DAYS = int(os.environ.get("CALL_ECHO_LOG_DAYS", "30"))
 
 # Call monitoring between relays (cmcall), the call-side twin of the cmping monitor
 CMCALL_MONITOR_INTERVAL = int(os.environ.get("CMCALL_MONITOR_INTERVAL", "3600"))  # 0 disables

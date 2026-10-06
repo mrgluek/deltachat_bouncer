@@ -1891,6 +1891,14 @@ def add_call_echo_log(contact_id, chat_id, started_at, duration_s, connected, pa
         )
 
 
+def prune_call_echo_log(older_than: float) -> int:
+    """Delete echo call log rows that started before `older_than`; return how many."""
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM call_echo_log WHERE started_at < ?", (older_than,))
+        return cursor.rowcount
+
+
 def get_recent_call_echo_logs(limit: int = 10, contact_id: int | None = None) -> list[dict]:
     """Newest echo calls first, optionally only those of one contact."""
     with _reader_connection() as conn:

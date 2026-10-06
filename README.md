@@ -139,6 +139,8 @@ Environment variables (all optional):
 | `CALL_ECHO_DELAY` | `0` | Seconds of playback delay. `0` is a live echo (like Asterisk's `Echo()`); e.g. `1.5` lets you finish a sentence before hearing it. |
 | `CALL_ECHO_MAX_SECONDS` | `300` | The bot hangs up after this many seconds. |
 | `CALL_ECHO_MAX_CONCURRENT` | `2` | Parallel echo calls; extra callers are declined with a "line busy" message. |
+| `CALL_ECHO_LOG_DAYS` | `30` | Days to keep the per-call statistics behind `/callstats`; `0` keeps no call history at all (callers still get their report). |
+| `CALL_DEBUG_LOG` | off | Set to `1` to log aiortc/aioice at INFO for troubleshooting. This logs callers' IP addresses (every ICE candidate pair), so turn it off again afterwards. |
 | `CALL_ECHO_STUN` | `auto` | STUN for echo calls. `auto` uses the relay's TURN server as STUN too, exactly like the Delta Chat apps, so the bot gets a public (server-reflexive) candidate through Docker's NAT and calls can go peer-to-peer; `off` keeps TURN only; or an explicit `host:port`. |
 | `CMCALL_MONITOR_INTERVAL` | `3600` | Seconds between call-monitoring cycles; `0` disables. The first cycle starts a quarter interval (max 15 min) after boot, offset from cmping. |
 | `CMCALL_MONITOR_DURATION` | `5` | Seconds of test audio per monitored call. |
@@ -147,6 +149,15 @@ Environment variables (all optional):
 Call media uses the TURN server the bot's relay announces (Delta Chat core's `ice_servers`), so the container needs no extra ports. Chatmail relays announce only TURN; the Delta Chat apps (libwebrtc) query that server as STUN as well, which aiortc does not do on its own — with `CALL_ECHO_STUN=auto` the bot does the same, so behind the Docker bridge NAT it still learns its public address and most calls connect peer-to-peer (hole punching), with TURN as the fallback for symmetric NAT / CGNAT. `cmcall` test profiles for `/cmcall` are cached in `./data/cmcall_cache` (mounted to `/root/.cache/cmcall`).
 
 To test the echo service end to end from the command line: `cmcall <your relay> --to '<bot invite link>'` calls the bot, probes the echo and prints the bot's report.
+
+## Echo Call Privacy
+
+- **No recording.** Audio only passes through memory: decoded, queued for playback (about 100 ms plus `CALL_ECHO_DELAY`) and sent back. Nothing is written to disk and there is no speech recognition. The bot only measures loudness to tell the caller how much of their voice it heard.
+- **Encryption.** Media is DTLS-SRTP end to end between the caller's app and the bot; TURN relays see only encrypted packets. The bot is the other end of the call, so it necessarily decrypts the audio to echo it — trust in an echo bot is trust in whoever runs it.
+- **Call message.** The incoming call message carries the caller's SDP offer, including their ICE candidates (local and public IP addresses). The bot deletes it from its account as soon as the call is over instead of keeping it for `delete_device_after` (36 h).
+- **Statistics.** `/callstats` keeps, per call: contact ID, chat ID, start time, duration, whether media connected, path type (direct / STUN / TURN), packet loss, RTT, jitter, seconds of detected voice and why the call ended — no audio, no IP addresses. Rows older than `CALL_ECHO_LOG_DAYS` (30) are deleted; `0` keeps none. The admin's `/callstats` lists recent calls by contact ID.
+- **Logs.** The bot logs call IDs, contact IDs and durations. aiortc/aioice are kept at WARNING because at INFO they log every ICE candidate pair, i.e. callers' IP addresses; `CALL_DEBUG_LOG=1` re-enables that for troubleshooting only.
+- **Call monitoring** (`/cmcall`, `/cmcallstatus`) uses the bot's own test profiles and stores only relay names and measurements.
 
 ## Admin Management
 

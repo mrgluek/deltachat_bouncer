@@ -631,7 +631,7 @@ def help_command(bot, accid, event):
         f"/callstats — Your echo call results.\n"
         f"/cmcallstatus [server] — Call monitoring results between relays.\n"
         f"/cmcallhistory [server] — Call incidents (failing / degraded) per relay.\n"
-        f"📞 Call me — I answer, echo your voice back and send call statistics.\n"
+        f"📞 Call me — I answer, echo your voice back and send call statistics (calls are not recorded).\n"
         f"/virus <url> — Scan URL or replied file/link with VirusTotal.\n"
         f"/sticker — Convert replied or attached image to a WebP sticker.\n"
         f"/stickernobg — Convert image to a sticker with background removed.\n\n"

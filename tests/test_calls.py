@@ -161,6 +161,47 @@ class TestEchoStun(unittest.TestCase):
         self.assertEqual(self.urls("stun.example.org:3478")[0], "stun:stun.example.org:3478")
 
 
+class TestPrivacy(unittest.TestCase):
+    def setUp(self):
+        _cleanup_db()
+        database.DB_PATH = TEST_DB
+        database.init_db()
+
+    def tearDown(self):
+        _cleanup_db()
+
+    def test_webrtc_libraries_do_not_log_candidates(self):
+        import logging
+
+        import config  # noqa: F401 - importing it applies the levels
+        for name in ("aioice.ice", "aioice.turn", "aiortc.rtcpeerconnection"):
+            self.assertGreaterEqual(logging.getLogger(name).getEffectiveLevel(), logging.WARNING, name)
+
+    def test_prune_call_echo_log(self):
+        now = time.time()
+        database.add_call_echo_log(10, 42, now - 40 * 86400, 5, True, "relay", 0, 50, 1, 2, "hangup", None)
+        database.add_call_echo_log(10, 42, now - 3600, 5, True, "stun", 0, 50, 1, 2, "hangup", None)
+        self.assertEqual(database.prune_call_echo_log(now - 30 * 86400), 1)
+        rows = database.get_recent_call_echo_logs()
+        self.assertEqual([r["path"] for r in rows], ["stun"])
+
+    @patch("calls.dc_helpers._is_dc_admin", return_value=False)
+    @patch("calls.dc_helpers._send")
+    def test_callstats_states_privacy(self, mock_send, _admin):
+        database.add_call_echo_log(10, 42, time.time(), 65, True, "stun", 0.4, 55, 2, 9, "hangup", None)
+        event = MagicMock()
+        event.msg.from_id = 10
+        calls.callstats_command(MagicMock(), 1, event)
+        text = mock_send.call_args[0][3]
+        self.assertIn("Calls are not recorded; call statistics (no audio, no IP addresses) are kept for 30 days", text)
+        self.assertIn("Your last calls:", text)
+        with patch.object(calls.config, "CALL_ECHO_LOG_DAYS", 0):
+            calls.callstats_command(MagicMock(), 1, event)
+        text = mock_send.call_args[0][3]
+        self.assertIn("no call history is kept", text)
+        self.assertNotIn("Your last calls", text)
+
+
 class TestRunCmcall(unittest.TestCase):
     @patch("calls.subprocess.run")
     def test_parses_json_after_noise(self, mock_run):
@@ -307,11 +348,35 @@ class TestEchoCallIntegration(unittest.TestCase):
         self.assertIn("Path: direct", text)
         self.assertIn("Packets from you:", text)
         bot.rpc.end_call.assert_not_called()  # the caller hung up, not the bot
+        # the call message (caller's SDP with their IPs) is deleted right away
+        bot.rpc.delete_messages.assert_called_once_with(1, [500])
         rows = database.get_recent_call_echo_logs()
         self.assertEqual(len(rows), 1)
         self.assertTrue(rows[0]["connected"])
         self.assertEqual(rows[0]["end_reason"], "hangup")
         self.assertEqual(manager.active_count(), 0)
+
+    @patch("calls.dc_helpers._send")
+    def test_no_history_when_log_days_is_zero(self, mock_send):
+        bot = self._bot()
+        manager = calls.EchoCallManager(bot)
+        class FakePeer:
+            async def summary(self):
+                return dict(CONNECTED_SUMMARY)
+
+            async def close(self):
+                pass
+
+        session = calls.EchoSession(1, 501, 42, 10, peer=FakePeer())
+        session.accepted_at = time.time() - 30
+        try:
+            with patch.object(calls.config, "CALL_ECHO_LOG_DAYS", 0):
+                manager.finish(session, "hangup")
+        finally:
+            manager.loop.stop()
+        self.assertEqual(database.get_recent_call_echo_logs(), [])
+        self.assertIn("Echo call report", mock_send.call_args[0][3])
+        bot.rpc.delete_messages.assert_called_once_with(1, [501])
 
     @patch("calls.dc_helpers._send")
     def test_busy_line_declines(self, mock_send):

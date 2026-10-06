@@ -184,25 +184,35 @@ class EchoCallManager:
         duration = time.time() - session.accepted_at if session.accepted_at else 0.0
         rtp = summary.get("rtp", {})
         try:
-            database.add_call_echo_log(
-                contact_id=session.contact_id,
-                chat_id=session.chat_id,
-                started_at=session.started_at,
-                duration_s=round(duration, 1),
-                connected=bool(summary.get("connected")),
-                path=(summary.get("path") or {}).get("kind"),
-                loss_pct=rtp.get("loss_pct"),
-                rtt_ms=rtp.get("rtcp_rtt_ms"),
-                jitter_ms=rtp.get("jitter_ms"),
-                voice_s=summary.get("voice_s"),
-                end_reason=reason,
-                error=session.error,
-            )
+            if config.CALL_ECHO_LOG_DAYS > 0:
+                database.prune_call_echo_log(time.time() - config.CALL_ECHO_LOG_DAYS * 86400)
+                database.add_call_echo_log(
+                    contact_id=session.contact_id,
+                    chat_id=session.chat_id,
+                    started_at=session.started_at,
+                    duration_s=round(duration, 1),
+                    connected=bool(summary.get("connected")),
+                    path=(summary.get("path") or {}).get("kind"),
+                    loss_pct=rtp.get("loss_pct"),
+                    rtt_ms=rtp.get("rtcp_rtt_ms"),
+                    jitter_ms=rtp.get("jitter_ms"),
+                    voice_s=summary.get("voice_s"),
+                    end_reason=reason,
+                    error=session.error,
+                )
         except Exception as e:
             config.logger.warning(f"Echo call {session.msg_id}: could not log call: {e}")
 
         text = format_echo_report(summary, duration, reason, session.error)
         dc_helpers._send(self.bot, session.accid, session.chat_id, text)
+        # The call message carries the caller's SDP offer, i.e. their ICE
+        # candidates with local and public IP addresses. Core would keep it
+        # for delete_device_after (36 h); the bot has no use for it once the
+        # call is over.
+        try:
+            self.bot.rpc.delete_messages(session.accid, [session.msg_id])
+        except Exception as e:
+            config.logger.warning(f"Echo call {session.msg_id}: could not delete the call message: {e}")
         config.logger.info(f"Echo call {session.msg_id} finished ({reason}), {duration:.0f}s")
         with self._lock:
             self.sessions.pop(session.msg_id, None)
@@ -385,6 +395,10 @@ def setup_echo_calls(bot, accid) -> None:
         bot.rpc.set_config(accid, "who_can_call_me", who)
     except Exception as e:
         config.logger.warning(f"Could not set who_can_call_me: {e}")
+    if config.CALL_ECHO_LOG_DAYS > 0:
+        database.prune_call_echo_log(time.time() - config.CALL_ECHO_LOG_DAYS * 86400)
+    else:
+        database.prune_call_echo_log(time.time() + 1)  # history disabled: drop what is left
     state.echo_call_manager = EchoCallManager(bot)
     config.logger.info(
         f"Echo calls enabled (who={config.CALL_ECHO_WHO}, delay={config.CALL_ECHO_DELAY}s, "
@@ -481,6 +495,14 @@ def format_call_log_line(row: dict) -> str:
     return " · ".join(parts)
 
 
+def privacy_note() -> str:
+    if config.CALL_ECHO_LOG_DAYS > 0:
+        kept = f"call statistics (no audio, no IP addresses) are kept for {config.CALL_ECHO_LOG_DAYS} days"
+    else:
+        kept = "no call history is kept"
+    return f"🔒 Calls are not recorded; {kept}."
+
+
 @config.dc_cli.on(events.NewMessage(command="/callstats"))
 def callstats_command(bot, accid, event):
     msg = event.msg
@@ -490,6 +512,13 @@ def callstats_command(bot, accid, event):
         lines.append("Echo calls are disabled on this bot.")
     else:
         lines.append("Call this bot to hear yourself back; you get a report after hanging up.")
+    lines.append(privacy_note())
+    if config.CALL_ECHO_LOG_DAYS <= 0:
+        if is_admin and state.echo_call_manager is not None:
+            lines.append(f"Active now: {state.echo_call_manager.active_count()}")
+        dc_helpers._send(bot, accid, msg.chat_id, "\n".join(lines))
+        return
+    database.prune_call_echo_log(time.time() - config.CALL_ECHO_LOG_DAYS * 86400)
     if is_admin:
         for label, seconds in (("24h", 86400), ("7d", 7 * 86400)):
             agg = database.get_call_echo_aggregate(time.time() - seconds)
