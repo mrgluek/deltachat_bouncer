@@ -30,8 +30,11 @@ class _Ev(dict):
     __getattr__ = dict.__getitem__
 
 
-def bot_side(conn, db_dir):
+def bot_side(conn, db_dir, n):
     os.environ["DB_PATH"] = os.path.join(db_dir, "bench.db")
+    # the benchmark measures one room of n, whatever the configured limits are
+    for key in ("MEET_TOTAL_SLOTS", "MEET_MAX_PARTICIPANTS"):
+        os.environ[key] = str(max(n, int(os.environ.get(key, "0") or 0)))
     sys.path.insert(0, HERE)
     from unittest.mock import MagicMock
 
@@ -78,6 +81,7 @@ def bot_side(conn, db_dir):
 
 
 def main():
+    sys.stdout.reconfigure(line_buffering=True)  # show progress when piped through grep
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 8
     phase = float(sys.argv[2]) if len(sys.argv) > 2 else 20.0
     sys.path.insert(0, HERE)
@@ -112,7 +116,7 @@ def main():
     ctx = mp.get_context("spawn")
     parent, child = ctx.Pipe()
     db_dir = tempfile.mkdtemp(prefix="bench-meet-")
-    proc = ctx.Process(target=bot_side, args=(child, db_dir), daemon=True)
+    proc = ctx.Process(target=bot_side, args=(child, db_dir, n), daemon=True)
     proc.start()
     loop = rtc.CallLoop("bench-clients")
     voices = [Voice(200 + 60 * i) for i in range(n)]
@@ -121,6 +125,8 @@ def main():
         for i, peer in enumerate(peers):
             offer = loop.run(peer.offer(), timeout=30)
             parent.send(("offer", 10 + i, 1000 + i, offer))
+            if not parent.poll(30):
+                raise SystemExit(f"bot did not answer participant {i + 1} within 30 s")
             kind, msg_id, answer = parent.recv()
             loop.run(peer.accept_answer(answer), timeout=10)
             assert loop.run(peer.wait_connected(20), timeout=25), f"client {i} did not connect"

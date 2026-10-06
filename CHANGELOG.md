@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **`tests/bench_meet.py` Hung Above 8 Participants**: The benchmark used the bot's meeting limits, so the 9th participant was refused and the clients waited forever. It now raises `MEET_TOTAL_SLOTS` / `MEET_MAX_PARTICIPANTS` to the participant count, gives up after 30 s without an answer and shows progress when piped.
+
 ## [2.21.0] - 2026-10-06
 
 ### Added
