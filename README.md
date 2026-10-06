@@ -83,6 +83,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - 📞 **Call the bot** — It answers and echoes your audio, then sends call statistics into the chat.
 - `/meet` — Create a voice meeting (when the admin enabled them) and get its `/join_<id>` link.
 - `/join_<id>` or `/join <id>` — The bot calls you into the meeting; calling the bot while the room is open also puts you back in.
+- `/meetclose` / `/meetnew` — Close the meeting you started, or restart it with a new link (in its chat, or in your private chat with the bot).
 - `/virus <url>` — Scan a URL, or reply to a message containing a link or attached file with `/virus` to inspect with VirusTotal (15s global rate limit).
 - `/sticker` — Convert replied or attached image to a WebP sticker (preserves original image/background; 5s cooldown).
 - `/stickernobg` — Convert replied or attached image to a WebP sticker with background removed (15s cooldown, serialized).
@@ -119,6 +120,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/cmcallhistory [server]` — Call incidents (failing / degraded episodes) with durations.
 - `/cmcallskip [server]` — Exclude a server from call monitoring only, e.g. a mail server without calls (Admin only; no argument lists skipped servers). `/cmcallunskip <server>` puts it back.
 - `/meets [on|off]` — Switch voice meetings on or off (also `1`/`0`; off by default, off closes all rooms); no argument shows status and open rooms (Admin only).
+- `/meetclose <id>` — Close any meeting, e.g. to free its places; ids (or their first 4 characters) are listed by `/meets` (Admin only).
 - `/cmreport <on/off>` — Toggle monitoring alerts for current chat (Admin only).
 
 Relay selection and failover are handled by the Delta Chat core (2.61+): it sends via the newest relay first and falls back to the next one if a relay is unreachable. `/transports` lists relays in that order. The former `/setprimary` and `/resilient` commands are deprecated and only reply with this explanation.
@@ -167,7 +169,10 @@ To test the echo service end to end from the command line: `cmcall <your relay> 
 
 A prototype audio bridge on top of Delta Chat calls, **off by default** — an admin turns it on with `/meets on` (`/meets off` or `0` closes all rooms; `/meets` alone shows status and open rooms).
 
-- `/meet` creates a room with a 12-character unguessable base62 id and replies with `/join_<id>`. Share that command with the others.
+- `/meet` creates the chat's room with a 12-character unguessable base62 id and replies with `/join_<id>`. **A room belongs to the chat it was started in:** `/meet` in that chat shows the same link again, and the bot never shows it in another chat (a creator with an open room elsewhere is told to close it first).
+- **Group rooms are for the group's members only.** The bot checks membership on `/join`, when someone calls back in, and every 30 s during the meeting, so a leaked link is useless outside the group and whoever leaves or is removed from the group drops out. Tapping `/join_<id>` posts it in the group; to keep the group quiet use *Reply Privately* on the bot's message and send the command there.
+- **Private rooms** (`/meet` in a private chat with the bot) are open to anyone who has the link. The bot sends a second message made for forwarding — the bot's invite link plus the `/join_<id>` command — so people who don't have the bot yet can add it and send the command.
+- **Managing a room:** its creator can `/meetclose` it (everyone is disconnected) or `/meetnew` it (closed and restarted with a new link, posted only in the room's chat — use it when a link leaked), in the room's chat or in a private chat with the bot. The admin can do both for any room and `/meetclose <id>` to free places.
 - `/join_<id>` (or `/join <id>`, also from a group — the call and notice go to your private chat with the bot): the bot calls you. If you miss or end the call, call the bot yourself while the room is open and you land in the same room (an incoming call from someone who joined a room goes to the room, otherwise to the echo service).
 - Delta Chat calls are 1:1 only, so every participant is in a normal call with the bot, and the bot mixes: every 20 ms it takes one frame per participant, leaves out silence (noise gate with 300 ms hold) and anyone whose app reports the microphone as muted, and sends each person the sum of the others (mix-minus — you never hear yourself). Joining plays the participant's **join tune** to everyone (the newcomer included), leaving plays it backwards. The tune is 5 notes of the C major pentatonic (C4–A5, 140 ms each, soft bell sound) chosen by a SHA-256 hash of the participant's key fingerprint (their address if there is none) — the same in every meeting and after restarts, so regulars become recognizable by ear; 65 610 possible tunes. `/meet` and `/join` show your tune as note names. Tunes are mixed over the conversation rather than interrupting it, and they reveal nothing about the key (16 bits of a salted hash, kept in memory only).
 - Rooms live in memory (a bot restart ends them) and close `MEET_IDLE_MINUTES` after the last person left, at the latest `MEET_MAX_HOURS` after creation. One open room per user.

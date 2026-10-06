@@ -336,32 +336,177 @@ class TestCommands(_Base):
         self.assertTrue(room.closed)
         self.assertEqual(m.rooms, {})
 
+    def _chats(self, groups=(42,), members=(10, 11)):
+        """Chat 42 is a group with contacts 10 and 11; every other chat is private."""
+        self.bot.rpc.get_basic_chat_info.side_effect = (
+            lambda accid, cid: {"chat_type": "Group" if cid in groups else "Single"})
+        self.bot.rpc.get_chat_contacts.side_effect = lambda accid, cid: [1, *members]
+        database.set_config("meets_enabled", "1")
+
+    def _texts(self, mock_send):
+        return [(c[0][2], c[0][3]) for c in mock_send.call_args_list]
+
+    @patch("meet._invite_link", return_value="https://i.delta.chat/#BOT")
     @patch("meet.threading.Thread")
     @patch("meet.dc_helpers._send")
-    def test_meet_and_join(self, mock_send, _thread):
-        database.set_config("meets_enabled", "1")
-        meet.meet_command(self.bot, 1, self._event("/meet"))
+    def test_private_room(self, mock_send, _thread, _link):
+        self._chats()
+        meet.meet_command(self.bot, 1, self._event("/meet", chat_id=7))
         m = state.meet_manager
         self.managers.append(m)
-        text = mock_send.call_args[0][3]
         room = next(iter(m.rooms.values()))
-        self.assertIn(f"/join_{room.id}", text)
-        self.assertIn("does not record or store your voice", text)
-        self.assertIn("not end-to-end encrypted", text)
-        self.assertIn("up to 8 people", text)
-        # one open room per user
-        meet.meet_command(self.bot, 1, self._event("/meet"))
-        self.assertIn(f"already have an open meeting: /join_{room.id}", mock_send.call_args[0][3])
+        self.assertEqual((room.chat_id, room.group, room.owner), (7, False, 10))
+        (c1, info), (c2, invite) = self._texts(mock_send)
+        self.assertEqual((c1, c2), (7, 7))
+        self.assertIn(f"/join_{room.id}", info)
+        self.assertIn("share it only privately", info)
+        self.assertIn("does not record or store your voice", info)
+        self.assertIn("not end-to-end encrypted", info)
+        self.assertIn("Up to 8 people", info)
+        self.assertIn("/meetclose", info)
+        # the second message is made for forwarding: bot invite + command
+        self.assertEqual(invite, f"🎙️ Join my voice meeting: add this bot: https://i.delta.chat/#BOT and "
+                                 f"send it this message: /join_{room.id}")
+        # same chat again: the same room
+        mock_send.reset_mock()
+        meet.meet_command(self.bot, 1, self._event("/meet", chat_id=7))
+        self.assertIn("This chat's voice meeting", mock_send.call_args_list[0][0][3])
         self.assertEqual(len(m.rooms), 1)
-        # /join from a group: the notice goes to the private chat, the bot calls
+        # another chat: the link is never shown there
+        mock_send.reset_mock()
+        meet.meet_command(self.bot, 1, self._event("/meet", chat_id=42))
+        text = mock_send.call_args[0][3]
+        self.assertIn("already have an open meeting in another chat", text)
+        self.assertNotIn(room.id, text)
+        self.assertEqual(len(m.rooms), 1)
+        # anyone with the link may join a private room
         self.bot.rpc.create_chat_by_contact_id.return_value = 77
-        meet.join_command(self.bot, 1, self._event(f"/join_{room.id}", room.id, from_id=11, chat_id=5))
+        meet.join_command(self.bot, 1, self._event(f"/join_{room.id}", room.id, from_id=99, chat_id=77))
         self.assertEqual(mock_send.call_args[0][2], 77)
         self.assertIn("Calling you", mock_send.call_args[0][3])
-        self.assertIn("does not record", mock_send.call_args[0][3])
         _thread.return_value.start.assert_called()
         meet.join_command(self.bot, 1, self._event("/join nope", "nope"))
         self.assertIn("Usage", mock_send.call_args[0][3])
+
+    @patch("meet.threading.Thread")
+    @patch("meet.dc_helpers._send")
+    def test_group_room_is_for_members(self, mock_send, _thread):
+        self._chats()
+        meet.meet_command(self.bot, 1, self._event("/meet", chat_id=42))
+        m = state.meet_manager
+        self.managers.append(m)
+        room = next(iter(m.rooms.values()))
+        self.assertTrue(room.group)
+        self.assertEqual(len(mock_send.call_args_list), 1)  # no forwardable invite for groups
+        info = mock_send.call_args[0][3]
+        self.assertIn("Only members of this group", info)
+        self.assertIn("Reply Privately", info)
+        # another member gets the same room
+        meet.meet_command(self.bot, 1, self._event("/meet", from_id=11, chat_id=42))
+        self.assertIn(f"/join_{room.id}", mock_send.call_args[0][3])
+        self.assertEqual(len(m.rooms), 1)
+        # an outsider with the leaked link is refused, and not routed on call-back
+        self.bot.rpc.create_chat_by_contact_id.return_value = 77
+        meet.join_command(self.bot, 1, self._event(f"/join_{room.id}", room.id, from_id=12, chat_id=77))
+        self.assertEqual(mock_send.call_args[0][3], meet.NOT_MEMBER)
+        self.assertNotIn(12, m.contact_room)
+        calls_out = [c for c in _thread.call_args_list if c.kwargs.get("name") == "meet-call-out"]
+        self.assertEqual(calls_out, [])
+        # a member is called
+        meet.join_command(self.bot, 1, self._event(f"/join_{room.id}", room.id, from_id=11, chat_id=42))
+        self.assertIn("Calling you", mock_send.call_args[0][3])
+        self.assertEqual(mock_send.call_args[0][2], 77)  # private chat, not the group
+
+    @patch("meet.dc_helpers._send")
+    def test_unsupported_chat(self, mock_send):
+        database.set_config("meets_enabled", "1")
+        self.bot.rpc.get_basic_chat_info.return_value = {"chat_type": "OutBroadcast"}
+        meet.meet_command(self.bot, 1, self._event("/meet", chat_id=9))
+        self.assertIn("group or in a private chat", mock_send.call_args[0][3])
+        self.assertIsNone(state.meet_manager)  # nothing was started
+
+    @patch("meet.dc_helpers._send")
+    def test_removed_member_is_dropped(self, mock_send):
+        self._chats(members=(10, 11, 12))
+        m = self.manager()
+        room = m.create_room(10, chat_id=42, group=True)
+        p11 = self.fake_participant(m, room, 11)
+        p12 = self.fake_participant(m, room, 12)
+        p12.joined_at = time.time() - 65
+        m.contact_room[13] = room.id
+        self._chats(members=(10, 11))  # 12 and 13 left the group
+        m.check_members()
+        self.assertTrue(p12.left)
+        self.assertFalse(p11.left)
+        self.assertNotIn(13, m.contact_room)
+        self.assertIn("no longer in the group", mock_send.call_args[0][3])
+        self.assertNotIn("/join_", mock_send.call_args[0][3])
+        # calling back in after leaving the group: declined, not routed
+        m.contact_room[12] = room.id
+        ev = Ev(kind="IncomingCall", msg_id=900, chat_id=112, place_call_info="v=0")
+        m.on_incoming_call(1, ev, 12)
+        self.bot.rpc.end_call.assert_called_with(1, 900)
+        self.assertEqual(mock_send.call_args[0][3], meet.NOT_MEMBER)
+        self.assertNotIn(12, m.contact_room)
+
+    @patch("meet.dc_helpers._is_dc_admin", return_value=False)
+    @patch("meet.dc_helpers._send")
+    def test_meetclose_by_creator(self, mock_send, _admin):
+        self._chats()
+        meet.meet_command(self.bot, 1, self._event("/meet", chat_id=42))
+        m = state.meet_manager
+        self.managers.append(m)
+        room = next(iter(m.rooms.values()))
+        p = self.fake_participant(m, room, 11)
+        meet.meetclose_command(self.bot, 1, self._event("/meetclose", from_id=11, chat_id=42))
+        self.assertIn("Only the person who started", mock_send.call_args[0][3])
+        self.assertFalse(room.closed)
+        meet.meetclose_command(self.bot, 1, self._event("/meetclose", room.id, from_id=11, chat_id=42))
+        self.assertIn("No open meeting", mock_send.call_args[0][3])
+        # the creator can close it from their private chat with the bot
+        meet.meetclose_command(self.bot, 1, self._event("/meetclose", from_id=10, chat_id=7))
+        self.assertTrue(room.closed)
+        self.assertTrue(p.left)
+        self.assertIn("closed, 1 participant(s) disconnected", mock_send.call_args[0][3])
+        self.assertNotIn("/join_", mock_send.call_args[0][3])
+        meet.meetclose_command(self.bot, 1, self._event("/meetclose", from_id=10, chat_id=42))
+        self.assertIn("no open meeting here", mock_send.call_args[0][3])
+
+    @patch("meet.dc_helpers._is_dc_admin", return_value=True)
+    @patch("meet.dc_helpers._send")
+    def test_admin_closes_any_room_by_prefix(self, mock_send, _admin):
+        self._chats()
+        m = meet.get_manager(self.bot)
+        self.managers.append(m)
+        room = m.create_room(10, chat_id=42, group=True)
+        meet.meetclose_command(self.bot, 1, self._event("/meetclose", room.id[:3], from_id=99, chat_id=5))
+        self.assertIn("No open meeting", mock_send.call_args[0][3])  # prefix too short
+        meet.meetclose_command(self.bot, 1, self._event("/meetclose", room.id[:4], from_id=99, chat_id=5))
+        self.assertTrue(room.closed)
+        sent = self._texts(mock_send)
+        self.assertIn((42, "📞 This chat's voice meeting was closed by the bot admin."), sent)
+
+    @patch("meet.dc_helpers._is_dc_admin", return_value=False)
+    @patch("meet.dc_helpers._send")
+    def test_meetnew_swaps_the_link(self, mock_send, _admin):
+        self._chats()
+        meet.meet_command(self.bot, 1, self._event("/meet", chat_id=42))
+        m = state.meet_manager
+        self.managers.append(m)
+        old = next(iter(m.rooms.values()))
+        p = self.fake_participant(m, old, 11)
+        mock_send.reset_mock()
+        meet.meetnew_command(self.bot, 1, self._event("/meetnew", chat_id=42))
+        self.assertTrue(old.closed)
+        new = m.room_for_chat(42)
+        self.assertNotEqual(new.id, old.id)
+        self.assertEqual((new.owner, new.group), (10, True))
+        texts = self._texts(mock_send)
+        self.assertIn("restarted with a new link", texts[0][1])          # to the participant
+        self.assertNotIn(new.id, texts[0][1])                           # ...without the new link
+        self.assertTrue(any(c == 42 and f"/join_{new.id}" in t for c, t in texts))
+        self.assertIn("No such meeting", m.join(1, 11, old.id))
+        self.assertTrue(p.left)
 
 
 @unittest.skipIf(rtc is None, "aiortc/cmcall not installed")

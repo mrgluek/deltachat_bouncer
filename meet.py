@@ -14,10 +14,18 @@ MEET_TOTAL_SLOTS (8) places across at most MEET_MAX_ROOMS (2) rooms: one room
 can take all 8, two rooms get 4 each, and a second room is refused while the
 first has more than 4 people.
 
-/meet           create a room (12-char unguessable base62 id)
+/meet           create the chat's room (12-char unguessable base62 id); in a
+                chat that has one, show its link again
 /join_<id>      the bot calls you into the room; while the room is open you
 /join <id>      can also simply call the bot and you land in it again
+/meetclose      close the chat's room (its creator or the admin; admin: any id)
+/meetnew        close it and start a new one with a new link
 /meets on|off   admin switch (also 1/0); no argument shows the status
+
+A room belongs to the chat it was started in. A group's room is for that
+group's members only (checked on /join, on calls back in and every 30 s
+during the meeting); a room started in a private chat with the bot is open
+to whoever has its link.
 
 Rooms live in memory (a bot restart drops them) and close
 MEET_IDLE_MINUTES (60) after the last participant left, at the latest
@@ -66,6 +74,12 @@ TUNE_NOTES = 5
 TUNE_NOTE_FRAMES = 7      # 140 ms per note
 TUNE_LAST_FRAMES = 14     # the last note rings a little longer
 TUNE_AMPLITUDE = 0.16
+
+NOT_MEMBER = "❌ This meeting is only for members of the group it was started in."
+REPLY_PRIVATELY_HINT = (
+    "💡 Tapping the command posts it in the group. To keep the group quiet, long-press this "
+    "message → Reply Privately, and send me the /join_… command there."
+)
 
 PRIVACY_NOTE = (
     "🔒 The bot does not record or store your voice. It mixes everyone's audio on its server, "
@@ -211,6 +225,9 @@ class Participant:
 class Room:
     id: str
     owner: int
+    chat_id: int = 0          # the chat it was started in (and belongs to)
+    group: bool = False       # group room: members of chat_id only
+    accid: int = 1
     created_at: float = field(default_factory=time.time)
     participants: dict = field(default_factory=dict)  # contact_id -> Participant
     empty_since: Optional[float] = None
@@ -262,14 +279,60 @@ class MeetManager:
 
     # -- rooms -------------------------------------------------------------
 
-    def create_room(self, owner: int) -> Room:
+    def create_room(self, owner: int, chat_id: int = 0, group: bool = False, accid: int = 1) -> Room:
         with self._lock:
-            room = Room(id=new_meet_id(), owner=owner)
+            room = Room(id=new_meet_id(), owner=owner, chat_id=chat_id, group=group, accid=accid)
             self.rooms[room.id] = room
             self.contact_room[owner] = room.id
         self.loop.submit(self._mix(room))
-        config.logger.info(f"Meet {room.id[:4]}…: created by contact {owner}")
+        config.logger.info(f"Meet {room.id[:4]}…: created by contact {owner} "
+                           f"in {'group' if group else 'private'} chat {chat_id}")
         return room
+
+    def room_for_chat(self, chat_id: int) -> Optional[Room]:
+        with self._lock:
+            return next((r for r in self.rooms.values() if r.chat_id == chat_id and not r.closed), None)
+
+    def find_room(self, ref: str) -> Optional[Room]:
+        """Room by full id or a unique prefix of at least 4 characters (as /meets shows)."""
+        with self._lock:
+            if ref in self.rooms:
+                return self.rooms[ref]
+            hits = [r for rid, r in self.rooms.items() if len(ref) >= 4 and rid.startswith(ref)]
+            return hits[0] if len(hits) == 1 else None
+
+    def is_member(self, room: Room, contact_id: int) -> bool:
+        """May this contact be in the room? Group rooms: members of their group only."""
+        if not room.group:
+            return True
+        try:
+            return contact_id in self.bot.rpc.get_chat_contacts(room.accid, room.chat_id)
+        except Exception as e:
+            config.logger.warning(f"Meet {room.id[:4]}…: member check failed: {e}")
+            return False
+
+    def check_members(self) -> None:
+        """Drop participants (and call-back routes) of people who left the room's group."""
+        for room in list(self.rooms.values()):
+            if not room.group:
+                continue
+            with self._lock:
+                parts = list(room.participants.values())
+                routed = [c for c, rid in self.contact_room.items() if rid == room.id]
+            if not parts and not routed:
+                continue
+            try:
+                members = set(self.bot.rpc.get_chat_contacts(room.accid, room.chat_id))
+            except Exception as e:
+                config.logger.warning(f"Meet {room.id[:4]}…: member check failed: {e}")
+                continue
+            with self._lock:
+                for cid in routed:
+                    if cid not in members and self.contact_room.get(cid) == room.id:
+                        self.contact_room.pop(cid, None)
+            for p in parts:
+                if p.contact_id not in members:
+                    self.leave(p, "not-member")
 
     def close_room(self, room: Room, reason: str) -> None:
         with self._lock:
@@ -293,6 +356,7 @@ class MeetManager:
             time.sleep(30)
             try:
                 self.reap()
+                self.check_members()
             except Exception as e:
                 config.logger.warning(f"Meet reaper: {e}")
 
@@ -340,6 +404,11 @@ class MeetManager:
             cap = self.room_capacity()
             if current is None and len(room.participants) >= cap:
                 return f"❌ This meeting is full ({cap} people)."
+        if not self.is_member(room, contact_id):
+            return NOT_MEMBER
+        with self._lock:
+            if room.closed:
+                return f"❌ No such meeting, or it has closed: {room_id}"
             self.contact_room[contact_id] = room_id
             n = len(room.participants) + (0 if current else 1)
         threading.Thread(target=self._safe, args=(self._call_out, accid, contact_id, room),
@@ -429,6 +498,13 @@ class MeetManager:
         msg_id, chat_id = int(event.msg_id), int(event.chat_id)
         with self._lock:
             room = self.rooms.get(self.contact_room.get(contact_id, ""))
+        if room is not None and not self.is_member(room, contact_id):
+            with self._lock:
+                if self.contact_room.get(contact_id) == room.id:
+                    self.contact_room.pop(contact_id, None)
+            calls._end_call(rpc, accid, msg_id)
+            dc_helpers._send(self.bot, accid, chat_id, NOT_MEMBER)
+            return
         p = self._new_participant(accid, room, contact_id, chat_id, outgoing=False) if room else None
         if p is None:
             calls._end_call(rpc, accid, msg_id)
@@ -530,15 +606,21 @@ class MeetManager:
             took = _fmt_duration(ended - (p.joined_at or ended))
             config.logger.info(f"Meet {room.id[:4]}…: contact {p.contact_id} left ({reason}) after {took}")
             if notify:
-                if room.closed:
+                if reason in ("closed", "renewed", "turned-off", "max-lifetime", "not-member"):
+                    tail = ""
+                elif room.closed:
                     tail = "The meeting has closed."
                 else:
                     tail = (f"The room stays open for {config.MEET_IDLE_MINUTES} minutes after the last "
                             f"person leaves: call me or tap /join_{room.id} to get back in.")
                 why = {"media-lost": " (connection lost)", "turned-off": " (meetings were turned off)",
-                       "max-lifetime": " (maximum meeting length reached)"}.get(reason, "")
+                       "max-lifetime": " (maximum meeting length reached)",
+                       "closed": " (the meeting was closed)",
+                       "renewed": " (the meeting was closed and restarted with a new link)",
+                       "not-member": " (you are no longer in the group this meeting belongs to)",
+                       }.get(reason, "")
                 dc_helpers._send(self.bot, accid, p.chat_id,
-                                 f"📞 You left the meeting after {took}{why}. {tail}")
+                                 f"📞 You left the meeting after {took}{why}. {tail}".rstrip())
 
     # -- mixing ------------------------------------------------------------
 
@@ -597,7 +679,8 @@ class MeetManager:
         for r in rooms:
             n = sum(1 for p in r.participants.values() if p.connected)
             idle = "" if r.participants else f", empty for {_fmt_duration(now - (r.empty_since or now))}"
-            lines.append(f"• {r.id[:4]}… — {n}/{self.room_capacity()} connected, "
+            kind = "group" if r.group else "private"
+            lines.append(f"• {r.id[:4]}… ({kind}) — {n}/{self.room_capacity()} connected, "
                          f"open {_fmt_duration(now - r.created_at)}{idle}")
         return lines
 
@@ -615,33 +698,141 @@ def get_manager(bot) -> Optional[MeetManager]:
     return state.meet_manager
 
 
+def _chat_kind(bot, accid, chat_id) -> str:
+    """'private' (1:1 with the bot), 'group', or something meetings don't support."""
+    try:
+        chat = bot.rpc.get_basic_chat_info(accid, chat_id)
+        kind = chat.get("chat_type") if isinstance(chat, dict) else getattr(chat, "chat_type", None)
+    except Exception:
+        return "unknown"
+    return {"Single": "private", "Group": "group"}.get(str(kind), "other")
+
+
+def _invite_link() -> str:
+    link = state.get_bot_invite_link() or ""
+    return link if link.startswith("https://") else ""
+
+
+def _send_room_link(bot, accid, manager, room, from_id, created: bool) -> None:
+    cap = manager.room_capacity()
+    head = "📞 **Voice meeting created**" if created else "📞 **This chat's voice meeting**"
+    lines = [
+        head,
+        f"Join: /join_{room.id}",
+        "Tap it and I will call you. If you hang up, call me any time while the room is open to get back in. "
+        f"Up to {cap} people, voice only.",
+    ]
+    if room.group:
+        lines.append("Only members of this group can join.")
+        lines.append(REPLY_PRIVATELY_HINT)
+    else:
+        lines.append("Anyone you give the /join_… command to can join, so share it only privately. "
+                     "Forward them the next message.")
+    lines.append(f"The room closes {config.MEET_IDLE_MINUTES} minutes after the last person leaves; "
+                 f"its creator can close it with /meetclose or swap the link with /meetnew.")
+    if created:
+        lines.append(manager.tune_line(accid, from_id))
+    lines += ["", PRIVACY_NOTE]
+    dc_helpers._send(bot, accid, room.chat_id, "\n".join(lines))
+    if not room.group:
+        link = _invite_link()
+        add = f"add this bot: {link} and " if link else "add the bot I got this from and "
+        dc_helpers._send(bot, accid, room.chat_id,
+                         f"🎙️ Join my voice meeting: {add}send it this message: /join_{room.id}")
+
+
 @config.dc_cli.on(events.NewMessage(command="/meet"))
 def meet_command(bot, accid, event):
     msg = event.msg
     if not meets_enabled() or rtc is None:
         dc_helpers._send(bot, accid, msg.chat_id, "❌ Voice meetings are disabled on this bot.")
         return
+    kind = _chat_kind(bot, accid, msg.chat_id)
+    if kind not in ("private", "group"):
+        dc_helpers._send(bot, accid, msg.chat_id,
+                         "❌ Meetings can be started in a group or in a private chat with me.")
+        return
     manager = get_manager(bot)
+    room = manager.room_for_chat(msg.chat_id)
+    if room is not None:  # a chat has one room: show it again (never another chat's)
+        if room.group and not manager.is_member(room, msg.from_id):
+            dc_helpers._send(bot, accid, msg.chat_id, NOT_MEMBER)
+            return
+        _send_room_link(bot, accid, manager, room, msg.from_id, created=False)
+        return
     owned = [r for r in list(manager.rooms.values()) if r.owner == msg.from_id]
     if len(owned) >= config.MEET_MAX_ROOMS_PER_USER:
-        dc_helpers._send(bot, accid, msg.chat_id,
-                         f"ℹ️ You already have an open meeting: /join_{owned[0].id}")
+        dc_helpers._send(bot, accid, msg.chat_id, (
+            "ℹ️ You already have an open meeting in another chat. Close it first: send /meetclose "
+            "in that chat or to me privately."))
         return
     ok, why = manager.can_create_room()
     if not ok:
         dc_helpers._send(bot, accid, msg.chat_id, why)
         return
-    room = manager.create_room(msg.from_id)
-    cap = manager.room_capacity()
-    dc_helpers._send(bot, accid, msg.chat_id, (
-        f"📞 **Voice meeting created**\n"
-        f"Join: /join_{room.id}\n"
-        f"Tap it and I will call you. If you hang up, call me any time while the room is open to get back in. "
-        f"Share the command with the others - up to {cap} people, voice only.\n"
-        f"The room closes {config.MEET_IDLE_MINUTES} minutes after the last person leaves.\n"
-        f"{manager.tune_line(accid, msg.from_id)}\n\n"
-        f"{PRIVACY_NOTE}"
-    ))
+    room = manager.create_room(msg.from_id, chat_id=msg.chat_id, group=(kind == "group"), accid=accid)
+    _send_room_link(bot, accid, manager, room, msg.from_id, created=True)
+
+
+def _target_room(bot, accid, manager, msg, arg: str, is_admin: bool):
+    """(room, error) for /meetclose and /meetnew: an id (admin, or your own room),
+    else this chat's room, else - in a private chat with me - the room you started."""
+    if arg:
+        room = manager.find_room(arg)
+        if room is None or not (is_admin or room.owner == msg.from_id):
+            return None, f"❌ No open meeting {arg} that you can manage."
+        return room, ""
+    room = manager.room_for_chat(msg.chat_id)
+    if room is None and _chat_kind(bot, accid, msg.chat_id) == "private":
+        owned = [r for r in list(manager.rooms.values()) if r.owner == msg.from_id]
+        room = owned[0] if owned else None
+    if room is None:
+        return None, "ℹ️ There is no open meeting here."
+    if not (is_admin or room.owner == msg.from_id):
+        return None, "❌ Only the person who started this meeting (or the bot admin) can do that."
+    return room, ""
+
+
+@config.dc_cli.on(events.NewMessage(command="/meetclose"))
+def meetclose_command(bot, accid, event):
+    msg = event.msg
+    if state.meet_manager is None or rtc is None:
+        dc_helpers._send(bot, accid, msg.chat_id, "ℹ️ There is no open meeting here.")
+        return
+    manager = state.meet_manager
+    is_admin = dc_helpers._is_dc_admin(bot, accid, msg.from_id)
+    room, err = _target_room(bot, accid, manager, msg, (event.payload or "").strip(), is_admin)
+    if room is None:
+        dc_helpers._send(bot, accid, msg.chat_id, err)
+        return
+    n = len(room.participants)
+    by_admin = room.owner != msg.from_id
+    manager.close_room(room, "closed")
+    config.logger.info(f"Meet {room.id[:4]}…: closed by {'admin' if by_admin else 'its creator'}")
+    dc_helpers._send(bot, accid, msg.chat_id,
+                     f"✅ Meeting {room.id[:4]}… closed" + (f", {n} participant(s) disconnected." if n else "."))
+    if by_admin and room.chat_id and room.chat_id != msg.chat_id:
+        dc_helpers._send(bot, accid, room.chat_id, "📞 This chat's voice meeting was closed by the bot admin.")
+
+
+@config.dc_cli.on(events.NewMessage(command="/meetnew"))
+def meetnew_command(bot, accid, event):
+    msg = event.msg
+    if not meets_enabled() or rtc is None or state.meet_manager is None:
+        dc_helpers._send(bot, accid, msg.chat_id, "ℹ️ There is no open meeting here.")
+        return
+    manager = state.meet_manager
+    is_admin = dc_helpers._is_dc_admin(bot, accid, msg.from_id)
+    room, err = _target_room(bot, accid, manager, msg, (event.payload or "").strip(), is_admin)
+    if room is None:
+        dc_helpers._send(bot, accid, msg.chat_id, err)
+        return
+    manager.close_room(room, "renewed")
+    new = manager.create_room(room.owner, chat_id=room.chat_id, group=room.group, accid=room.accid)
+    config.logger.info(f"Meet {room.id[:4]}…: renewed as {new.id[:4]}…")
+    if room.chat_id != msg.chat_id:
+        dc_helpers._send(bot, accid, msg.chat_id, "✅ Meeting restarted; the new link went to the meeting's chat.")
+    _send_room_link(bot, accid, manager, new, room.owner, created=True)
 
 
 @config.dc_cli.on(events.NewMessage(command="/join"))  # also /join_<id>: deltachat2 splits at "_"
