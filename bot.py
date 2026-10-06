@@ -28,6 +28,7 @@ import config
 import database
 import dc_helpers
 import handlers
+import meet  # noqa: F401  (registers /meet, /join, /meets)
 import moderation
 import security
 import state

@@ -36,6 +36,8 @@ _cmcall_global_lock = threading.Lock()
 
 # Echo call service (calls.EchoCallManager), set in on_start when enabled
 echo_call_manager = None
+# Voice meetings (meet.MeetManager), created on first /meet or /join
+meet_manager = None
 
 # CMCall monitoring state
 _cmcall_monitor_idx_db = database.get_config("cmcall_monitor_index")

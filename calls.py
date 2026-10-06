@@ -41,7 +41,7 @@ except Exception as _e:  # aiortc / cmcall not installed
     rtc = None
     _RTC_IMPORT_ERROR = _e
 
-CALL_EVENT_KINDS = ("IncomingCall", "CallEnded")
+CALL_EVENT_KINDS = ("IncomingCall", "OutgoingCallAccepted", "CallEnded")
 REPORT_PREFIX = "📞"  # cmcall --to waits for a message starting with this
 
 PATH_LABELS = {
@@ -380,17 +380,37 @@ def _is_call_event(event) -> bool:
 
 @config.dc_cli.on(events.RawEvent(func=_is_call_event))
 def on_call_event(bot, accid, event):
-    manager = state.echo_call_manager
-    if manager is None:
-        if event.kind == "IncomingCall" and not config.CALL_ECHO_ENABLED:
-            return
-        if event.kind == "IncomingCall":
-            config.logger.warning(f"Incoming call ignored: call support unavailable ({_RTC_IMPORT_ERROR})")
+    echo, meet = state.echo_call_manager, state.meet_manager
+    if event.kind == "OutgoingCallAccepted":  # only meetings place calls
+        if meet is not None:
+            meet.on_outgoing_accepted(event)
         return
-    if event.kind == "IncomingCall":
-        manager.on_incoming_call(accid, event)
-    elif event.kind == "CallEnded":
-        manager.on_call_ended(accid, event)
+    if event.kind == "CallEnded":
+        if meet is not None:
+            meet.on_call_ended(event)
+        if echo is not None:
+            echo.on_call_ended(accid, event)
+        return
+    # IncomingCall: into a meeting the caller joined, else the echo
+    if meet is not None:
+        threading.Thread(target=_route_incoming_call, args=(bot, accid, event),
+                         name="call-route", daemon=True).start()
+    elif echo is not None:
+        echo.on_incoming_call(accid, event)
+    elif config.CALL_ECHO_ENABLED:
+        config.logger.warning(f"Incoming call ignored: call support unavailable ({_RTC_IMPORT_ERROR})")
+
+
+def _route_incoming_call(bot, accid, event) -> None:
+    meet, echo = state.meet_manager, state.echo_call_manager
+    try:
+        contact_id = bot.rpc.get_message(accid, int(event.msg_id)).from_id
+    except Exception:
+        contact_id = 0
+    if contact_id and meet.wants_incoming(contact_id):
+        meet._safe(meet.on_incoming_call, accid, event, contact_id)
+    elif echo is not None:
+        echo._answer_safe(accid, event)
 
 
 def setup_echo_calls(bot, accid) -> None:

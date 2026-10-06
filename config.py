@@ -41,7 +41,7 @@ logger = logging.getLogger("bouncer_bot")
 if os.environ.get("CALL_DEBUG_LOG", "").strip().lower() not in ("1", "true", "yes", "on"):
     for _webrtc_logger in ("aioice", "aiortc"):
         logging.getLogger(_webrtc_logger).setLevel(logging.WARNING)
-VERSION = "2.19.2"
+VERSION = "2.20.0"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -150,6 +150,19 @@ CALL_ECHO_HANGUP_GRACE = 15
 CALL_ECHO_STUN = os.environ.get("CALL_ECHO_STUN", "auto").strip().lower()
 # Days to keep the per-call statistics behind /callstats; 0 = keep none
 CALL_ECHO_LOG_DAYS = int(os.environ.get("CALL_ECHO_LOG_DAYS", "30"))
+
+# Voice meetings (/meet): an audio bridge on top of calls. Switched on by the
+# admin with /meets on (off by default). Every participant costs an Opus
+# decode + encode, so places are a budget shared by all rooms: one room can use
+# all MEET_TOTAL_SLOTS, two rooms get half each, and a second room is refused
+# while the first one is fuller than that.
+MEET_TOTAL_SLOTS = int(os.environ.get("MEET_TOTAL_SLOTS", "8"))
+MEET_MAX_ROOMS = int(os.environ.get("MEET_MAX_ROOMS", "2"))
+MEET_MAX_PARTICIPANTS = int(os.environ.get("MEET_MAX_PARTICIPANTS", "8"))  # per room
+MEET_IDLE_MINUTES = int(os.environ.get("MEET_IDLE_MINUTES", "60"))  # after the last person left
+MEET_MAX_HOURS = float(os.environ.get("MEET_MAX_HOURS", "6"))  # hard limit per room
+MEET_RING_SECONDS = int(os.environ.get("MEET_RING_SECONDS", "45"))  # /join: how long the bot rings
+MEET_MAX_ROOMS_PER_USER = int(os.environ.get("MEET_MAX_ROOMS_PER_USER", "1"))
 
 # Call monitoring between relays (cmcall), the call-side twin of the cmping monitor
 CMCALL_MONITOR_INTERVAL = int(os.environ.get("CMCALL_MONITOR_INTERVAL", "3600"))  # 0 disables

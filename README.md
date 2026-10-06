@@ -21,6 +21,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - 🏆 **Activity Ranking (`/top`):** Show the 10 most active members in the last 24 hours (independent 60s cooldown).
 - 🏓 **ChatMail Ping (`/cmping`):** Ping mail relays (transports) to/from specified target servers using the `cmping` utility. Features real-time reaction-based progress tracking (`⏳`, `☑️`, `❌`) and runs asynchronously.
 - 📞 **Echo Calls:** Call the bot from any Delta Chat app to test calls: it answers, plays a short two-tone greeting and echoes your voice back. After you hang up it sends a `📞 Echo call report` with the call duration, the media path (direct / peer-to-peer via STUN / TURN relay), how much of your voice it heard, packet loss, jitter and round-trip time. The WebRTC side is [`cmcall`](https://github.com/mrgluek/cmcall)'s `EchoPeer` (aiortc) running on a dedicated event-loop thread, so bot work never stalls call audio. Calls are capped (`CALL_ECHO_MAX_SECONDS`, default 300) and limited in parallel (`CALL_ECHO_MAX_CONCURRENT`, default 2; further callers get a "line busy" message). See [Echo Call Settings](#echo-call-settings).
+- 🎙️ **Voice Meetings (prototype, off by default):** `/meet` opens a room, `/join_<id>` makes the bot call you into it, and while the room is open you can simply call the bot to get back in. Delta Chat calls are 1:1, so the bot is the hub: it mixes everyone's audio (mix-minus, noise gate, respects the app's mute) and plays a two-tone chime when someone joins or leaves. Voice only; the admin switches it on with `/meets on`. See [Voice Meetings](#voice-meetings).
 - 📲 **Call Test Between Relays (`/cmcall`):** Runs the `cmcall` utility: a test profile on the first relay calls a profile on the second one, which echoes. Reports signaling delivery in both directions, the TURN servers used (media is forced through the relays' TURN), ICE connect time, echoed-audio round trip and RTP loss/jitter.
 - 📞 **Call Monitoring Between Relays:** The call-side twin of the cmping monitor, over the same server list. Every hour (`CMCALL_MONITOR_INTERVAL`) one source relay calls every other relay with `cmcall` (TURN-only media, 5 s of audio); one call per pair covers both mail directions and both TURN servers, and the direction alternates each cycle. A lone relay calls itself. Hard failures are retried once and then raise a `📞🚨 Calls failing` alert in the `/cmreport` chats, edited in place when it resolves; packet loss ≥ `CMCALL_DEGRADED_LOSS_PCT` (10 %) in two checks in a row raises `📞⚠️ Calls degraded`. Relays without a TURN server are shown as "no TURN" and never alert. Quality is measured from the bot's host, so it never counts as an outage.
 - 📡 **Server Connectivity Monitoring:** Automatic periodic monitoring of server connectivity using a round-robin algorithm. Employs an **incident-based alerting system** with in-place dynamic message editing (`🚨 Ongoing` → `⚠️ Ongoing (Partial Recovery)` → `✅ Resolved`) to prevent notification noise, along with accurate root-cause fault isolation. Configurable interval via `CMPING_MONITOR_INTERVAL` env var (default: 30 min).
@@ -80,6 +81,8 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/cmcall <server1> [server2]` — Test a Delta Chat call from server1 to server2 (or within one server): signaling, TURN, audio echo and RTP statistics (60s cooldown, one test at a time).
 - `/callstats` — Your recent echo calls to this bot; admins also get 24h/7d totals and the last 10 calls.
 - 📞 **Call the bot** — It answers and echoes your audio, then sends call statistics into the chat.
+- `/meet` — Create a voice meeting (when the admin enabled them) and get its `/join_<id>` link.
+- `/join_<id>` or `/join <id>` — The bot calls you into the meeting; calling the bot while the room is open also puts you back in.
 - `/virus <url>` — Scan a URL, or reply to a message containing a link or attached file with `/virus` to inspect with VirusTotal (15s global rate limit).
 - `/sticker` — Convert replied or attached image to a WebP sticker (preserves original image/background; 5s cooldown).
 - `/stickernobg` — Convert replied or attached image to a WebP sticker with background removed (15s cooldown, serialized).
@@ -115,6 +118,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/cmcallstatus [server]` — Call monitoring: per-relay call health (✅ ok, ⚠️ degraded, 🚨 failing, ➖ no TURN), TURN server, and the latest call per pair with RTT, loss and signaling time.
 - `/cmcallhistory [server]` — Call incidents (failing / degraded episodes) with durations.
 - `/cmcallskip [server]` — Exclude a server from call monitoring only, e.g. a mail server without calls (Admin only; no argument lists skipped servers). `/cmcallunskip <server>` puts it back.
+- `/meets [on|off]` — Switch voice meetings on or off (also `1`/`0`; off by default, off closes all rooms); no argument shows status and open rooms (Admin only).
 - `/cmreport <on/off>` — Toggle monitoring alerts for current chat (Admin only).
 
 Relay selection and failover are handled by the Delta Chat core (2.61+): it sends via the newest relay first and falls back to the next one if a relay is unreachable. `/transports` lists relays in that order. The former `/setprimary` and `/resilient` commands are deprecated and only reply with this explanation.
@@ -158,6 +162,32 @@ To test the echo service end to end from the command line: `cmcall <your relay> 
 - **Statistics.** `/callstats` keeps, per call: contact ID, chat ID, start time, duration, whether media connected, path type (direct / STUN / TURN), packet loss, RTT, jitter, seconds of detected voice and why the call ended — no audio, no IP addresses. Rows older than `CALL_ECHO_LOG_DAYS` (30) are deleted; `0` keeps none. The admin's `/callstats` lists recent calls by contact ID.
 - **Logs.** The bot logs call IDs, contact IDs and durations. aiortc/aioice are kept at WARNING because at INFO they log every ICE candidate pair, i.e. callers' IP addresses; `CALL_DEBUG_LOG=1` re-enables that for troubleshooting only.
 - **Call monitoring** (`/cmcall`, `/cmcallstatus`) uses the bot's own test profiles and stores only relay names and measurements.
+
+## Voice Meetings
+
+A prototype audio bridge on top of Delta Chat calls, **off by default** — an admin turns it on with `/meets on` (`/meets off` or `0` closes all rooms; `/meets` alone shows status and open rooms).
+
+- `/meet` creates a room with a 12-character unguessable base62 id and replies with `/join_<id>`. Share that command with the others.
+- `/join_<id>` (or `/join <id>`, also from a group — the call and notice go to your private chat with the bot): the bot calls you. If you miss or end the call, call the bot yourself while the room is open and you land in the same room (an incoming call from someone who joined a room goes to the room, otherwise to the echo service).
+- Delta Chat calls are 1:1 only, so every participant is in a normal call with the bot, and the bot mixes: every 20 ms it takes one frame per participant, leaves out silence (noise gate with 300 ms hold) and anyone whose app reports the microphone as muted, and sends each person the sum of the others (mix-minus — you never hear yourself). Joining plays the echo greeting's two tones (330 → 440 Hz) to everyone, leaving plays them in reverse.
+- Rooms live in memory (a bot restart ends them) and close `MEET_IDLE_MINUTES` after the last person left, at the latest `MEET_MAX_HOURS` after creation. One open room per user.
+- **Capacity** is one budget for all rooms: `MEET_TOTAL_SLOTS` places (8) in at most `MEET_MAX_ROOMS` rooms (2). One room can use all 8; with two rooms each takes 4, and a second room is refused while the first has more than 4 people.
+
+| Variable | Default | Description |
+|---|---|---|
+| `MEET_TOTAL_SLOTS` | `8` | Places across all rooms. |
+| `MEET_MAX_ROOMS` | `2` | Rooms at the same time. |
+| `MEET_MAX_PARTICIPANTS` | `8` | Upper limit per room. |
+| `MEET_IDLE_MINUTES` | `60` | A room closes this long after its last participant left. |
+| `MEET_MAX_HOURS` | `6` | Hard limit on a room's lifetime. |
+| `MEET_RING_SECONDS` | `45` | How long the bot rings after `/join`. |
+| `MEET_MAX_ROOMS_PER_USER` | `1` | Open rooms per creator. |
+
+**Load.** Each participant costs an Opus decode + encode plus aiortc's RTP/SRTP handling in Python: about 10 % of one core per participant (2.8 GHz Xeon), the mixing itself almost nothing. A full meeting of 8 used 70–90 % of one core and ~95 MB RSS in `tests/bench_meet.py` — within the container's 2-CPU / 2 GB limit next to the 2 echo calls. Run `python3 tests/bench_meet.py [participants] [seconds]` in the container to measure on your hardware.
+
+**Privacy.** The bot does not record or store anyone's voice: audio exists only in short in-memory queues (≈100 ms) and nothing is written to disk. But the bot decrypts and mixes everyone's audio, so a meeting is **not end-to-end encrypted between participants**, and any participant can record what they hear — every room and join message says so. Call messages (they carry SDP with IP addresses) are deleted when a participant leaves; nothing about meetings is stored in the database except the on/off switch.
+
+**Limits of the prototype.** When the bot places the call (`/join`) its offer is audio-only without the apps' data channels, so mute is detected by the noise gate only (a muted mic is silent anyway); when you call in, the app's mute state is used directly.
 
 ## Admin Management
 
@@ -229,7 +259,8 @@ As of v2.15.0, the bot logic is split into focused modules instead of one monoli
 - `dc_helpers.py` — generic Delta Chat RPC helpers (admin/fingerprint checks, `_send`/`_react`, the delayed-command debouncer, message-attachment extraction).
 - `formatting.py` / `security.py` — Delta Chat markdown → HTML rendering; web-layer rate limiting and safe host/URL resolution.
 - `cmcall_monitor.py` — periodic call monitoring between relays (round-robin cycle, health evaluation, `📞` alerts) and `/cmcallstatus`, `/cmcallhistory`, `/cmcallskip`, `/cmcallunskip`.
-- `calls.py` — echo call service (`EchoCallManager`, `IncomingCall`/`CallEnded` raw-event hooks) and the `/cmcall` / `/callstats` commands.
+- `calls.py` — echo call service (`EchoCallManager`, `IncomingCall`/`OutgoingCallAccepted`/`CallEnded` raw-event hooks, routing calls into meetings) and the `/cmcall` / `/callstats` commands.
+- `meet.py` — voice meetings: `MeetManager` (rooms, capacity budget, calling participants in), the mix-minus mixer and `/meet`, `/join`, `/meets`.
 - `moderation.py`, `transports.py`, `cmping.py` + `cmping_commands.py`, `channels.py`, `virustotal.py`, `stickers.py` — one module per subsystem, each owning its background workers and `/command` handlers.
 - `commands.py` / `handlers.py` — the remaining general commands (`/help`, `/bounce`, `/search`, …) and the global Delta Chat event handlers (system messages, the catch-all `NewMessage` dispatcher).
 - `web/` — the aiohttp channel-preview + ActivityPub server: `web/routes.py`, `web/ap_routes.py`, and `web/templates/` (landing page, channel preview, RSS feed, tombstone/404, shared theme snippets).

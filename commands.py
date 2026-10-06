@@ -590,6 +590,13 @@ def _get_help_chat_id(bot, accid, msg):
     return bot.rpc.create_chat_by_contact_id(accid, msg.from_id)
 
 
+def _meet_help() -> str:
+    if database.get_config("meets_enabled") != "1":
+        return ""
+    return ("/meet — Start a voice meeting (the bot calls everyone in and mixes).\n"
+            "/join <id> — Join a meeting; the bot calls you.\n")
+
+
 @config.dc_cli.on(events.NewMessage(command="/help"))
 def help_command(bot, accid, event):
     msg = event.msg
@@ -629,6 +636,7 @@ def help_command(bot, accid, event):
         f"/cmping <server1> ... — Ping relays to/from specified servers.\n"
         f"/cmcall <server1> [server2] — Test a Delta Chat call between relays.\n"
         f"/callstats — Your echo call results.\n"
+        f"{_meet_help()}"
         f"/cmcallstatus [server] — Call monitoring results between relays.\n"
         f"/cmcallhistory [server] — Call incidents (failing / degraded) per relay.\n"
         f"📞 Call me — I answer, echo your voice back and send call statistics (calls are not recorded).\n"
@@ -669,7 +677,8 @@ def help_command(bot, accid, event):
         help_text += "/cmpingdel <server> — Remove server from monitoring\n"
         help_text += "/cmreport <on/off> — Toggle monitoring alerts (messages and calls) in this chat\n"
         help_text += "/cmcallskip [server] — Exclude a server from call monitoring (no arg: list)\n"
-        help_text += "/cmcallunskip <server> — Put a server back into call monitoring"
+        help_text += "/cmcallunskip <server> — Put a server back into call monitoring\n"
+        help_text += "/meets [on|off] — Voice meetings switch (off by default, CPU-heavy)"
 
 
     chat_id = _get_help_chat_id(bot, accid, msg)
