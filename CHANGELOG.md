@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.21.0] - 2026-10-06
+
+### Added
+- **Join Tunes in Voice Meetings**: Instead of the same two tones for everybody, each participant is announced with their own 5-note tune (C major pentatonic, C4–A5, soft decaying bell tone, ~0.85 s) picked by a salted SHA-256 hash of their key fingerprint, falling back to their address. It is the same in every meeting, so people can tell by ear who joined; leaving plays it backwards. The newcomer hears their own tune too, and `/meet` / `/join` show it as note names (e.g. `E4 C5 A4 D5 G4`).
+
+### Changed
+- **Tunes No Longer Interrupt the Conversation**: Join/leave sounds are mixed on top of the meeting audio; before, the mix was dropped while a sound played.
+
 ## [2.20.0] - 2026-10-06
 
 ### Added

@@ -47,6 +47,31 @@ def _tone(freq, amp=8000):
     return (np.sin(2 * np.pi * freq * t) * amp).astype(np.int16)
 
 
+def _note_of(mono):
+    """Nearest scale note of a frame (zero-padded FFT: ~3 Hz resolution), or None."""
+    if rtc.rms(mono) < 1000:
+        return None
+    spec = np.abs(np.fft.rfft(mono * np.hanning(mono.size), n=16384))
+    spec[:20] = 0
+    freq = np.argmax(spec) * rtc.SAMPLE_RATE / 16384
+    name, f = min(meet.TUNE_SCALE, key=lambda nf: abs(nf[1] - freq))
+    return name if abs(f - freq) / f < 0.03 else None
+
+
+def _dedup(names):
+    return [n for i, n in enumerate(names) if i == 0 or names[i - 1] != n]
+
+
+def _notes(monos):
+    """Distinct notes in order (a note held over several frames counts once)."""
+    out = []
+    for mono in monos:
+        n = _note_of(mono)
+        if n and (not out or out[-1] != n):
+            out.append(n)
+    return out
+
+
 class _Base(unittest.TestCase):
     def setUp(self):
         _cleanup_db()
@@ -56,6 +81,10 @@ class _Base(unittest.TestCase):
         self.bot = MagicMock()
         self.bot.rpc.ice_servers.return_value = "[]"
         self.managers = []
+        fp = patch("meet.dc_helpers._get_contact_fingerprint",
+                   side_effect=lambda bot, accid, cid, contact=None: f"{cid:040X}")
+        fp.start()
+        self.addCleanup(fp.stop)
 
     def tearDown(self):
         for m in self.managers:
@@ -145,19 +174,63 @@ class TestMixer(_Base):
         m.mix_tick(room)
         self.assertEqual(len(a.inbox), meet.INBOX_MAX_BACKLOG - 1)
 
-    def test_out_track_plays_tones_before_mix(self):
+    def test_out_track_mixes_tune_over_speech(self):
         import asyncio
 
         track = meet.MeetOutTrack()
-        track.push(_tone(500))
-        track.play(meet._tones(meet.JOIN_TONES))
+        track.play(meet.tune_frames((0, 9, 2, 5, 4)))
+        speech = _tone(1000, amp=3000)
 
-        async def first_two():
-            return [await track.recv() for _ in range(2)]
+        async def take(n):
+            return [await track.recv() for _ in range(n)]
 
-        f1, f2 = asyncio.run(first_two())
-        self.assertAlmostEqual(rtc.dominant_freq(rtc.frame_mono(f1), rtc.SAMPLE_RATE), 330, delta=60)
+        f1, = asyncio.run(take(1))
+        self.assertEqual(_note_of(rtc.frame_mono(f1)), "C4")
+        tune_pcm = track.prio[0].copy()
+        track.push(speech)
+        f2, = asyncio.run(take(1))
+        out = f2.to_ndarray().reshape(-1)
+        self.assertTrue(np.array_equal(out, meet._clip(tune_pcm.astype(np.int32) + speech)))
         self.assertEqual(f2.pts - f1.pts, rtc.FRAME_SAMPLES)
+        track.prio.clear()
+        track.push(speech)
+        f3, = asyncio.run(take(1))
+        self.assertTrue(np.array_equal(f3.to_ndarray().reshape(-1), speech))
+
+
+@unittest.skipIf(rtc is None, "aiortc/cmcall not installed")
+class TestTunes(_Base):
+    def test_tune_from_seed(self):
+        t = meet.tune_for("fp:ABCD")
+        self.assertEqual(t, meet.tune_for("fp:ABCD"))  # stable
+        self.assertEqual(len(t), meet.TUNE_NOTES)
+        self.assertTrue(all(0 <= n < len(meet.TUNE_SCALE) for n in t))
+        self.assertTrue(all(a != b for a, b in zip(t, t[1:])), t)
+        tunes = {meet.tune_for(f"fp:{i}") for i in range(200)}
+        self.assertGreater(len(tunes), 195)  # 10*9^4 = 65610 possible tunes
+        self.assertRegex(meet.tune_name(t), r"^([A-G][45] ){4}[A-G][45]$")
+
+    def test_tune_frames(self):
+        tune = (0, 9, 2, 5, 4)
+        frames = meet.tune_frames(tune)
+        self.assertEqual(len(frames), 4 * meet.TUNE_NOTE_FRAMES + meet.TUNE_LAST_FRAMES)
+        heard = _notes([rtc.frame_mono(f) for f in frames])
+        self.assertEqual(heard, ["C4", "A5", "E4", "C5", "A4"])
+        back = _notes([rtc.frame_mono(f) for f in meet.tune_frames(tune, reverse=True)])
+        self.assertEqual(back, ["A4", "C5", "E4", "A5", "C4"])
+        peak = max(np.abs(rtc.frame_mono(f)).max() for f in frames)
+        self.assertLess(peak, 0.2 * 32767)  # not louder than the echo greeting
+        self.assertEqual(meet.tune_frames(()), [])
+
+    def test_tune_comes_from_fingerprint_and_is_cached(self):
+        m = self.manager()
+        t = m.tune_of(1, 42)
+        self.assertEqual(t, meet.tune_for(f"fp:{42:040X}"))
+        meet.dc_helpers._get_contact_fingerprint.side_effect = lambda *a, **k: None
+        self.bot.rpc.get_contact.return_value = MagicMock(address="Bob@Example.org")
+        self.assertEqual(m.tune_of(1, 42), t)  # cached
+        self.assertEqual(m.tune_of(1, 43), meet.tune_for("addr:bob@example.org"))
+        self.assertIn(meet.tune_name(t), m.tune_line(1, 42))
 
 
 @unittest.skipIf(rtc is None, "aiortc/cmcall not installed")
@@ -339,9 +412,18 @@ class Listener:
 
     def __init__(self):
         self.freqs = []
+        self.monos = []
+
+    def notes(self):
+        return _notes(self.monos)
+
+    def clear(self):
+        self.freqs.clear()
+        self.monos.clear()
 
     def __call__(self, frame):
         mono = rtc.frame_mono(frame)
+        self.monos.append(mono)
         if rtc.rms(mono) > 1200:
             self.freqs.append(round(rtc.dominant_freq(mono, rtc.SAMPLE_RATE)))
         else:
@@ -350,22 +432,12 @@ class Listener:
     def heard(self, freq, tol=40):
         return sum(1 for f in self.freqs if f and abs(f - freq) <= tol)
 
-    def tone_sequence(self):
-        """Join/leave tones in order, e.g. [330, 440] (a 20 ms frame only
-        resolves 50 Hz, so 330 Hz reads as 300-350 and 440 Hz as 450)."""
-        out = []
-        for f in self.freqs:
-            label = 330 if 0 < f < 390 else 440 if 390 <= f < 520 else None
-            if label and (not out or out[-1] != label):
-                out.append(label)
-        return out
-
 
 @unittest.skipIf(rtc is None, "aiortc/cmcall not installed")
 class TestMeetingIntegration(_Base):
     """Three clients in one room: A calls in (beeps), B is called by the bot
     after /join, C calls back into the room. B and C hear A, A does not hear
-    itself, joins and leaves are announced with tones."""
+    itself, joins and leaves are announced with the participant's tune."""
 
     def setUp(self):
         super().setUp()
@@ -438,10 +510,14 @@ class TestMeetingIntegration(_Base):
             self.assertTrue(self._wait(lambda: self._connected(room, 13)))
             self.assertEqual(len(room.participants), 3)
 
-            time.sleep(1.0)  # join tones
-            self.assertEqual(b_ears.tone_sequence()[:2], [330, 440], b_ears.tone_sequence())
-            b_ears.freqs.clear()
-            c_ears.freqs.clear()
+            # join tunes queue up (B's may still play when C's starts): wait them out
+            self.assertTrue(self._wait(lambda: all(not p.out.prio for p in room.participants.values())))
+            time.sleep(0.5)  # jitter buffers
+            # B heard its own tune when it came in, then C's
+            expected = _dedup([meet.TUNE_SCALE[n][0] for n in m.tune_of(1, 12) + m.tune_of(1, 13)])
+            self.assertEqual(b_ears.notes(), expected)
+            b_ears.clear()
+            c_ears.clear()
 
             # A beeps; B and C hear it, A does not hear itself
             self.client_loop.run(a.run_probe(3.0), timeout=30)
@@ -451,16 +527,17 @@ class TestMeetingIntegration(_Base):
             self.assertEqual(a_echo["received"], 0, a_echo)
             beeps_b = sum(b_ears.heard(f) for f in rtc.PROBE_FREQS)
             beeps_c = sum(c_ears.heard(f) for f in rtc.PROBE_FREQS)
-            self.assertGreaterEqual(beeps_b, a_echo["sent"] * 3, b_ears.tone_sequence())
-            self.assertGreaterEqual(beeps_c, a_echo["sent"] * 3, c_ears.tone_sequence())
+            self.assertGreaterEqual(beeps_b, a_echo["sent"] * 3, b_ears.freqs)
+            self.assertGreaterEqual(beeps_c, a_echo["sent"] * 3, c_ears.freqs)
 
             # A hangs up: B and C hear the leave tones, the room stays open
-            b_ears.freqs.clear()
+            b_ears.clear()
             self.client_loop.run(a.close(), timeout=10)
             m.on_call_ended(Ev(kind="CallEnded", msg_id=701))
             self.assertTrue(self._wait(lambda: 11 not in room.participants))
-            time.sleep(1.0)
-            self.assertEqual(b_ears.tone_sequence()[:2], [440, 330], b_ears.tone_sequence())
+            time.sleep(1.5)
+            # ...A's tune backwards
+            self.assertEqual(b_ears.notes(), [meet.TUNE_SCALE[n][0] for n in reversed(m.tune_of(1, 11))])
             self.assertFalse(room.closed)
             self.assertEqual(m.contact_room.get(11), room.id)  # A can call back in
             left_msg = [c_[0][3] for c_ in mock_send.call_args_list if c_[0][2] == 111]

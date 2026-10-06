@@ -4,7 +4,9 @@ Delta Chat calls are 1:1 only, so a meeting is a star: every participant is
 in a normal call with the bot, and the bot mixes. Every 20 ms the room's
 mixer takes one decoded frame per participant, drops silent / muted ones
 (noise gate with hangover, plus the app's mutedState), sums the rest and
-sends each participant the sum minus their own voice (mix-minus).
+sends each participant the sum minus their own voice (mix-minus). Joining
+and leaving play the participant's tune, 5 notes derived from their key
+fingerprint, so the others hear who came in.
 
 Admin-controlled and off by default (/meets on|off) - it costs one Opus
 decode + encode per participant. Capacity is a shared budget of
@@ -25,6 +27,7 @@ meeting is not end-to-end encrypted between participants - every room and
 join message says so.
 """
 import collections
+import hashlib
 import re
 import secrets
 import string
@@ -52,8 +55,17 @@ MEET_ID_RE = re.compile(r"^[A-Za-z0-9]{12}$")
 GATE_RMS = 300          # int16 RMS below which a frame counts as silence
 GATE_HOLD_FRAMES = 15   # keep mixing 300 ms after speech so word ends aren't cut
 INBOX_MAX_BACKLOG = 4   # frames; drop older ones so a burst can't add latency
-JOIN_TONES = ((330.0, 6), (None, 4), (440.0, 6))
-LEAVE_TONES = ((440.0, 6), (None, 4), (330.0, 6))
+# Join tunes: every participant gets 5 notes of the C major pentatonic
+# (any combination sounds fine) picked by a hash of their key fingerprint, so
+# the others can tell by ear who joined; leaving plays the tune backwards.
+TUNE_SCALE = (
+    ("C4", 261.63), ("D4", 293.66), ("E4", 329.63), ("G4", 392.00), ("A4", 440.00),
+    ("C5", 523.25), ("D5", 587.33), ("E5", 659.25), ("G5", 783.99), ("A5", 880.00),
+)
+TUNE_NOTES = 5
+TUNE_NOTE_FRAMES = 7      # 140 ms per note
+TUNE_LAST_FRAMES = 14     # the last note rings a little longer
+TUNE_AMPLITUDE = 0.16
 
 PRIVACY_NOTE = (
     "🔒 The bot does not record or store your voice. It mixes everyone's audio on its server, "
@@ -70,11 +82,44 @@ def meets_enabled() -> bool:
     return database.get_config("meets_enabled") == "1"
 
 
-def _tones(spec) -> list:
-    frames = []
-    for freq, n in spec:
-        frames.extend(rtc.tone_frames(freq, n, amplitude=0.2))
-    return frames
+def tune_for(seed: str) -> tuple:
+    """5 scale indexes from a hash of ``seed`` (a key fingerprint), no note twice in a row."""
+    digest = hashlib.sha256(("bouncer-meet-tune:" + seed).encode()).digest()
+    notes: list[int] = []
+    for byte in digest:
+        n = byte % len(TUNE_SCALE)
+        if notes and n == notes[-1]:
+            continue
+        notes.append(n)
+        if len(notes) == TUNE_NOTES:
+            break
+    return tuple(notes)
+
+
+def tune_name(notes) -> str:
+    return " ".join(TUNE_SCALE[n][0] for n in notes)
+
+
+def tune_frames(notes, reverse: bool = False) -> list:
+    """The tune as 20 ms frames: soft bell-like notes (sine + octave, decaying)."""
+    seq = list(reversed(notes)) if reverse else list(notes)
+    if not seq:
+        return []
+    rate, chunks = rtc.SAMPLE_RATE, []
+    for i, n in enumerate(seq):
+        frames = TUNE_LAST_FRAMES if i == len(seq) - 1 else TUNE_NOTE_FRAMES
+        length = frames * rtc.FRAME_SAMPLES
+        t = np.arange(length) / rate
+        freq = TUNE_SCALE[n][1]
+        wave = np.sin(2 * np.pi * freq * t) + 0.25 * np.sin(4 * np.pi * freq * t)
+        env = np.exp(-t / (length / rate * 0.45))
+        attack = int(0.008 * rate)
+        env[:attack] *= np.linspace(0, 1, attack)
+        env[-int(0.005 * rate):] *= np.linspace(1, 0, int(0.005 * rate))
+        chunks.append(wave * env)
+    pcm = np.concatenate(chunks) / 1.25 * TUNE_AMPLITUDE * 32767
+    return [rtc.frame_from_pcm(pcm[i:i + rtc.FRAME_SAMPLES])
+            for i in range(0, len(pcm), rtc.FRAME_SAMPLES)]
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -88,7 +133,7 @@ def _fmt_duration(seconds: float) -> str:
 
 
 class MeetOutTrack(rtc.PacedAudioTrack if rtc else object):
-    """What one participant hears: tones first, then their mix, else silence."""
+    """What one participant hears: their mix, with join/leave tunes laid on top."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -99,14 +144,19 @@ class MeetOutTrack(rtc.PacedAudioTrack if rtc else object):
         self.queue.append(pcm)
 
     def play(self, frames: list) -> None:
-        self.prio.extend(frames)
+        """Queue tune frames (AudioFrames or int16 arrays); they are mixed over
+        the conversation instead of interrupting it."""
+        for f in frames:
+            self.prio.append(f if isinstance(f, np.ndarray) else f.to_ndarray().reshape(-1))
 
     async def recv(self):
         await self.pace()
-        if self.prio:
-            frame = self.prio.popleft()
-        elif self.queue:
-            frame = rtc.frame_from_pcm(self.queue.popleft())
+        tune = self.prio.popleft() if self.prio else None
+        mix = self.queue.popleft() if self.queue else None
+        if tune is not None and mix is not None:
+            frame = rtc.frame_from_pcm(_clip(tune.astype(np.int32) + mix))
+        elif tune is not None or mix is not None:
+            frame = rtc.frame_from_pcm(tune if tune is not None else mix)
         else:
             frame = rtc.silence_frame()
         return self.stamp(frame)
@@ -146,6 +196,7 @@ class Participant:
     muted: bool = False
     gate_hold: int = 0
     answer_sdp: Optional[str] = None
+    tune: tuple = ()
     answered: threading.Event = field(default_factory=threading.Event)
     inbox: collections.deque = field(default_factory=lambda: collections.deque(maxlen=25))
     resampler: object = None
@@ -185,6 +236,7 @@ class MeetManager:
         self.rooms: dict[str, Room] = {}
         self.contact_room: dict[int, str] = {}   # who gets routed into which room
         self.by_msg: dict[int, Participant] = {}
+        self.tunes: dict[int, tuple] = {}         # contact_id -> join tune (memory only)
         self._lock = threading.RLock()
         self._reaper = threading.Thread(target=self._reap_loop, name="meet-reaper", daemon=True)
         self._reaper.start()
@@ -256,6 +308,26 @@ class MeetManager:
 
     # -- joining -----------------------------------------------------------
 
+    def tune_of(self, accid: int, contact_id: int) -> tuple:
+        """The contact's join tune, from their key fingerprint (the address if
+        there is none): the same in every meeting and on every bot restart."""
+        tune = self.tunes.get(contact_id)
+        if tune is None:
+            seed = None
+            try:
+                fp = dc_helpers._get_contact_fingerprint(self.bot, accid, contact_id)
+                if isinstance(fp, str) and fp:
+                    seed = "fp:" + fp.split(",")[0]
+            except Exception:
+                pass
+            if seed is None:
+                try:
+                    seed = "addr:" + str(self.bot.rpc.get_contact(accid, contact_id).address).lower()
+                except Exception:
+                    seed = f"contact:{contact_id}"
+            tune = self.tunes[contact_id] = tune_for(seed)
+        return tune
+
     def join(self, accid: int, contact_id: int, room_id: str) -> str:
         """/join: book a place, remember the room for call-backs, call the user."""
         with self._lock:
@@ -273,7 +345,13 @@ class MeetManager:
         threading.Thread(target=self._safe, args=(self._call_out, accid, contact_id, room),
                          name="meet-call-out", daemon=True).start()
         return (f"📞 Calling you into the meeting now ({n}/{cap} in the room). "
-                f"If you miss it, just call me back while the room is open.\n\n{PRIVACY_NOTE}")
+                f"If you miss it, just call me back while the room is open.\n"
+                f"{self.tune_line(accid, contact_id)}\n\n{PRIVACY_NOTE}")
+
+    def tune_line(self, accid: int, contact_id: int) -> str:
+        return (f"🎵 Your join tune: {tune_name(self.tune_of(accid, contact_id))} — the others hear it "
+                f"when you come in (backwards when you leave). It comes from your key fingerprint, "
+                f"so it is the same in every meeting.")
 
     def wants_incoming(self, contact_id: int) -> bool:
         """Should an incoming call of this contact go into a meeting (not the echo)?"""
@@ -296,10 +374,12 @@ class MeetManager:
             old = room.participants.get(contact_id)
         if old is not None:
             self.leave(old, "replaced", notify=False)
+        self.tune_of(accid, contact_id)
         with self._lock:
             if room.closed or len(room.participants) >= self.room_capacity():
                 return None
             p = Participant(accid=accid, contact_id=contact_id, chat_id=chat_id, room=room, outgoing=outgoing)
+            p.tune = self.tunes.get(contact_id, ())
             p.out = MeetOutTrack()
             p.resampler = self._av.AudioResampler(format="s16", layout="mono",
                                                   rate=rtc.SAMPLE_RATE, frame_size=rtc.FRAME_SAMPLES)
@@ -395,9 +475,10 @@ class MeetManager:
             p.connected = True
             p.joined_at = time.time()
             others = [o for o in p.room.participants.values() if o is not p and o.connected]
-        p.out.play(_tones(JOIN_TONES))
+        tune = tune_frames(p.tune)
+        p.out.play(tune)  # you hear your own tune too: that is how the others hear you join
         for o in others:
-            o.out.play(_tones(JOIN_TONES))
+            o.out.play(tune)
         config.logger.info(f"Meet {p.room.id[:4]}…: contact {p.contact_id} joined "
                            f"({len(others) + 1} connected)")
         while not p.left:
@@ -426,9 +507,10 @@ class MeetManager:
                 self.by_msg.pop(p.msg_id, None)
             others = [o for o in room.participants.values() if o.connected]
         p.answered.set()
-        if p.connected:
+        if p.connected and others:
+            tune = tune_frames(p.tune, reverse=True)
             for o in others:
-                o.out.play(_tones(LEAVE_TONES))
+                o.out.play(tune)
         if p.peer is not None:
             try:
                 self.loop.run(p.peer.close(), timeout=10)
@@ -556,7 +638,8 @@ def meet_command(bot, accid, event):
         f"Join: /join_{room.id}\n"
         f"Tap it and I will call you. If you hang up, call me any time while the room is open to get back in. "
         f"Share the command with the others - up to {cap} people, voice only.\n"
-        f"The room closes {config.MEET_IDLE_MINUTES} minutes after the last person leaves.\n\n"
+        f"The room closes {config.MEET_IDLE_MINUTES} minutes after the last person leaves.\n"
+        f"{manager.tune_line(accid, msg.from_id)}\n\n"
         f"{PRIVACY_NOTE}"
     ))
 
