@@ -117,7 +117,7 @@ class EchoCallManager:
                              f"{REPORT_PREFIX} The echo line is busy right now, please call again in a minute.")
             return
 
-        ice = rtc.parse_ice_servers(rpc.ice_servers(accid))
+        ice = echo_ice_servers(rpc.ice_servers(accid))
         peer = rtc.EchoPeer(ice, delay=config.CALL_ECHO_DELAY, greeting=True)
         session = EchoSession(accid, msg_id, chat_id, contact_id, peer)
         with self._lock:
@@ -206,6 +206,22 @@ class EchoCallManager:
         config.logger.info(f"Echo call {session.msg_id} finished ({reason}), {duration:.0f}s")
         with self._lock:
             self.sessions.pop(session.msg_id, None)
+
+
+def echo_ice_servers(ice_json):
+    """ICE servers for the echo peer, with a STUN server per CALL_ECHO_STUN.
+
+    The bot usually sits behind NAT (Docker bridge). Without STUN its only
+    reachable candidate is the TURN relay, so every echo call went through
+    TURN. "auto" uses the relay's TURN server as STUN too, as the Delta Chat
+    apps (libwebrtc) do, so calls can connect peer-to-peer through the NAT.
+    """
+    mode = config.CALL_ECHO_STUN
+    if mode in ("off", "0", "no", "false", "none"):
+        return rtc.parse_ice_servers(ice_json)
+    if mode in ("auto", "", "1", "on", "yes", "true"):
+        return rtc.parse_ice_servers(ice_json, turn_as_stun=True)
+    return rtc.parse_ice_servers(ice_json, stun=mode)
 
 
 def _end_call(rpc, accid, msg_id) -> None:

@@ -143,6 +143,24 @@ class TestReports(unittest.TestCase):
         self.assertNotIn("2️⃣", text)
 
 
+@unittest.skipIf(rtc is None, "cmcall/aiortc not installed")
+class TestEchoStun(unittest.TestCase):
+    ICE = '[{"urls":["turn:1.2.3.4:3478"],"username":"u","credential":"p"}]'
+
+    def urls(self, mode):
+        with patch.object(calls.config, "CALL_ECHO_STUN", mode):
+            return rtc.describe_ice_servers(calls.echo_ice_servers(self.ICE))
+
+    def test_auto_uses_turn_server_as_stun(self):
+        self.assertEqual(self.urls("auto"), ["stun:1.2.3.4:3478", "turn:1.2.3.4:3478"])
+
+    def test_off_keeps_turn_only(self):
+        self.assertEqual(self.urls("off"), ["turn:1.2.3.4:3478"])
+
+    def test_explicit_stun_server(self):
+        self.assertEqual(self.urls("stun.example.org:3478")[0], "stun:stun.example.org:3478")
+
+
 class TestRunCmcall(unittest.TestCase):
     @patch("calls.subprocess.run")
     def test_parses_json_after_noise(self, mock_run):
