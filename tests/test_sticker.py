@@ -484,10 +484,12 @@ class TestStickerCommands(unittest.TestCase):
             "PIL.ImageOps": mock_pil_imageops,
             "rembg": mock_rembg,
             "onnxruntime": mock_ort,
-        }), patch.object(sys, "argv", ["sticker_tool.py", "in.jpg", "out.webp", "--nobg", "--max-dim=512"]):
+        }), patch.object(sys, "argv", ["sticker_tool.py", "in.jpg", "out.webp", "--nobg", "--max-dim=512"]), \
+                patch.object(sticker_tool, "lower_priority") as mock_prio:  # don't idle the test process
             with self.assertRaises(SystemExit) as cm:
                 sticker_tool.main()
             self.assertEqual(cm.exception.code, 0)
+            mock_prio.assert_called_once()
 
             # Check pre-scaling before rembg
             mock_raw_img.resize.assert_called_once_with((512, 256), mock_pil_image.Resampling.LANCZOS)
@@ -497,6 +499,32 @@ class TestStickerCommands(unittest.TestCase):
             # Check rembg called with prescaled img and session
             mock_rembg.remove.assert_called_once_with(mock_prescaled_img, session=mock_session)
             mock_nobg_img.save.assert_called_once()
+
+
+class TestStickerToolPriority(unittest.TestCase):
+    """Background removal runs at idle CPU priority (in its own process)."""
+
+    def _run(self, env_value=None):
+        import subprocess
+        env = dict(os.environ)
+        env.pop("REMBG_PRIORITY", None)
+        if env_value is not None:
+            env["REMBG_PRIORITY"] = env_value
+        code = ("import os, sticker_tool; r = sticker_tool.lower_priority(); "
+                "print(r, os.sched_getscheduler(0) == os.SCHED_IDLE, os.nice(0))")
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        out = subprocess.run([sys.executable, "-c", code], cwd=root, env=env,
+                             capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return out.stdout.split()
+
+    @unittest.skipUnless(hasattr(os, "SCHED_IDLE"), "Linux only")
+    def test_idle_by_default(self):
+        self.assertEqual(self._run(), ["idle", "True", "0"])
+
+    @unittest.skipUnless(hasattr(os, "SCHED_IDLE"), "Linux only")
+    def test_can_be_turned_off(self):
+        self.assertEqual(self._run("normal"), ["normal", "False", "0"])
 
 
 if __name__ == "__main__":

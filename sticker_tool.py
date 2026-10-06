@@ -11,6 +11,29 @@ import sys
 import argparse
 
 
+def lower_priority() -> str:
+    """Drop to idle CPU priority (Linux SCHED_IDLE, else nice 19).
+
+    Background removal can keep a core busy for seconds; at idle priority it
+    only gets CPU nobody else wants, so live call audio (voice meetings, echo
+    calls) running in the bot never stutters because of a sticker. Threads
+    started later, like onnxruntime's pool, inherit the policy. Lowering
+    priority needs no privileges. REMBG_PRIORITY=normal turns it off.
+    """
+    if os.getenv("REMBG_PRIORITY", "idle").strip().lower() in ("normal", "0", "off", "false", "no"):
+        return "normal"
+    try:
+        os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))
+        return "idle"
+    except (AttributeError, OSError):
+        pass
+    try:
+        os.nice(19)
+        return "nice"
+    except (AttributeError, OSError):
+        return "normal"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Delta Chat Sticker Generator")
     parser.add_argument("src", help="Path to input image file")
@@ -18,6 +41,8 @@ def main():
     parser.add_argument("--nobg", action="store_true", help="Remove background using rembg")
     parser.add_argument("--max-dim", type=int, default=512, help="Maximum dimension in pixels (default: 512)")
     args = parser.parse_args()
+    if args.nobg:
+        lower_priority()
 
     try:
         from PIL import Image, ImageOps

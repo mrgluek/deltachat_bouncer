@@ -49,6 +49,7 @@ services:
       - REMBG_HOME=/app/data/u2net
       - ENABLE_REMBG
       - REMBG_MODEL
+      - REMBG_PRIORITY
     deploy:
       resources:
         limits:
