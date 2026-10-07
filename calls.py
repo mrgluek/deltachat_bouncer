@@ -33,6 +33,7 @@ import config
 import database
 import dc_helpers
 import state
+import turn_names
 
 try:
     from cmcall import rtc
@@ -65,6 +66,8 @@ class EchoSession:
     finished: bool = False
     end_reason: str = ""
     error: Optional[str] = None
+    offer_relay_ips: list = field(default_factory=list)  # TURN servers in the caller's offer
+    caller_domain: Optional[str] = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -121,6 +124,8 @@ class EchoCallManager:
         ice = echo_ice_servers(rpc.ice_servers(accid))
         peer = rtc.EchoPeer(ice, delay=config.CALL_ECHO_DELAY, greeting=True)
         session = EchoSession(accid, msg_id, chat_id, contact_id, peer)
+        session.offer_relay_ips = turn_names.relay_ips_from_sdp(event.place_call_info)
+        session.caller_domain = _contact_domain(rpc, accid, contact_id)
         with self._lock:
             self.sessions[msg_id] = session
 
@@ -183,12 +188,24 @@ class EchoCallManager:
         except Exception as e:
             config.logger.warning(f"Echo call {session.msg_id}: stats failed: {e}")
             summary = {}
+        # TURN servers the caller reached: relay candidates from the offer and
+        # those trickled in later over the iceTrickling channel
+        try:
+            relay_ips = self.loop.run(_remote_relay_ips(session.peer), timeout=5)
+        except Exception:
+            relay_ips = []
+        relay_ips += [ip for ip in session.offer_relay_ips if ip not in relay_ips]
         try:
             self.loop.run(session.peer.close(), timeout=10)
         except Exception:
             pass
         if end_call and reason != "hangup":
             _end_call(self.bot.rpc, session.accid, session.msg_id)
+        try:
+            caller_turn = turn_names.caller_turn(relay_ips, self.bot, session.accid)
+        except Exception as e:
+            config.logger.warning(f"Echo call {session.msg_id}: TURN names failed: {e}")
+            caller_turn = None
 
         # end of the call = when media stopped, not when the hangup message arrived
         ended = session.media_ended_at or time.time()
@@ -210,11 +227,13 @@ class EchoCallManager:
                     voice_s=summary.get("voice_s"),
                     end_reason=reason,
                     error=session.error,
+                    caller_turn=None if caller_turn is None else ",".join(caller_turn),
+                    caller_domain=session.caller_domain,
                 )
         except Exception as e:
             config.logger.warning(f"Echo call {session.msg_id}: could not log call: {e}")
 
-        text = format_echo_report(summary, duration, reason, session.error)
+        text = format_echo_report(summary, duration, reason, session.error, caller_turn)
         dc_helpers._send(self.bot, session.accid, session.chat_id, text)
         # The call message carries the caller's SDP offer, i.e. their ICE
         # candidates with local and public IP addresses. Core would keep it
@@ -245,6 +264,25 @@ def echo_ice_servers(ice_json):
     return rtc.parse_ice_servers(ice_json, stun=mode)
 
 
+async def _remote_relay_ips(peer) -> list:
+    pc = getattr(peer, "pc", None)
+    if pc is None:
+        return []
+    cands = []
+    for conn in rtc._ice_connections(pc):
+        cands.extend(conn.remote_candidates)
+    return turn_names.relay_ips_from_candidates(cands)
+
+
+def _contact_domain(rpc, accid, contact_id) -> Optional[str]:
+    try:
+        addr = rpc.get_contact(accid, contact_id).address or ""
+    except Exception:
+        return None
+    domain = addr.rsplit("@", 1)[-1].strip().lower() if "@" in addr else ""
+    return domain or None
+
+
 def _end_call(rpc, accid, msg_id) -> None:
     try:
         rpc.end_call(accid, msg_id)
@@ -266,18 +304,55 @@ def _fmt_cands(cands: dict) -> str:
     return ", ".join(f"{k} {v}" for k, v in sorted((cands or {}).items())) or "none"
 
 
-def format_echo_report(summary: dict, duration: float, reason: str, error: Optional[str]) -> str:
+def turn_test_url() -> Optional[str]:
+    """Public URL of the browser TURN test page, if the web server has a base URL."""
+    if not config.TURN_TEST_PAGE:
+        return None
+    base = database.get_config("base_url") or os.getenv("BASE_URL") or ""
+    base = base.strip().rstrip("/")
+    if not base:
+        return None
+    if "://" not in base:
+        base = "https://" + base
+    return base + "/test-turn"
+
+
+def format_turn_line(caller_turn: Optional[list], connected: bool) -> Optional[str]:
+    """What the caller's relay candidates say about their TURN server."""
+    if caller_turn is None:
+        return None
+    if caller_turn:
+        names = ", ".join("another TURN server" if n == turn_names.OTHER else n for n in caller_turn)
+        return f"Your app's TURN server: {names} ✅"
+    url = turn_test_url()
+    test = f" Test it in a browser: {url}" if url else ""
+    if connected:
+        return ("ℹ️ Your app got no address from its TURN server (blocked or unreachable on your network; "
+                f"profiles without TURN on their own relay use {turn_names.FALLBACK_TURN_HOST}). This call did "
+                f"not need it, but calls through stricter networks will fail.{test}")
+    return ("⚠️ Your app got no address from its TURN server: it is blocked or unreachable on your network "
+            f"(profiles without TURN on their own relay use {turn_names.FALLBACK_TURN_HOST}).{test}")
+
+
+def format_echo_report(summary: dict, duration: float, reason: str, error: Optional[str],
+                       caller_turn: Optional[list] = None) -> str:
     lines = [f"{REPORT_PREFIX} **Echo call report**"]
+    turn_line = format_turn_line(caller_turn, bool(summary.get("connected")))
     if not summary.get("connected") and reason == "hangup":
         lines.append("The call ended before the media connection was established.")
         lines.append(f"Your app offered ICE candidates: {_fmt_cands(summary.get('remote_candidates'))}")
+        if turn_line:
+            lines.append(turn_line)
         return "\n".join(lines)
     if not summary.get("connected"):
         lines.append(f"❌ Call answered, but {error or 'no media connection could be established'}.")
         lines.append(f"Your app offered ICE candidates: {_fmt_cands(summary.get('remote_candidates'))}"
                      + (f" (+{summary['trickled_candidates']} trickled)" if summary.get("trickled_candidates") else ""))
         lines.append(f"Bot candidates: {_fmt_cands(summary.get('local_candidates'))}")
-        lines.append("Usually this means UDP is blocked on your network or the TURN server is unreachable.")
+        if turn_line:
+            lines.append(turn_line)
+        else:
+            lines.append("Usually this means UDP is blocked on your network or the TURN server is unreachable.")
         return "\n".join(lines)
 
     connect = f" · connected in {summary['connect_ms']} ms" if summary.get("connect_ms") is not None else ""
@@ -288,6 +363,8 @@ def format_echo_report(summary: dict, duration: float, reason: str, error: Optio
         lines.append(
             f"Path: {label} (bot {path.get('local_type')} ↔ you {path.get('remote_type')})"
         )
+    if turn_line:
+        lines.append(turn_line)
     voice, received = summary.get("voice_s"), summary.get("audio_received_s")
     if received is not None:
         peak = summary.get("peak_dbfs")
@@ -516,14 +593,30 @@ def cmcall_command(bot, accid, event):
 
 def format_call_log_line(row: dict) -> str:
     when = datetime.fromtimestamp(row["started_at"], timezone.utc).strftime("%m-%d %H:%M")
+    turn = row.get("caller_turn")
+    turn_txt = None if turn is None else f"TURN {turn.replace(',', ', ') or 'none'}"
     if not row["connected"]:
-        return f"{when} ❌ {row.get('error') or 'not connected'}"
+        return " · ".join([f"{when} ❌ {row.get('error') or 'not connected'}"] + ([turn_txt] if turn_txt else []))
     parts = [f"{when} ✅ {_fmt_duration(row['duration_s'] or 0)}", PATH_LABELS.get(row["path"], row["path"] or "?")]
     if row.get("loss_pct") is not None:
         parts.append(f"loss {row['loss_pct']:.1f}%")
     if row.get("rtt_ms") is not None:
         parts.append(f"rtt {row['rtt_ms']:.0f} ms")
+    if turn_txt:
+        parts.append(turn_txt)
     return " · ".join(parts)
+
+
+def format_turn_aggregate(agg: dict, label: str = "7d") -> Optional[str]:
+    """Admin line: which TURN servers callers reached, and who reached none."""
+    if not agg.get("calls"):
+        return None
+    parts = [f"{n} {c}/{agg['calls']}" for n, c in agg["turn"].items()]
+    line = f"Callers' TURN ({label}): " + (", ".join(parts) if parts else "no relay addresses")
+    if agg.get("none"):
+        domains = ", ".join(f"{d} {c}" for d, c in list(agg["none_domains"].items())[:5])
+        line += f" · no TURN address: {agg['none']}/{agg['calls']} ({domains})"
+    return line
 
 
 def privacy_note() -> str:
@@ -564,6 +657,9 @@ def callstats_command(bot, accid, event):
             if agg["paths"]:
                 line += " (" + ", ".join(f"{PATH_LABELS.get(p, p)} {n}" for p, n in agg["paths"].items()) + ")"
             lines.append(line)
+        turn_line = format_turn_aggregate(database.get_call_echo_turn_aggregate(time.time() - 7 * 86400))
+        if turn_line:
+            lines.append(turn_line)
         rows = database.get_recent_call_echo_logs(limit=10)
         if rows:
             lines.append("")

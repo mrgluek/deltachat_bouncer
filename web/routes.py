@@ -8,7 +8,11 @@ import hashlib
 import io
 import os
 import shutil
+import ipaddress
+import json
+import re
 import time
+import urllib.parse
 
 import qrcode
 
@@ -22,11 +26,13 @@ import config
 import database
 import security
 import state
+import turn_names
 from web import ap_routes
 from web.templates import channel as tpl_channel
 from web.templates import errors as tpl_errors
 from web.templates import feed as tpl_feed
 from web.templates import landing as tpl_landing
+from web.templates import turn_test as tpl_turn_test
 
 def invalidate_channel_cache(chat_id: int = None, token: str = None) -> None:
     """Invalidate in-memory preview and RSS caches for a specific channel or all channels."""
@@ -305,6 +311,7 @@ Allow: /media/
 Disallow: /health
 Disallow: /qr.svg
 Disallow: /qr.png
+Disallow: /test-turn
 
 # Disallow WebFinger (Fediverse handles it via direct HTTP, not crawlers).
 Disallow: /.well-known/webfinger
@@ -591,6 +598,79 @@ async def handle_media_file(request):
     )
 
 
+# ── TURN self-test page ──
+
+_TURN_RELAYS_TTL_S = 600
+_turn_relays_cache = {"at": 0.0, "relays": []}
+
+
+def _turn_test_relays() -> list[dict]:
+    """STUN URLs for the TURN servers the bot's relays announce, named by host.
+
+    One entry per name, IPv4 preferred. Blocking (RPC + DNS): run in a thread."""
+    now = time.time()
+    if now - _turn_relays_cache["at"] < _TURN_RELAYS_TTL_S:
+        return _turn_relays_cache["relays"]
+    relays: list[dict] = []
+    bot, accid = state.dc_bot_instance, state.dc_accid
+    if bot is not None and accid is not None:
+        try:
+            servers = json.loads(bot.rpc.ice_servers(accid) or "[]")
+        except Exception as e:
+            config.logger.debug(f"/test-turn: ice_servers failed: {e}")
+            servers = []
+        ips = []
+        for srv in servers:
+            urls = srv.get("urls") or []
+            for u in [urls] if isinstance(urls, str) else urls:
+                m = re.match(r"^turns?:(\[[^\]]+\]|[^:?]+):(\d+)", u)
+                if m and m.group(1).strip("[]") not in [i for i, _ in ips]:
+                    ips.append((m.group(1).strip("[]"), m.group(2)))
+        names = turn_names.ip_names(turn_names.known_hosts(bot, accid)) if ips else {}
+        by_name: dict = {}
+        for ip, port in ips:
+            try:
+                addr = ipaddress.ip_address(ip)
+            except ValueError:
+                continue
+            name = names.get(addr.compressed) or ip
+            if name == turn_names.FALLBACK_TURN_HOST:
+                continue  # tested separately, with a real allocation
+            host = f"[{addr.compressed}]" if addr.version == 6 else addr.compressed
+            if name not in by_name or (by_name[name][0] == 6 and addr.version == 4):
+                by_name[name] = (addr.version, f"stun:{host}:{port}")
+        relays = [{"name": n, "url": u} for n, (_, u) in by_name.items()]
+    _turn_relays_cache.update(at=now, relays=relays)
+    return relays
+
+
+def _instance_domain() -> str:
+    base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
+    if base_url:
+        parsed = urllib.parse.urlparse(base_url if "://" in base_url else "https://" + base_url)
+        if parsed.netloc:
+            return parsed.netloc
+    return "dc.gluek.info"
+
+
+@security.rate_limited("turn_test", max_requests=30, window_seconds=60)
+async def handle_turn_test(request):
+    if not config.TURN_TEST_PAGE:
+        raise web.HTTPNotFound()
+    relays = await asyncio.get_running_loop().run_in_executor(None, _turn_test_relays)
+    fallback = {
+        "host": turn_names.FALLBACK_TURN_HOST,
+        "port": turn_names.FALLBACK_TURN_PORT,
+        "user": turn_names.FALLBACK_TURN_USER,
+        "password": turn_names.FALLBACK_TURN_PASSWORD,
+    }
+    content = tpl_turn_test.get_turn_test_html(
+        ingress_path=request.headers.get("X-Ingress-Path", ""),
+        fallback=fallback, relays=relays, instance_domain=_instance_domain(),
+    )
+    return web.Response(text=content, content_type="text/html", headers={"Cache-Control": "no-store"})
+
+
 # ── ActivityPub Handlers ──
 
 
@@ -608,6 +688,7 @@ async def _run_web_server():
     app.router.add_get('/qr.svg', handle_qr_svg)
     app.router.add_get('/qr.png', handle_qr_png)
     app.router.add_get('/', handle_index)
+    app.router.add_get('/test-turn', handle_turn_test)
     app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}', handle_channel_preview)
     app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}/qr.png', handle_channel_qr_png)
     app.router.add_get(r'/{slash:/*}c/{token:[a-zA-Z0-9]{12}}/qr.svg', handle_channel_qr_svg)

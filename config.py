@@ -41,7 +41,7 @@ logger = logging.getLogger("bouncer_bot")
 if os.environ.get("CALL_DEBUG_LOG", "").strip().lower() not in ("1", "true", "yes", "on"):
     for _webrtc_logger in ("aioice", "aiortc"):
         logging.getLogger(_webrtc_logger).setLevel(logging.WARNING)
-VERSION = "2.24.1"
+VERSION = "2.25.0"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -150,6 +150,12 @@ CALL_ECHO_HANGUP_GRACE = 15
 CALL_ECHO_STUN = os.environ.get("CALL_ECHO_STUN", "auto").strip().lower()
 # Days to keep the per-call statistics behind /callstats; 0 = keep none
 CALL_ECHO_LOG_DAYS = int(os.environ.get("CALL_ECHO_LOG_DAYS", "30"))
+# Extra TURN host names to recognize in callers' relay candidates (comma
+# separated); turn.delta.chat, the bot's relays and the monitored relays are
+# always known
+CALL_TURN_HOSTS = [h.strip().lower() for h in os.environ.get("CALL_TURN_HOSTS", "").split(",") if h.strip()]
+# The browser TURN test page (/test-turn): on by default
+TURN_TEST_PAGE = _env_flag("TURN_TEST_PAGE", "1")
 
 # Voice meetings (/meet): an audio bridge on top of calls. Switched on by the
 # admin with /meets on (off by default). Every participant costs an Opus

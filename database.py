@@ -630,9 +630,19 @@ def init_db():
                 jitter_ms REAL,
                 voice_s REAL,
                 end_reason TEXT,
-                error TEXT
+                error TEXT,
+                caller_turn TEXT,
+                caller_domain TEXT
             )
         ''')
+        cursor.execute("PRAGMA table_info(call_echo_log)")
+        columns = [info[1] for info in cursor.fetchall()]
+        # caller_turn: TURN servers the caller's app got a relay address from
+        # (comma separated host names, "" = none); caller_domain: the domain of
+        # the caller's address. NULL for calls logged before 2.25.0.
+        for col in ("caller_turn", "caller_domain"):
+            if col not in columns:
+                cursor.execute(f"ALTER TABLE call_echo_log ADD COLUMN {col} TEXT")
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_call_echo_started ON call_echo_log(started_at)')
 
         # Additional query performance indexes
@@ -1879,12 +1889,14 @@ init_db()
 _CALL_ECHO_COLUMNS = (
     "contact_id", "chat_id", "started_at", "duration_s", "connected", "path",
     "loss_pct", "rtt_ms", "jitter_ms", "voice_s", "end_reason", "error",
+    "caller_turn", "caller_domain",
 )
 CALL_ECHO_LOG_KEEP = 1000
 
 
 def add_call_echo_log(contact_id, chat_id, started_at, duration_s, connected, path,
-                      loss_pct, rtt_ms, jitter_ms, voice_s, end_reason, error):
+                      loss_pct, rtt_ms, jitter_ms, voice_s, end_reason, error,
+                      caller_turn=None, caller_domain=None):
     """Record one answered echo call and keep only the newest CALL_ECHO_LOG_KEEP rows."""
     with _writer_transaction() as conn:
         cursor = conn.cursor()
@@ -1892,7 +1904,7 @@ def add_call_echo_log(contact_id, chat_id, started_at, duration_s, connected, pa
             f"INSERT INTO call_echo_log ({', '.join(_CALL_ECHO_COLUMNS)}) "
             f"VALUES ({', '.join('?' * len(_CALL_ECHO_COLUMNS))})",
             (contact_id, chat_id, started_at, duration_s, 1 if connected else 0, path,
-             loss_pct, rtt_ms, jitter_ms, voice_s, end_reason, error),
+             loss_pct, rtt_ms, jitter_ms, voice_s, end_reason, error, caller_turn, caller_domain),
         )
         cursor.execute(
             "DELETE FROM call_echo_log WHERE id NOT IN "
@@ -1949,6 +1961,35 @@ def get_call_echo_aggregate(since: float) -> dict:
         "avg_rtt_ms": avg_rtt,
         "paths": paths,
     }
+
+
+def get_call_echo_turn_aggregate(since: float) -> dict:
+    """Callers' TURN servers for echo calls started after `since`.
+
+    {"calls": calls with TURN info, "turn": {host: calls with a relay address
+    from it}, "none": calls without any relay address, "none_domains":
+    {caller domain: calls}}"""
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT caller_turn, caller_domain FROM call_echo_log "
+            "WHERE started_at >= ? AND caller_turn IS NOT NULL",
+            (since,),
+        )
+        rows = cursor.fetchall()
+    turn: dict = {}
+    none_domains: dict = {}
+    none = 0
+    for caller_turn, domain in rows:
+        names = [n for n in (caller_turn or "").split(",") if n]
+        if not names:
+            none += 1
+            key = domain or "?"
+            none_domains[key] = none_domains.get(key, 0) + 1
+        for n in names:
+            turn[n] = turn.get(n, 0) + 1
+    order = lambda d: dict(sorted(d.items(), key=lambda kv: (-kv[1], kv[0])))  # noqa: E731
+    return {"calls": len(rows), "turn": order(turn), "none": none, "none_domains": order(none_domains)}
 
 
 # --- CMCall monitor ---
