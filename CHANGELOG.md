@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.26.1] - 2026-10-07
+
+### Fixed
+- **Call Checks Failing At ICE**: cmcall 0.1.4 (shipped in 2.24.1) broke every call through a TURN relay - its closed-socket guard called `is_closing()` on aioice's `TurnTransport`, which has no such method, so no ICE connectivity check was ever sent and all CMCall monitor / `/cmcall` runs failed with "ICE/DTLS did not connect". Updated to cmcall 0.1.5, which fixes the guard.
+
 ## [2.26.0] - 2026-10-07
 
 ### Changed
