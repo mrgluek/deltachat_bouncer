@@ -37,6 +37,14 @@ def handle_dc_info_message(bot, accid, event):
     
     config.logger.info(f"handle_dc_info_message: dc_chat_id={dc_chat_id}, smt={smt!r}, smt_str={smt_str!r}, msg_text={msg_text!r}")
     
+    # Channel renamed / new picture: refresh the catalog. Handled first and returned
+    # early, because the member-event text fallback below matches words like
+    # "added"/"removed" that can appear inside a channel's new name.
+    if smt in (SystemMessageType.GROUP_NAME_CHANGED, SystemMessageType.GROUP_IMAGE_CHANGED):
+        if database.get_catalog_channel_by_chat_id(dc_chat_id):
+            channels.sync_channel_profile(bot, accid, dc_chat_id)
+        return
+
     is_member_event = False
     is_join_event = False
     is_remove_event = False

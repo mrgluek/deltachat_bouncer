@@ -2,6 +2,7 @@
 (with ActivityPub delivery queuing), catalog backfill, and the
 /chats, /dchannels, /chatadd, /chatremove, /private, /dchanneladd,
 /dchannelremove command handlers."""
+import filecmp
 import os
 import re
 import shutil
@@ -33,6 +34,9 @@ def _ingest_channel_post(bot, accid, msg, catalog_channel: dict, token: str):
         chat_id = catalog_channel.get("chat_id")
         if not chat_id:
             return
+
+        # Safety net: if the rename/avatar info message was missed, catch up on the next post.
+        sync_channel_profile(bot, accid, chat_id)
 
         text = getattr(msg, "text", None) if not isinstance(msg, dict) else msg.get("text")
         text = (text or "").strip()
@@ -143,6 +147,65 @@ def _ingest_channel_post(bot, accid, msg, catalog_channel: dict, token: str):
                 config.logger.warning(f"AP delivery queue error: {e}")
     except Exception as e:
         config.logger.error(f"Error ingesting channel post: {e}")
+
+
+def _chat_field(info, *names):
+    """Read the first non-empty field from an RPC object that may be a dict (camelCase) or an attr object."""
+    for n in names:
+        val = info.get(n) if isinstance(info, dict) else getattr(info, n, None)
+        if val:
+            return val
+    return None
+
+
+def sync_channel_profile(bot, accid, chat_id: int) -> bool:
+    """Pull the channel's current name and avatar from core into the catalog.
+
+    The catalog stores the name at join time and the web preview caches the avatar
+    forever, so without this a rename / new picture in Delta Chat never reached
+    the site, RSS or the Fediverse actor. Returns True if anything changed.
+    """
+    channel = database.get_catalog_channel_by_chat_id(chat_id)
+    if not channel:
+        return False
+    try:
+        info = bot.rpc.get_basic_chat_info(accid, chat_id)
+    except Exception as e:
+        config.logger.debug(f"sync_channel_profile: cannot read chat {chat_id}: {e}")
+        return False
+
+    changed = False
+    token = channel.get("token")
+
+    new_name = _chat_field(info, "name")
+    if isinstance(new_name, str) and new_name.strip() and new_name != channel.get("name"):
+        database.update_catalog_channel_name(chat_id, new_name)
+        config.logger.info(f"Channel {chat_id} renamed: '{channel.get('name')}' -> '{new_name}'")
+        changed = True
+
+    if token:
+        cache_path = os.path.join(state.CHANNEL_MEDIA_DIR, token, "avatar.png")
+        new_img = _chat_field(info, "profile_image", "profileImage")
+        try:
+            if new_img and os.path.exists(new_img):
+                # Compare bytes, not paths: core reuses the blob dir and a changed
+                # picture may keep a similar name; an unchanged one must not bust the cache.
+                if not os.path.exists(cache_path) or not filecmp.cmp(new_img, cache_path, shallow=False):
+                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                    shutil.copy2(new_img, cache_path)
+                    config.logger.info(f"Channel {chat_id} avatar updated")
+                    changed = True
+            elif not new_img and os.path.exists(cache_path):
+                # Avatar was removed: drop the stale copy so the default is served again.
+                os.remove(cache_path)
+                config.logger.info(f"Channel {chat_id} avatar removed")
+                changed = True
+        except OSError as e:
+            config.logger.warning(f"sync_channel_profile: avatar cache error for channel {chat_id}: {e}")
+
+    if changed:
+        web.routes.invalidate_channel_cache(chat_id=chat_id, token=token)
+    return changed
 
 
 def _backfill_existing_catalog_channels(bot, accid):

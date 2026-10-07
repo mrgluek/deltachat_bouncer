@@ -25,6 +25,8 @@ except ImportError:
     class SystemMessageType:
         MEMBER_ADDED_TO_GROUP = 1
         MEMBER_REMOVED_FROM_GROUP = 2
+        GROUP_NAME_CHANGED = 3
+        GROUP_IMAGE_CHANGED = 4
     mock_deltachat2.SystemMessageType = SystemMessageType
     sys.modules['deltachat2'] = mock_deltachat2
 

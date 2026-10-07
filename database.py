@@ -1116,6 +1116,22 @@ def set_catalog_channel_public_by_chat_id(chat_id: int, is_public: int) -> bool:
         return cursor.rowcount > 0
 
 
+def update_catalog_channel_name(chat_id: int, name: str) -> bool:
+    """Update the display name of a catalog channel (follows renames in Delta Chat)."""
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE catalog_channels SET name = ? WHERE chat_id = ?", (name, chat_id))
+        return cursor.rowcount > 0
+
+
+def update_catalog_channel_description(catalog_id: int, description: str) -> bool:
+    """Update the description of a catalog channel by catalog id (used by /dchanneldesc)."""
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE catalog_channels SET description = ? WHERE id = ?", (description, catalog_id))
+        return cursor.rowcount > 0
+
+
 def update_catalog_channel_member_count(chat_id: int, member_count: int) -> bool:
     """Update member count for a catalog channel."""
     with _writer_transaction() as conn:

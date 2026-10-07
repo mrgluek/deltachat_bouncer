@@ -23,6 +23,8 @@ except ImportError:
     class SystemMessageType:
         MEMBER_ADDED_TO_GROUP = 1
         MEMBER_REMOVED_FROM_GROUP = 2
+        GROUP_NAME_CHANGED = 3
+        GROUP_IMAGE_CHANGED = 4
     mock_deltachat2.SystemMessageType = SystemMessageType
     sys.modules['deltachat2'] = mock_deltachat2
 
@@ -674,6 +676,52 @@ class TestWebPreview(unittest.TestCase):
         ch_del = database.get_catalog_channel_by_chat_id(9001, include_deleted=True)
         self.assertIsNotNone(ch_del)
         self.assertEqual(ch_del["is_deleted"], 1)
+
+    def _make_channel_with_info(self, chat_id, name, image_path=None):
+        token = database.add_catalog_channel(chat_id, "Old Name", "d", 1, "https://i.delta.chat/#x")
+        bot = MagicMock()
+        bot.rpc.get_basic_chat_info.return_value = {"name": name, "profileImage": image_path}
+        return token, bot
+
+    def test_channel_rename_info_message_updates_catalog(self):
+        from deltachat2 import SystemMessageType
+        token, bot = self._make_channel_with_info(9101, "Added News")
+        msg = MagicMock()
+        msg.chat_id = 9101
+        msg.system_message_type = SystemMessageType.GROUP_NAME_CHANGED
+        # A name containing "added" must not be mistaken for a member event.
+        msg.text = 'Channel name changed from "Old Name" to "Added News".'
+        event = MagicMock()
+        event.msg = msg
+
+        handlers.handle_dc_info_message(bot, 1, event)
+
+        ch = database.get_catalog_channel_by_chat_id(9101)
+        self.assertEqual(ch["name"], "Added News")
+        self.assertEqual(ch["member_count"], 1)
+
+    def test_channel_avatar_change_refreshes_cache(self):
+        os.makedirs(state.CHANNEL_MEDIA_DIR, exist_ok=True)
+        src = os.path.join(state.CHANNEL_MEDIA_DIR, "src.png")
+        with open(src, "wb") as f:
+            f.write(b"new-avatar")
+        token, bot = self._make_channel_with_info(9102, "Old Name", src)
+        cache = os.path.join(state.CHANNEL_MEDIA_DIR, token, "avatar.png")
+        os.makedirs(os.path.dirname(cache), exist_ok=True)
+        with open(cache, "wb") as f:
+            f.write(b"stale-avatar")
+
+        self.assertTrue(channels.sync_channel_profile(bot, 1, 9102))
+        with open(cache, "rb") as f:
+            self.assertEqual(f.read(), b"new-avatar")
+        # Unchanged picture and name differs only on the first call -> no further change.
+        bot.rpc.get_basic_chat_info.return_value = {"name": "Old Name", "profileImage": src}
+        self.assertFalse(channels.sync_channel_profile(bot, 1, 9102))
+
+        # Avatar removed in Delta Chat -> stale copy is dropped.
+        bot.rpc.get_basic_chat_info.return_value = {"name": "Old Name", "profileImage": None}
+        self.assertTrue(channels.sync_channel_profile(bot, 1, 9102))
+        self.assertFalse(os.path.exists(cache))
 
     def test_handle_dc_info_message_channel_text_fallback_removal(self):
         token = database.add_catalog_channel(
