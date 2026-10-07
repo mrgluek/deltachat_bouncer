@@ -5,6 +5,7 @@ Run: python3 -m unittest tests.test_meet -v
 """
 import os
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -720,6 +721,284 @@ class TestMeetingIntegration(_Base):
         self.assertNotIn(12, room.participants)
         self.assertEqual(m.contact_room.get(12), room.id)  # can still call back in
         mock_send.assert_not_called()
+
+
+# --------------------------------------------------------------------------
+# background audio: /radio, /play
+# --------------------------------------------------------------------------
+
+
+class FakeBackground:
+    kind, title, radio_id = "radio", "Fake FM", 1
+
+    def __init__(self, level=10000):
+        self.frame = np.full(rtc.FRAME_SAMPLES, level, dtype=np.int16) if rtc else None
+        self.reads = 0
+
+    def read(self):
+        self.reads += 1
+        return self.frame
+
+    def stop(self):
+        pass
+
+
+@unittest.skipIf(rtc is None, "aiortc/cmcall not installed")
+class TestBackgroundMix(_Base):
+    def test_music_for_everyone_ducked_under_voices(self):
+        m = self.manager()
+        room = meet.Room(id="m" * 12, owner=1, closed=True)
+        a, b = self.fake_participant(m, room, 1), self.fake_participant(m, room, 2)
+        room.background = FakeBackground()
+        m.mix_tick(room)
+        full = 10000 * config.MEET_MUSIC_VOLUME
+        for p in (a, b):
+            self.assertAlmostEqual(float(p.out.queue[-1][-1]), full, delta=2)
+        for _ in range(30):  # a talks for 0.6 s
+            a.inbox.append(_tone(500, amp=8000))
+            m.mix_tick(room)
+        ducked = full * config.MEET_MUSIC_DUCK
+        self.assertAlmostEqual(room.duck, config.MEET_MUSIC_DUCK, delta=0.01)
+        # a hears only the (ducked) music, never itself
+        self.assertAlmostEqual(float(np.abs(a.out.queue[-1]).max()), ducked, delta=60)
+        # b hears a's voice on top of the ducked music
+        voice = b.out.queue[-1].astype(np.int32) - int(round(ducked))
+        self.assertTrue(np.allclose(voice, _tone(500, amp=8000), atol=60))
+        for _ in range(100):  # silence: the music comes back slowly
+            m.mix_tick(room)
+        self.assertGreater(room.duck, 0.9)
+
+    def test_no_reading_without_listeners(self):
+        m = self.manager()
+        room = meet.Room(id="n" * 12, owner=1, closed=True)
+        self.fake_participant(m, room, 1, connected=False)
+        room.background = FakeBackground()
+        m.mix_tick(room)
+        self.assertEqual(room.background.reads, 0)  # the source waits instead of losing audio
+
+
+@unittest.skipIf(rtc is None, "aiortc/cmcall not installed")
+class TestBackgroundIntegration(_Base):
+    """A real station (local stream server) and a real file in one room."""
+
+    def setUp(self):
+        super().setUp()
+        from tests.test_meet_media import StreamServer, make_video
+
+        self.srv = StreamServer(freq=440.0)
+        self.tmp = tempfile.mkdtemp(prefix="meet-bg-")
+        self.clip = make_video(os.path.join(self.tmp, "clip.mp4"), seconds=1.0, freq=660.0)
+
+    def tearDown(self):
+        super().tearDown()
+        self.srv.close()
+
+    def _run_mixer(self, m, room, seconds, ears=None):
+        """Drive the room like the 20 ms mixer task; collect what participant 1 hears."""
+        heard = []
+        end = time.time() + seconds
+        while time.time() < end:
+            m.mix_tick(room)
+            q = room.participants[1].out.queue
+            while q:
+                pcm = q.popleft()
+                if rtc.rms(pcm.astype(np.float32)) > 300:
+                    heard.append(round(rtc.dominant_freq(pcm.astype(np.float32), rtc.SAMPLE_RATE)))
+            time.sleep(0.02)
+        return heard
+
+    @patch("meet.dc_helpers._send")
+    def test_radio_file_radio(self, mock_send):
+        m = self.manager()
+        room = m.create_room(1, chat_id=42, group=True)
+        self.fake_participant(m, room, 1)
+        station_id = database.add_radio_stream(self.srv.url, "Test FM")
+        src = m.start_radio(room, database.get_radio_stream(station_id))
+        self.assertTrue(src.wait_started())
+        heard = self._run_mixer(m, room, 1.5)
+        self.assertGreater(sum(1 for f in heard if abs(f - 450) <= 50), 40, heard[:20])
+
+        f = m.play_file(room, self.clip, "clip.mp4")
+        self.assertTrue(f.wait_started())
+        self.assertTrue(src.stopped)  # the radio paused for the file
+        heard = self._run_mixer(m, room, 2.5)
+        self.assertGreater(sum(1 for x in heard if abs(x - 650) <= 50), 40, heard)
+        # the file ended: the station is back
+        self.assertEqual(room.background.kind, "radio")
+        self.assertEqual(room.radio_id, station_id)
+        self.assertTrue(room.background.wait_started())
+        mock_send.assert_not_called()  # no chatter for a normal end
+
+        m.stop_background(room)
+        self.assertIsNone(room.background)
+        self.assertIsNone(room.radio_id)
+
+    def test_close_room_stops_audio(self):
+        m = self.manager()
+        room = m.create_room(1, chat_id=42, group=True)
+        src = m.play_file(room, self.clip, "clip.mp4")
+        self.assertTrue(src.wait_started())
+        m.close_room(room, "closed")
+        self.assertTrue(src.stopped)
+        self.assertIsNone(room.background)
+
+
+@unittest.skipIf(rtc is None, "aiortc/cmcall not installed")
+class TestRadioCommands(_Base):
+    def _msg(self, text, payload="", from_id=10, chat_id=42, quote=None, file=None):
+        msg = MagicMock(text=text, from_id=from_id, chat_id=chat_id, id=500, quote=quote, file=file, file_bytes=0)
+        return MagicMock(msg=msg, payload=payload)
+
+    def setUp(self):
+        super().setUp()
+        self.bot.rpc.get_basic_chat_info.side_effect = (
+            lambda accid, cid: {"chat_type": "Group" if cid == 42 else "Single"})
+        self.bot.rpc.get_chat_contacts.side_effect = lambda accid, cid: [1, 10, 11]
+        database.set_config("meets_enabled", "1")
+        self.threads = []
+        real_thread = threading.Thread
+
+        def thread(*a, target=None, args=(), **kw):
+            # run the commands' own background jobs synchronously (_run_threads);
+            # everything else (call loops, decoders) gets a real thread
+            if target in (meet._start_radio_and_report, meet._probe_and_add, meet._play_and_report):
+                self.threads.append((target, args))
+                return MagicMock()
+            return real_thread(*a, target=target, args=args, **kw)
+
+        th = patch("meet.threading.Thread", side_effect=thread)
+        th.start()
+        self.addCleanup(th.stop)
+
+    def _run_threads(self):
+        while self.threads:
+            target, args = self.threads.pop(0)
+            target(*args)
+
+    def _texts(self, mock_send):
+        return [c[0][3] for c in mock_send.call_args_list]
+
+    @patch("meet.meet_media.probe", return_value={"name": "Test FM: Deep Space", "codec": "aac",
+                                                   "rate": 44100, "channels": 2, "duration": None})
+    @patch("meet.dc_helpers._react")
+    @patch("meet.dc_helpers._send")
+    def test_station_list_admin_only(self, mock_send, _react, _probe):
+        with patch("meet.dc_helpers._is_dc_admin", return_value=False):
+            meet.radioadd_command(self.bot, 1, self._msg("/radioadd", "https://radio.example.org/live"))
+            self.assertIn("Only the bot administrator", mock_send.call_args[0][3])
+            meet.radiodel_command(self.bot, 1, self._msg("/radiodel 1", "1"))
+            self.assertIn("Only the bot administrator", mock_send.call_args[0][3])
+        self.assertEqual(database.get_radio_streams(), [])
+        with patch("meet.dc_helpers._is_dc_admin", return_value=True):
+            meet.radioadd_command(self.bot, 1, self._msg("/radioadd", "file:///etc/passwd"))
+            self.assertIn("Usage", mock_send.call_args[0][3])
+            meet.radioadd_command(self.bot, 1, self._msg("/radioadd", "https://ice2.somafm.com/synphaera-128-aac"))
+            self._run_threads()
+            self.assertIn("✅ Added 1. Test FM: Deep Space (aac, 44.1 kHz stereo)", mock_send.call_args[0][3])
+            meet.radioadd_command(self.bot, 1, self._msg(
+                "/radioadd", "https://radio.example.org/live.mp3 My own name"))
+            self._run_threads()
+            self.assertIn("Added 2. My own name", mock_send.call_args[0][3])
+            meet.radioadd_command(self.bot, 1, self._msg("/radioadd", "https://ice2.somafm.com/synphaera-128-aac"))
+            self.assertIn("Already in the list: 1.", mock_send.call_args[0][3])
+            meet.radio_command(self.bot, 1, self._msg("/radio"))
+            listing = mock_send.call_args[0][3]
+            self.assertIn("1. Test FM: Deep Space (ice2.somafm.com)", listing)
+            self.assertIn("2. My own name (radio.example.org)", listing)
+            self.assertIn("/radioadd", listing)
+            meet.radiodel_command(self.bot, 1, self._msg("/radiodel 2", "2"))
+            self.assertIn("Removed 2. My own name", mock_send.call_args[0][3])
+            meet.radiodel_command(self.bot, 1, self._msg("/radiodel 2", "2"))
+            self.assertIn("no station 2", mock_send.call_args[0][3])
+        with patch("meet.dc_helpers._is_dc_admin", return_value=False):
+            meet.radio_command(self.bot, 1, self._msg("/radio"))
+            self.assertNotIn("/radioadd", mock_send.call_args[0][3])
+
+    @patch("meet.dc_helpers._is_dc_admin", return_value=False)
+    @patch("meet.dc_helpers._react")
+    @patch("meet.dc_helpers._send")
+    def test_radio_in_a_meeting(self, mock_send, _react, _admin):
+        sid = database.add_radio_stream("https://radio.example.org/live", "Test FM")
+        meet.radio_command(self.bot, 1, self._msg("/radio 1", "1"))
+        self.assertEqual(mock_send.call_args[0][3], meet.NO_ROOM)
+        meet.meet_command(self.bot, 1, self._msg("/meet"))
+        m = state.meet_manager
+        self.managers.append(m)
+        room = m.room_for_chat(42)
+        fake = MagicMock(error=None)
+        fake.wait_started.return_value = True
+        with patch.object(m, "start_radio", return_value=fake) as start:
+            meet.radio_command(self.bot, 1, self._msg("/radio 1", "1", from_id=11))
+            self._run_threads()
+        start.assert_called_once_with(room, database.get_radio_stream(sid))
+        self.assertIn("Now playing 1. Test FM (radio.example.org) in this chat's meeting", mock_send.call_args[0][3])
+        meet.radio_command(self.bot, 1, self._msg("/radio 7", "7"))
+        self.assertIn("no station 7", mock_send.call_args[0][3])
+        meet.radio_command(self.bot, 1, self._msg("/radio off", "off"))
+        self.assertIn("Nothing is playing", mock_send.call_args[0][3])
+        room.background, room.radio_id = FakeBackground(), sid
+        meet.radio_command(self.bot, 1, self._msg("/radio", ""))
+        self.assertIn("Now in this chat's meeting: 📻 1. Fake FM", mock_send.call_args[0][3])
+        meet.radio_command(self.bot, 1, self._msg("/radio 0", "0"))
+        self.assertIn("Background audio off", mock_send.call_args[0][3])
+        self.assertIsNone(room.background)
+        # outsiders can't control a group's meeting
+        self.bot.rpc.get_chat_contacts.side_effect = lambda accid, cid: [1, 10]
+        meet.radio_command(self.bot, 1, self._msg("/radio 1", "1", from_id=12))
+        self.assertEqual(mock_send.call_args[0][3], meet.NOT_MEMBER)
+
+    @patch("meet.dc_helpers._is_dc_admin", return_value=False)
+    @patch("meet.dc_helpers._react")
+    @patch("meet.dc_helpers._send")
+    def test_radio_that_does_not_play(self, mock_send, react, _admin):
+        sid = database.add_radio_stream("http://127.0.0.1:9/dead", "Dead FM")
+        meet.meet_command(self.bot, 1, self._msg("/meet"))
+        m = state.meet_manager
+        self.managers.append(m)
+        room = m.room_for_chat(42)
+        meet.radio_command(self.bot, 1, self._msg("/radio 1", "1"))
+        self._run_threads()
+        self.assertIn(f"Station {sid} is not playing: cannot open", mock_send.call_args[0][3])
+        self.assertIsNone(room.background)
+        self.assertIsNone(room.radio_id)
+        react.assert_called_with(self.bot, 1, 500, "❌")
+
+    @patch("meet.dc_helpers._is_dc_admin", return_value=False)
+    @patch("meet.dc_helpers._react")
+    @patch("meet.dc_helpers._send")
+    def test_play(self, mock_send, react, _admin):
+        from tests.test_meet_media import make_video
+
+        tmp = tempfile.mkdtemp(prefix="meet-play-")
+        clip = make_video(os.path.join(tmp, "clip.mp4"), seconds=2.0)
+        note = os.path.join(tmp, "note.txt")
+        with open(note, "w") as f:
+            f.write("not audio")
+        meet.play_command(self.bot, 1, self._msg("/play"))
+        self.assertEqual(mock_send.call_args[0][3], meet.NO_ROOM)
+        meet.meet_command(self.bot, 1, self._msg("/meet"))
+        m = state.meet_manager
+        self.managers.append(m)
+        room = m.room_for_chat(42)
+        meet.play_command(self.bot, 1, self._msg("/play"))
+        self.assertIn("reply /play to an audio or video message", mock_send.call_args[0][3])
+        files = {700: {"path": clip, "filename": "clip.mp4"}, 701: {"path": note, "filename": "note.txt"}}
+        self.bot.rpc.get_message.side_effect = lambda accid, mid: MagicMock(id=mid)
+        with patch("meet.dc_helpers._get_msg_file_info", side_effect=lambda bot, accid, msg: files.get(msg.id)):
+            meet.play_command(self.bot, 1, self._msg("/play", quote={"message_id": 701}))
+            self._run_threads()
+            self.assertIn("no sound I can play", mock_send.call_args[0][3])
+            meet.play_command(self.bot, 1, self._msg("/play", quote={"message_id": 700}))
+            self._run_threads()
+        self.assertIn("▶️ Playing clip.mp4 (0:02) in this chat's meeting. /play off stops it.",
+                      mock_send.call_args[0][3])
+        react.assert_called_with(self.bot, 1, 500, "▶️")
+        self.assertEqual(room.background.kind, "file")
+        meet.play_command(self.bot, 1, self._msg("/play off", "off"))
+        self.assertIn("Stopped", mock_send.call_args[0][3])
+        self.assertIsNone(room.background)
+        meet.play_command(self.bot, 1, self._msg("/play off", "off"))
+        self.assertIn("No file is playing", mock_send.call_args[0][3])
 
 
 if __name__ == "__main__":

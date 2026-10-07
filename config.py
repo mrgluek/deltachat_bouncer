@@ -41,7 +41,7 @@ logger = logging.getLogger("bouncer_bot")
 if os.environ.get("CALL_DEBUG_LOG", "").strip().lower() not in ("1", "true", "yes", "on"):
     for _webrtc_logger in ("aioice", "aiortc"):
         logging.getLogger(_webrtc_logger).setLevel(logging.WARNING)
-VERSION = "2.23.0"
+VERSION = "2.24.0"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -163,6 +163,10 @@ MEET_IDLE_MINUTES = int(os.environ.get("MEET_IDLE_MINUTES", "60"))  # after the 
 MEET_MAX_HOURS = float(os.environ.get("MEET_MAX_HOURS", "6"))  # hard limit per room
 MEET_RING_SECONDS = int(os.environ.get("MEET_RING_SECONDS", "45"))  # /join: how long the bot rings
 MEET_MAX_ROOMS_PER_USER = int(os.environ.get("MEET_MAX_ROOMS_PER_USER", "1"))
+# Background audio in meetings (/radio, /play): level relative to the voices,
+# and how far it drops while someone talks
+MEET_MUSIC_VOLUME = float(os.environ.get("MEET_MUSIC_VOLUME", "0.35"))
+MEET_MUSIC_DUCK = float(os.environ.get("MEET_MUSIC_DUCK", "0.3"))
 
 # Call monitoring between relays (cmcall), the call-side twin of the cmping monitor
 CMCALL_MONITOR_INTERVAL = int(os.environ.get("CMCALL_MONITOR_INTERVAL", "3600"))  # 0 disables

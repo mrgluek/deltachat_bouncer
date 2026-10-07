@@ -595,7 +595,9 @@ def _meet_help() -> str:
         return ""
     return ("/meet — Start a voice meeting (the bot calls everyone in and mixes).\n"
             "/join <id> — Join a meeting; the bot calls you.\n"
-            "/meetclose, /meetnew — Close your meeting, or restart it with a new link.\n")
+            "/meetclose, /meetnew — Close your meeting, or restart it with a new link.\n"
+            "/radio [number|off] — Meeting radio: list the stations, play one in this chat's meeting, stop.\n"
+            "/play [off] — Reply to an audio or video message to play its sound in the meeting.\n")
 
 
 @config.dc_cli.on(events.NewMessage(command="/help"))
@@ -680,7 +682,9 @@ def help_command(bot, accid, event):
         help_text += "/cmcallskip [server] — Exclude a server from call monitoring (no arg: list)\n"
         help_text += "/cmcallunskip <server> — Put a server back into call monitoring\n"
         help_text += "/meets [on|off] — Voice meetings switch (off by default, CPU-heavy)\n"
-        help_text += "/meetclose <id> — Close any meeting to free its places (ids from /meets)"
+        help_text += "/meetclose <id> — Close any meeting to free its places (ids from /meets)\n"
+        help_text += "/radioadd <url> [name] — Add a meeting radio station (stream URL)\n"
+        help_text += "/radiodel <number> — Remove a meeting radio station"
 
 
     chat_id = _get_help_chat_id(bot, accid, msg)

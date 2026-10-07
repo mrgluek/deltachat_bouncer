@@ -605,6 +605,16 @@ def init_db():
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_cmcall_events_server ON cmcall_events(server, started_at)')
 
+        # Meeting radio: stations the admin added with /radioadd
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS meet_radio_streams (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT UNIQUE,
+                name TEXT,
+                added_at REAL
+            )
+        ''')
+
         # Echo call service log (one row per answered call)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS call_echo_log (
@@ -2110,3 +2120,50 @@ def get_cmcall_event_msg_ids(event_id: int) -> dict[int, int]:
         cursor = conn.cursor()
         cursor.execute("SELECT chat_id, msg_id FROM cmcall_event_messages WHERE event_id = ?", (event_id,))
         return {c: m for c, m in cursor.fetchall()}
+
+
+# --- Meeting radio stations ---
+
+def add_radio_stream(url: str, name: str) -> int:
+    """Add a station; returns its id (the existing one if the URL is already listed)."""
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM meet_radio_streams WHERE url = ?", (url,))
+        row = cursor.fetchone()
+        if row:
+            return row[0]
+        cursor.execute(
+            "INSERT INTO meet_radio_streams (url, name, added_at) VALUES (?, ?, ?)",
+            (url, name, time.time()),
+        )
+        return cursor.lastrowid
+
+
+def get_radio_streams() -> list[dict]:
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, url, name FROM meet_radio_streams ORDER BY id")
+        return [{"id": r[0], "url": r[1], "name": r[2]} for r in cursor.fetchall()]
+
+
+def get_radio_stream(stream_id: int) -> dict | None:
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, url, name FROM meet_radio_streams WHERE id = ?", (stream_id,))
+        r = cursor.fetchone()
+    return {"id": r[0], "url": r[1], "name": r[2]} if r else None
+
+
+def get_radio_stream_by_url(url: str) -> dict | None:
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, url, name FROM meet_radio_streams WHERE url = ?", (url,))
+        r = cursor.fetchone()
+    return {"id": r[0], "url": r[1], "name": r[2]} if r else None
+
+
+def delete_radio_stream(stream_id: int) -> bool:
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM meet_radio_streams WHERE id = ?", (stream_id,))
+        return cursor.rowcount > 0

@@ -44,6 +44,8 @@ services:
       - MEET_MAX_HOURS
       - MEET_RING_SECONDS
       - MEET_MAX_ROOMS_PER_USER
+      - MEET_MUSIC_VOLUME
+      - MEET_MUSIC_DUCK
       - VIRUSTOTAL_API_KEY
       - U2NET_HOME=/app/data/u2net
       - REMBG_HOME=/app/data/u2net

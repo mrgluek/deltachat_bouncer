@@ -21,6 +21,13 @@ first has more than 4 people.
 /meetclose      close the chat's room (its creator or the admin; admin: any id)
 /meetnew        close it and start a new one with a new link
 /meets on|off   admin switch (also 1/0); no argument shows the status
+/radio [N|off]  list the stations / play station N in the chat's meeting / stop
+/play [off]     reply to an audio or video message: play its sound in the meeting
+/radioadd, /radiodel   admin: curate the station list
+
+Background audio (meet_media.py) goes to everyone under the voices and drops
+to MEET_MUSIC_DUCK while someone talks; a played file pauses the radio, which
+resumes when the file ends.
 
 A room belongs to the chat it was started in. A group's room is for that
 group's members only (checked on /join, on calls back in and every 30 s
@@ -54,6 +61,7 @@ import calls
 import config
 import database
 import dc_helpers
+import meet_media
 import state
 
 rtc = calls.rtc
@@ -232,6 +240,9 @@ class Room:
     participants: dict = field(default_factory=dict)  # contact_id -> Participant
     empty_since: Optional[float] = None
     closed: bool = False
+    background: object = None              # meet_media.BackgroundSource playing in the room
+    radio_id: Optional[int] = None         # the station to play / resume after a file
+    duck: float = 1.0                      # current music gain factor (ducking)
 
     def __post_init__(self):
         if self.empty_since is None:
@@ -343,6 +354,9 @@ class MeetManager:
             for cid in [c for c, rid in self.contact_room.items() if rid == room.id]:
                 self.contact_room.pop(cid, None)
             members = list(room.participants.values())
+            background, room.background, room.radio_id = room.background, None, None
+        if background is not None:
+            background.stop()
         for p in members:
             self.leave(p, reason)
         config.logger.info(f"Meet {room.id[:4]}…: closed ({reason})")
@@ -625,7 +639,8 @@ class MeetManager:
     # -- mixing ------------------------------------------------------------
 
     def mix_tick(self, room: Room) -> None:
-        """One 20 ms step: pull a frame per participant, gate, mix-minus, push."""
+        """One 20 ms step: pull a frame per participant, gate, mix-minus, add the
+        background audio (ducked under voices), push."""
         with self._lock:
             parts = [p for p in room.participants.values() if p.connected]
         active = {}
@@ -643,15 +658,134 @@ class MeetManager:
             else:
                 continue
             active[p.contact_id] = pcm
-        if not active:
+        music = self._music_frame(room, bool(active)) if parts else None
+        if not active and music is None:
             return
         mixes = mix_frames(active)
-        total = mixes.pop("*")
+        total = mixes.pop("*", None)
         for p in parts:
-            mix = mixes.get(p.contact_id, total)
+            voice = mixes.get(p.contact_id, total)
             if p.contact_id in active and len(active) == 1:
-                continue  # only they are talking: nothing to hear
-            p.out.push(_clip(mix))
+                voice = None  # only they are talking: nothing to hear from the others
+            if voice is None and music is None:
+                continue
+            if voice is None:
+                out = music
+            elif music is None:
+                out = voice
+            else:
+                out = voice + music
+            p.out.push(_clip(out))
+
+    def _music_frame(self, room: Room, voices: bool):
+        """The background audio's next frame at its volume, ducked while someone talks."""
+        bg = room.background
+        pcm = bg.read() if bg is not None else None
+        if pcm is None:
+            return None
+        target = config.MEET_MUSIC_DUCK if voices else 1.0
+        start = room.duck
+        # duck within ~60 ms, come back over ~0.7 s
+        rate = 0.35 if target < start else 0.03
+        room.duck = start + (target - start) * rate
+        gain = np.linspace(start, room.duck, pcm.size, dtype=np.float32) * config.MEET_MUSIC_VOLUME
+        return (pcm.astype(np.float32) * gain).astype(np.int32)
+
+    # -- background audio ------------------------------------------------------
+
+    def _listening(self, room: Room):
+        def listening() -> bool:
+            with self._lock:
+                return not room.closed and any(p.connected for p in room.participants.values())
+        return listening
+
+    def _set_background(self, room: Room, source) -> None:
+        with self._lock:
+            if room.closed:
+                old = source
+            else:
+                old, room.background = room.background, source
+                room.duck = 1.0
+        if old is not None:
+            old.stop()
+
+    def start_radio(self, room: Room, station: dict):
+        """Play a station in the room (replacing whatever plays). Returns the source."""
+        src = meet_media.BackgroundSource(
+            station["url"], "radio", station["name"], listening=self._listening(room),
+            on_end=lambda s, err: self._background_ended(room, s, err), radio_id=station["id"])
+        with self._lock:
+            room.radio_id = station["id"]
+        self._set_background(room, src.start())
+        config.logger.info(f"Meet {room.id[:4]}…: radio #{station['id']} on")
+        return src
+
+    def play_file(self, room: Room, path: str, title: str):
+        """Play a file in the room; a running station pauses and resumes afterwards."""
+        src = meet_media.BackgroundSource(
+            path, "file", title, listening=self._listening(room),
+            on_end=lambda s, err: self._background_ended(room, s, err))
+        self._set_background(room, src.start())
+        config.logger.info(f"Meet {room.id[:4]}…: playing a file")
+        return src
+
+    def stop_background(self, room: Room, only_file: bool = False) -> Optional[str]:
+        """Stop the room's background audio. With ``only_file`` just a playing file
+        (the station, if any, resumes). Returns what was stopped: radio/file/None."""
+        with self._lock:
+            bg = room.background
+            kind = bg.kind if bg is not None else None
+            if only_file and kind != "file":
+                return None
+            if not only_file:
+                room.radio_id = None
+        self._set_background(room, None)
+        if only_file:
+            self._resume_radio(room)
+        return kind
+
+    def _resume_radio(self, room: Room) -> None:
+        with self._lock:
+            radio_id = room.radio_id if not room.closed and room.background is None else None
+        if radio_id is None:
+            return
+        station = database.get_radio_stream(radio_id)
+        if station is None:  # deleted meanwhile
+            with self._lock:
+                room.radio_id = None
+            return
+        self.start_radio(room, station)
+
+    def _background_ended(self, room: Room, src, error: Optional[str]) -> None:
+        with self._lock:
+            if room.background is not src or room.closed:
+                return
+            room.background = None
+            if src.kind == "radio" and error:
+                room.radio_id = None
+        # errors before the audio started are answered by the command that started it
+        if error and src.started.is_set() and src.frames_out:
+            what = "📻 The radio stopped" if src.kind == "radio" else f"⚠️ Playing {src.title} stopped"
+            dc_helpers._send(self.bot, room.accid, room.chat_id, f"{what}: {error}")
+        if src.kind == "file":
+            self._resume_radio(room)
+
+    def stations_removed(self, station_id: int) -> None:
+        for room in list(self.rooms.values()):
+            with self._lock:
+                playing = room.background is not None and getattr(room.background, "radio_id", None) == station_id
+                if room.radio_id == station_id:
+                    room.radio_id = None
+            if playing:
+                self._set_background(room, None)
+
+    def background_line(self, room: Room) -> str:
+        bg = room.background
+        if bg is None:
+            return ""
+        if bg.kind == "radio":
+            return f"📻 {bg.radio_id}. {bg.title}"
+        return f"▶️ {bg.title}"
 
     async def _mix(self, room: Room) -> None:
         import asyncio
@@ -680,8 +814,9 @@ class MeetManager:
             n = sum(1 for p in r.participants.values() if p.connected)
             idle = "" if r.participants else f", empty for {_fmt_duration(now - (r.empty_since or now))}"
             kind = "group" if r.group else "private"
+            bg = self.background_line(r)
             lines.append(f"• {r.id[:4]}… ({kind}) — {n}/{self.room_capacity()} connected, "
-                         f"open {_fmt_duration(now - r.created_at)}{idle}")
+                         f"open {_fmt_duration(now - r.created_at)}{idle}" + (f" — {bg}" if bg else ""))
         return lines
 
 
@@ -730,6 +865,8 @@ def _send_room_link(bot, accid, manager, room, from_id, created: bool) -> None:
                      "Forward them the next message.")
     lines.append(f"The room closes {config.MEET_IDLE_MINUTES} minutes after the last person leaves; "
                  f"its creator can close it with /meetclose or swap the link with /meetnew.")
+    lines.append("🎵 Background audio from this chat: /radio lists the stations, and replying /play to an "
+                 "audio or video message plays its sound in the meeting.")
     if created:
         lines.append(manager.tune_line(accid, from_id))
     lines += ["", PRIVACY_NOTE]
@@ -887,3 +1024,227 @@ def meets_command(bot, accid, event):
     if state.meet_manager is not None:
         lines += state.meet_manager.status_lines()
     dc_helpers._send(bot, accid, msg.chat_id, "\n".join(lines))
+
+
+# --------------------------------------------------------------------------
+# background audio: /radio, /play and the admin's station list
+# --------------------------------------------------------------------------
+
+NO_ROOM = "ℹ️ There is no open meeting in this chat. Start one with /meet."
+RADIO_OFF_WORDS = ("0", "off", "stop")
+
+
+def _station_line(st: dict) -> str:
+    from urllib.parse import urlparse
+
+    host = urlparse(st["url"]).hostname or ""
+    return f"{st['id']}. {st['name']}" + (f" ({host})" if host and host not in st["name"] else "")
+
+
+def _room_for_command(bot, accid, msg) -> tuple[Optional[MeetManager], Optional[Room], str]:
+    """The chat's open room for /radio N, /play - or (None, None, why not)."""
+    if not meets_enabled() or rtc is None:
+        return None, None, "❌ Voice meetings are disabled on this bot."
+    manager = get_manager(bot)
+    room = manager.room_for_chat(msg.chat_id)
+    if room is None:
+        return manager, None, NO_ROOM
+    if room.group and not manager.is_member(room, msg.from_id):
+        return manager, None, NOT_MEMBER
+    return manager, room, ""
+
+
+def radio_list_text(chat_room: Optional[Room], manager: Optional[MeetManager], is_admin: bool) -> str:
+    stations = database.get_radio_streams()
+    lines = ["📻 **Meeting radio**"]
+    if stations:
+        lines += [_station_line(st) for st in stations]
+    else:
+        lines.append("No stations yet.")
+    if chat_room is not None and manager is not None:
+        now = manager.background_line(chat_room)
+        lines.append("")
+        lines.append(f"Now in this chat's meeting: {now}" if now else "Nothing is playing in this chat's meeting.")
+    lines.append("")
+    lines.append("/radio <number> plays a station in this chat's meeting (quieter while someone talks), "
+                 "/radio off stops it. Reply /play to an audio or video message to play its sound instead.")
+    if is_admin:
+        lines.append("Admin: /radioadd <url> [name] adds a station, /radiodel <number> removes one. "
+                     "Only add streams you may rebroadcast.")
+    return "\n".join(lines)
+
+
+@config.dc_cli.on(events.NewMessage(command="/radio"))
+def radio_command(bot, accid, event):
+    msg = event.msg
+    arg = (event.payload or "").strip().lower().lstrip("#")
+    if not arg:
+        manager = state.meet_manager if rtc is not None else None
+        room = manager.room_for_chat(msg.chat_id) if manager is not None else None
+        is_admin = dc_helpers._is_dc_admin(bot, accid, msg.from_id)
+        dc_helpers._send(bot, accid, msg.chat_id, radio_list_text(room, manager, is_admin))
+        return
+    if arg not in RADIO_OFF_WORDS and not arg.isdigit():
+        dc_helpers._send(bot, accid, msg.chat_id, "Usage: /radio (list), /radio <number>, /radio off")
+        return
+    manager, room, why = _room_for_command(bot, accid, msg)
+    if room is None:
+        dc_helpers._send(bot, accid, msg.chat_id, why)
+        return
+    if arg in RADIO_OFF_WORDS:
+        stopped = manager.stop_background(room)
+        dc_helpers._send(bot, accid, msg.chat_id,
+                         "📻 Background audio off." if stopped else "ℹ️ Nothing is playing in this chat's meeting.")
+        return
+    station = database.get_radio_stream(int(arg))
+    if station is None:
+        dc_helpers._send(bot, accid, msg.chat_id, f"❌ There is no station {arg}. /radio lists them.")
+        return
+    dc_helpers._react(bot, accid, msg.id, "⏳")
+    threading.Thread(target=_start_radio_and_report, args=(bot, accid, msg, manager, room, station),
+                     name="meet-radio-start", daemon=True).start()
+
+
+def _start_radio_and_report(bot, accid, msg, manager, room, station) -> None:
+    src = manager.start_radio(room, station)
+    if src.wait_started():
+        dc_helpers._react(bot, accid, msg.id, "📻")
+        dc_helpers._send(bot, accid, msg.chat_id, (
+            f"📻 Now playing {_station_line(station)} in this chat's meeting, quieter while someone talks. "
+            f"/radio off stops it."))
+        return
+    with manager._lock:
+        if room.background is src:
+            room.background = None
+        if room.radio_id == station["id"]:
+            room.radio_id = None
+    src.stop()
+    dc_helpers._react(bot, accid, msg.id, "❌")
+    dc_helpers._send(bot, accid, msg.chat_id,
+                     f"❌ Station {station['id']} is not playing: {src.error or 'no audio within 15 s'}")
+
+
+@config.dc_cli.on(events.NewMessage(command="/radioadd"))
+def radioadd_command(bot, accid, event):
+    msg = event.msg
+    if not dc_helpers._is_dc_admin(bot, accid, msg.from_id):
+        dc_helpers._send(bot, accid, msg.chat_id, "❌ Only the bot administrator can add stations.")
+        return
+    parts = (event.payload or "").strip().split(maxsplit=1)
+    url = parts[0] if parts else ""
+    name = parts[1].strip() if len(parts) > 1 else ""
+    if not meet_media.valid_stream_url(url):
+        dc_helpers._send(bot, accid, msg.chat_id, "Usage: /radioadd <http(s) stream URL> [name]")
+        return
+    existing = database.get_radio_stream_by_url(url)
+    if existing:
+        dc_helpers._send(bot, accid, msg.chat_id, f"ℹ️ Already in the list: {_station_line(existing)}")
+        return
+    dc_helpers._react(bot, accid, msg.id, "⏳")
+    threading.Thread(target=_probe_and_add, args=(bot, accid, msg, url, name),
+                     name="meet-radio-probe", daemon=True).start()
+
+
+def _probe_and_add(bot, accid, msg, url: str, name: str) -> None:
+    try:
+        info = meet_media.probe(url, "radio")
+    except Exception as e:
+        dc_helpers._react(bot, accid, msg.id, "❌")
+        dc_helpers._send(bot, accid, msg.chat_id, f"❌ Not added, the stream does not play: {meet_media._short(e)}")
+        return
+    from urllib.parse import urlparse
+
+    title = (name or info.get("name") or urlparse(url).hostname or url)[:80]
+    station_id = database.add_radio_stream(url, title)
+    ch = {1: "mono", 2: "stereo"}.get(info.get("channels"), f"{info.get('channels')} ch")
+    dc_helpers._react(bot, accid, msg.id, "✅")
+    dc_helpers._send(bot, accid, msg.chat_id, (
+        f"✅ Added {station_id}. {title} ({info.get('codec')}, {info.get('rate', 0) / 1000:g} kHz {ch}). "
+        f"Play it in a meeting's chat with /radio {station_id}."))
+
+
+@config.dc_cli.on(events.NewMessage(command="/radiodel"))
+def radiodel_command(bot, accid, event):
+    msg = event.msg
+    if not dc_helpers._is_dc_admin(bot, accid, msg.from_id):
+        dc_helpers._send(bot, accid, msg.chat_id, "❌ Only the bot administrator can remove stations.")
+        return
+    arg = (event.payload or "").strip().lstrip("#")
+    if not arg.isdigit():
+        dc_helpers._send(bot, accid, msg.chat_id, "Usage: /radiodel <number> (see /radio)")
+        return
+    station = database.get_radio_stream(int(arg))
+    if station is None or not database.delete_radio_stream(int(arg)):
+        dc_helpers._send(bot, accid, msg.chat_id, f"❌ There is no station {arg}.")
+        return
+    if state.meet_manager is not None:
+        state.meet_manager.stations_removed(station["id"])
+    dc_helpers._send(bot, accid, msg.chat_id, f"🗑️ Removed {_station_line(station)}.")
+
+
+@config.dc_cli.on(events.NewMessage(command="/play"))
+def play_command(bot, accid, event):
+    msg = event.msg
+    arg = (event.payload or "").strip().lower()
+    manager, room, why = _room_for_command(bot, accid, msg)
+    if room is None:
+        dc_helpers._send(bot, accid, msg.chat_id, why)
+        return
+    if arg in RADIO_OFF_WORDS:
+        stopped = manager.stop_background(room, only_file=True)
+        resumed = " The radio continues." if room.radio_id is not None else ""
+        dc_helpers._send(bot, accid, msg.chat_id,
+                         f"⏹ Stopped.{resumed}" if stopped else "ℹ️ No file is playing in this chat's meeting.")
+        return
+    target = msg if _has_attachment(msg) else None
+    quote = getattr(msg, "quote", None)
+    if target is None and isinstance(quote, dict):
+        quoted_id = quote.get("message_id") or quote.get("messageId")
+        if quoted_id:
+            try:
+                target = bot.rpc.get_message(accid, quoted_id)
+            except Exception as e:
+                config.logger.warning(f"/play: could not load the quoted message: {e}")
+    if target is None:
+        dc_helpers._send(bot, accid, msg.chat_id, (
+            "Usage: reply /play to an audio or video message (or send one with /play as its caption) "
+            "to play its sound in this chat's meeting. /play off stops it."))
+        return
+    dc_helpers._react(bot, accid, msg.id, "⏳")
+    threading.Thread(target=_play_and_report, args=(bot, accid, msg, manager, room, target),
+                     name="meet-play", daemon=True).start()
+
+
+def _has_attachment(msg) -> bool:
+    return bool(getattr(msg, "file", None) or getattr(msg, "file_bytes", 0))
+
+
+def _play_and_report(bot, accid, msg, manager, room, target) -> None:
+    def fail(text):
+        dc_helpers._react(bot, accid, msg.id, "❌")
+        dc_helpers._send(bot, accid, msg.chat_id, text)
+
+    info = dc_helpers._get_msg_file_info(bot, accid, target)  # downloads it if needed
+    if not info:
+        fail("❌ That message has no file I could download.")
+        return
+    try:
+        details = meet_media.probe(info["path"], "file")
+    except Exception:
+        fail("❌ That file has no sound I can play (send an audio or video file).")
+        return
+    title = (info.get("filename") or "the file")[:80]
+    if room.closed:
+        fail("❌ The meeting has closed.")
+        return
+    src = manager.play_file(room, info["path"], title)
+    if not src.wait_started():
+        manager.stop_background(room, only_file=True)
+        fail(f"❌ Could not play {title}: {src.error or 'no sound'}")
+        return
+    length = meet_media.format_duration(details.get("duration"))
+    after = " The radio continues afterwards." if room.radio_id is not None else ""
+    dc_helpers._react(bot, accid, msg.id, "▶️")
+    dc_helpers._send(bot, accid, msg.chat_id, (
+        f"▶️ Playing {title}" + (f" ({length})" if length else "") +
+        f" in this chat's meeting. /play off stops it.{after}"))
