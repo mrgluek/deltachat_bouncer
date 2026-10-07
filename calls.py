@@ -3,7 +3,8 @@
 Echo service
 ------------
 Anyone can call the bot from a Delta Chat app. The bot answers, plays a short
-two-tone greeting and then loops the caller's audio straight back (optionally
+greeting (the caller's own 5-note fingerprint tune, the same one /join plays
+in a meeting) and then loops the caller's audio straight back (optionally
 delayed by CALL_ECHO_DELAY), so the caller hears themselves. After the hangup
 the bot sends a "📞 Echo call report" message into that chat: duration, media
 path (direct / STUN / TURN relay), audio heard from the caller, packet loss,
@@ -122,7 +123,11 @@ class EchoCallManager:
             return
 
         ice = echo_ice_servers(rpc.ice_servers(accid))
-        peer = rtc.EchoPeer(ice, delay=config.CALL_ECHO_DELAY, greeting=True)
+        # The greeting is the caller's own join tune (same as /join in a
+        # meeting, from their key fingerprint); the plain two-tone greeting
+        # stays as the fallback when the tune can't be built.
+        tune = _caller_tune_frames(self.bot, accid, contact_id)
+        peer = rtc.EchoPeer(ice, delay=config.CALL_ECHO_DELAY, greeting=tune is None)
         session = EchoSession(accid, msg_id, chat_id, contact_id, peer)
         session.offer_relay_ips = turn_names.relay_ips_from_sdp(event.place_call_info)
         session.caller_domain = _contact_domain(rpc, accid, contact_id)
@@ -153,6 +158,8 @@ class EchoCallManager:
                                   timeout=config.CALL_ECHO_CONNECT_TIMEOUT + 5)
         if session.finished:
             return
+        if connected and tune:
+            peer.echo.play(tune)  # EchoTrack.play: takes precedence over the echo
         if not connected:
             session.error = f"no media connection ({peer.failed_state or 'ICE timeout'})"
             self.finish(session, "ice-failed")
@@ -246,6 +253,18 @@ class EchoCallManager:
         config.logger.info(f"Echo call {session.msg_id} finished ({reason}), {duration:.0f}s")
         with self._lock:
             self.sessions.pop(session.msg_id, None)
+
+
+def _caller_tune_frames(bot, accid: int, contact_id: int) -> Optional[list]:
+    """The caller's fingerprint tune as audio frames, or None (-> default greeting)."""
+    if not contact_id:
+        return None
+    try:
+        import meet  # late: meet imports this module
+        return meet.tune_frames(meet.contact_tune(bot, accid, contact_id)) or None
+    except Exception as e:
+        config.logger.warning(f"Echo call: no caller tune, using the default greeting: {e}")
+        return None
 
 
 def echo_ice_servers(ice_json):

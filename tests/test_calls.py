@@ -313,6 +313,14 @@ class TestEchoCallIntegration(unittest.TestCase):
     def _incoming(self, offer, msg_id=500):
         return Ev(kind="IncomingCall", msg_id=msg_id, chat_id=42, place_call_info=offer, has_video=False)
 
+    def test_greeting_is_the_callers_join_tune(self):
+        import meet
+        bot = self._bot()
+        with patch("meet.dc_helpers._get_contact_fingerprint", return_value="AB:CD"):
+            frames = calls._caller_tune_frames(bot, 1, 10)
+        self.assertEqual(len(frames), len(meet.tune_frames(meet.tune_for("fp:AB:CD"))))
+        self.assertIsNone(calls._caller_tune_frames(bot, 1, 0))  # unknown caller -> default greeting
+
     @patch("calls.dc_helpers._send")
     def test_call_is_echoed_and_reported(self, mock_send):
         bot = self._bot()
@@ -327,7 +335,7 @@ class TestEchoCallIntegration(unittest.TestCase):
             self.assertTrue(self.answers, "bot did not answer")
             self.probe_loop.run(probe.accept_answer(self.answers[0]), timeout=10)
             self.assertTrue(self.probe_loop.run(probe.wait_connected(15), timeout=20))
-            time.sleep(0.8)  # skip the greeting
+            time.sleep(1.4)  # skip the greeting (the caller's 5-note tune, ~0.85 s)
             self.probe_loop.run(probe.run_probe(2.0), timeout=30)
             echo = self.probe_loop.run(probe.summary(), timeout=10)["echo"]
             self.assertEqual(echo["received"], echo["sent"], echo)

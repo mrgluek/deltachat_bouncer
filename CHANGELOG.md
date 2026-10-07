@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.26.0] - 2026-10-07
+
+### Changed
+- **Echo Call Greeting Is Your Tune**: The bot now greets an echo call with the caller's own 5-note fingerprint tune - the same one `/join` plays when you enter a meeting (derived from your key fingerprint, so it is identical in every call and meeting). The old two-tone greeting remains as a fallback if the caller is unknown or the tune can't be built. The tune logic moved to `meet.contact_tune()`, shared by meetings and echo calls.
+
 ## [2.25.0] - 2026-10-07
 
 ### Added

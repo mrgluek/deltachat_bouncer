@@ -118,6 +118,24 @@ def tune_for(seed: str) -> tuple:
     return tuple(notes)
 
 
+def contact_tune(bot, accid: int, contact_id: int) -> tuple:
+    """A contact's tune, from their key fingerprint (the address if there is
+    none): the same in every meeting, in echo calls and on every bot restart."""
+    seed = None
+    try:
+        fp = dc_helpers._get_contact_fingerprint(bot, accid, contact_id)
+        if isinstance(fp, str) and fp:
+            seed = "fp:" + fp.split(",")[0]
+    except Exception:
+        pass
+    if seed is None:
+        try:
+            seed = "addr:" + str(bot.rpc.get_contact(accid, contact_id).address).lower()
+        except Exception:
+            seed = f"contact:{contact_id}"
+    return tune_for(seed)
+
+
 def tune_name(notes) -> str:
     return " ".join(TUNE_SCALE[n][0] for n in notes)
 
@@ -387,23 +405,10 @@ class MeetManager:
     # -- joining -----------------------------------------------------------
 
     def tune_of(self, accid: int, contact_id: int) -> tuple:
-        """The contact's join tune, from their key fingerprint (the address if
-        there is none): the same in every meeting and on every bot restart."""
+        """The contact's join tune (cached per contact; see contact_tune)."""
         tune = self.tunes.get(contact_id)
         if tune is None:
-            seed = None
-            try:
-                fp = dc_helpers._get_contact_fingerprint(self.bot, accid, contact_id)
-                if isinstance(fp, str) and fp:
-                    seed = "fp:" + fp.split(",")[0]
-            except Exception:
-                pass
-            if seed is None:
-                try:
-                    seed = "addr:" + str(self.bot.rpc.get_contact(accid, contact_id).address).lower()
-                except Exception:
-                    seed = f"contact:{contact_id}"
-            tune = self.tunes[contact_id] = tune_for(seed)
+            tune = self.tunes[contact_id] = contact_tune(self.bot, accid, contact_id)
         return tune
 
     def join(self, accid: int, contact_id: int, room_id: str) -> str:
