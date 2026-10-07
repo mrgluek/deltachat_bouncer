@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.24.1] - 2026-10-07
+
+### Fixed
+- **Traceback after Failed Calls**: `cmcall` 0.1.4. When a call ended while aioice was still retransmitting an unanswered STUN request (the bot's query to its relay's STUN/TURN server), the retry hit the closed socket ~30 s later and asyncio logged `Exception in callback Transaction.__retry()` with an `AttributeError` traceback. Harmless, now silent.
+
 ## [2.24.0] - 2026-10-07
 
 ### Added

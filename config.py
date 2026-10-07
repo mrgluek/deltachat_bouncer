@@ -41,7 +41,7 @@ logger = logging.getLogger("bouncer_bot")
 if os.environ.get("CALL_DEBUG_LOG", "").strip().lower() not in ("1", "true", "yes", "on"):
     for _webrtc_logger in ("aioice", "aiortc"):
         logging.getLogger(_webrtc_logger).setLevel(logging.WARNING)
-VERSION = "2.24.0"
+VERSION = "2.24.1"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
