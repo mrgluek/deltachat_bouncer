@@ -27,6 +27,7 @@ import commands
 import config
 import database
 import dc_helpers
+import faq  # noqa: F401  (registers /faq, /save, /remove and topic answers)
 import handlers
 import meet  # noqa: F401  (registers /meet, /join, /meets)
 import moderation

@@ -52,6 +52,10 @@ if os.getenv("DC_DB_DIR"):
 
 CHANNEL_MEDIA_DIR = os.path.join(os.getenv("DC_DB_DIR", "data"), "channel_media")
 os.makedirs(CHANNEL_MEDIA_DIR, exist_ok=True)
+# Group FAQ: saved answer files, throttling and the FAQ Bot presence cache
+FAQ_MEDIA_DIR = os.path.join(os.getenv("DC_DB_DIR", "data"), "faq")
+_faq_anti_spam: dict[tuple[int, str], float] = {}  # (chat_id, topic) -> last answer
+_faq_bot_cache: dict[int, tuple[float, bool]] = {}  # chat_id -> (checked_at, present)
 bot_invite_link_cache = {}
 index_page_html_cache = None
 

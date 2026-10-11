@@ -645,6 +645,26 @@ def init_db():
                 cursor.execute(f"ALTER TABLE call_echo_log ADD COLUMN {col} TEXT")
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_call_echo_started ON call_echo_log(started_at)')
 
+        # Group FAQ: one answer per (chat, topic). `tag` is the normalized lookup
+        # key (casefolded, single spaces), `display_tag` keeps the spelling it was
+        # saved with. The answer is a full copy (text + a file under data/faq/),
+        # never a reference to the original message: messages on the device are
+        # deleted after 36 hours (delete_device_after).
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS faq_entries (
+                chat_id INTEGER,
+                tag TEXT,
+                display_tag TEXT,
+                text TEXT,
+                file_path TEXT,
+                viewtype TEXT,
+                author_id INTEGER,
+                created_at REAL,
+                updated_at REAL,
+                PRIMARY KEY (chat_id, tag)
+            )
+        ''')
+
         # Additional query performance indexes
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_autokick_warnings_chat ON autokick_warnings(chat_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_pending_requests_chat ON pending_requests(chat_id, approved)')
@@ -2224,3 +2244,61 @@ def delete_radio_stream(stream_id: int) -> bool:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM meet_radio_streams WHERE id = ?", (stream_id,))
         return cursor.rowcount > 0
+
+
+# ── Group FAQ ──
+
+_FAQ_COLUMNS = ("chat_id", "tag", "display_tag", "text", "file_path", "viewtype",
+                "author_id", "created_at", "updated_at")
+
+
+def save_faq_entry(chat_id: int, tag: str, display_tag: str, text: str,
+                   file_path: str | None, viewtype: str | None, author_id: int) -> dict | None:
+    """Insert or replace the answer for a topic. Returns the entry it replaced
+    (so the caller can delete its old file), or None if the topic is new.
+    created_at survives an overwrite; author_id becomes the last saver."""
+    now = time.time()
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT {', '.join(_FAQ_COLUMNS)} FROM faq_entries WHERE chat_id = ? AND tag = ?",
+                       (chat_id, tag))
+        row = cursor.fetchone()
+        old = dict(zip(_FAQ_COLUMNS, row)) if row else None
+        cursor.execute(
+            "INSERT OR REPLACE INTO faq_entries "
+            "(chat_id, tag, display_tag, text, file_path, viewtype, author_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (chat_id, tag, display_tag, text, file_path, viewtype, author_id,
+             old["created_at"] if old else now, now),
+        )
+    return old
+
+
+def get_faq_entry(chat_id: int, tag: str) -> dict | None:
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT {', '.join(_FAQ_COLUMNS)} FROM faq_entries WHERE chat_id = ? AND tag = ?",
+                       (chat_id, tag))
+        row = cursor.fetchone()
+    return dict(zip(_FAQ_COLUMNS, row)) if row else None
+
+
+def get_faq_topics(chat_id: int) -> list[str]:
+    """Display names of all topics in a chat, alphabetically."""
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT display_tag FROM faq_entries WHERE chat_id = ? ORDER BY tag", (chat_id,))
+        return [r[0] for r in cursor.fetchall()]
+
+
+def delete_faq_entry(chat_id: int, tag: str) -> dict | None:
+    """Delete a topic. Returns the deleted entry (for file cleanup) or None."""
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT {', '.join(_FAQ_COLUMNS)} FROM faq_entries WHERE chat_id = ? AND tag = ?",
+                       (chat_id, tag))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        cursor.execute("DELETE FROM faq_entries WHERE chat_id = ? AND tag = ?", (chat_id, tag))
+    return dict(zip(_FAQ_COLUMNS, row))

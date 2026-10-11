@@ -41,7 +41,7 @@ logger = logging.getLogger("bouncer_bot")
 if os.environ.get("CALL_DEBUG_LOG", "").strip().lower() not in ("1", "true", "yes", "on"):
     for _webrtc_logger in ("aioice", "aiortc"):
         logging.getLogger(_webrtc_logger).setLevel(logging.WARNING)
-VERSION = "2.27.0"
+VERSION = "2.28.0"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -129,6 +129,10 @@ SLAP_COOLDOWN_SECONDS = 15     # 15 seconds for /slap command
 STICKER_COOLDOWN_SECONDS = 5   # 5 seconds for /sticker commands
 STICKER_NOBG_COOLDOWN_SECONDS = 15 # 15 seconds for /stickernobg commands
 CMCALL_COOLDOWN_SECONDS = 60   # 60 seconds for /cmcall (a call test takes ~30-60s)
+FAQ_COOLDOWN_SECONDS = 30      # same FAQ topic (or the /faq list) at most once per 30s per chat
+FAQ_MAX_TAG_LENGTH = 100       # longer messages are never checked against FAQ topics
+FAQ_MAX_FILE_BYTES = 25 * 1024 * 1024  # largest attachment /save keeps a copy of
+FAQ_BOT_CHECK_TTL = 60         # seconds to cache "is a FAQ Bot in this group"
 
 
 def _env_flag(name: str, default: str) -> bool:

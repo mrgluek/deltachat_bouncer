@@ -38,6 +38,7 @@ def _prune_anti_spam_dicts():
         state._chat_slap_anti_spam,
         state._chat_sticker_anti_spam,
         state._chat_stickernobg_anti_spam,
+        state._faq_anti_spam,
     ):
         expired = [cid for cid, ts in list(spam_dict.items()) if ts < cutoff]
         for cid in expired:
@@ -268,10 +269,13 @@ def _get_chat_autokick_warn_threshold(autokick_days: int) -> int:
     return max(1, autokick_days - 1)
 
 
-def _send(bot, accid, chat_id, text, reply_to_id=None):
+def _send(bot, accid, chat_id, text, reply_to_id=None, file=None, viewtype=None):
     msg_data = MsgData(text=text)
     if reply_to_id:
         msg_data.quoted_message_id = reply_to_id
+    if file:
+        msg_data.file = file
+        msg_data.viewtype = viewtype or "File"
 
     try:
         msg_id = bot.rpc.send_msg(accid, chat_id, msg_data)
