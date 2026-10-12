@@ -41,7 +41,7 @@ logger = logging.getLogger("bouncer_bot")
 if os.environ.get("CALL_DEBUG_LOG", "").strip().lower() not in ("1", "true", "yes", "on"):
     for _webrtc_logger in ("aioice", "aiortc"):
         logging.getLogger(_webrtc_logger).setLevel(logging.WARNING)
-VERSION = "2.28.0"
+VERSION = "2.29.0"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -117,6 +117,11 @@ _load_env_file()
 
 # VirusTotal rate-limiting
 VIRUSTOTAL_RATE_LIMIT_SECONDS = 15.0
+
+# /ip lookups (ipinfo.io + RIPEstat): one global queue, one lookup per 15 s
+IP_LOOKUP_INTERVAL_SECONDS = 15.0
+IP_LOOKUP_CACHE_SECONDS = 3600   # same IP / prefix / AS is answered from cache for an hour
+IP_LOOKUP_MAX_QUEUE = 5          # more waiting lookups are refused instead of queued
 
 # CMPing monitoring
 CMPING_MONITOR_INTERVAL = int(os.environ.get("CMPING_MONITOR_INTERVAL", "1800"))  # default 30 min

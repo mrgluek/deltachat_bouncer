@@ -29,6 +29,7 @@ import database
 import dc_helpers
 import faq  # noqa: F401  (registers /faq, /save, /remove and topic answers)
 import handlers
+import iplookup  # noqa: F401  (registers /ip)
 import meet  # noqa: F401  (registers /meet, /join, /meets)
 import moderation
 import security

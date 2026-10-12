@@ -63,6 +63,13 @@ index_page_html_cache = None
 _vt_global_lock = threading.Lock()
 _vt_last_request_time = 0.0
 
+# /ip lookups: cache (key -> (time, text)), queue counter and the lock that serializes requests
+_ip_lookup_lock = threading.Lock()
+_ip_lookup_queue_lock = threading.Lock()
+_ip_lookup_cache: dict[str, tuple[float, str]] = {}
+_ip_lookup_pending = 0
+_ip_lookup_last_time = 0.0
+
 # CMPing monitoring state
 _cmping_monitor_idx_db = database.get_config("cmping_monitor_index")
 _cmping_monitor_index = int(_cmping_monitor_idx_db) if _cmping_monitor_idx_db is not None else 0

@@ -647,10 +647,11 @@ def help_command(bot, accid, event):
         f"/cmcallhistory [server] — Call incidents (failing / degraded) per relay.\n"
         f"📞 Call me — I answer, echo your voice back and send call statistics (calls are not recorded).\n"
         f"/virus <url> — Scan URL or replied file/link with VirusTotal.\n"
+        f"/ip <IP | prefix | AS> — IP / network / AS lookup (or reply to a message containing one).\n"
         f"/sticker — Convert replied or attached image to a WebP sticker.\n"
         f"/stickernobg — Convert image to a sticker with background removed.\n\n"
         f"/donate — Support development ❤️\n\n"
-        f"💡 _Commands have a 1-minute cooldown per group (15s for cmping/slap/stickernobg, 60s for cmcall, 10s for search, 5s for sticker; admins are exempt)._\n\n"
+        f"💡 _Commands have a 1-minute cooldown per group (15s for cmping/slap/stickernobg, 60s for cmcall, 10s for search, 5s for sticker; admins are exempt). /ip and /virus run one lookup at a time for everyone, 15s apart._\n\n"
         f"🤖 **Source:** Run your own bot: https://git.gluek.info/gluek/deltachat_bouncer"
     )
     
