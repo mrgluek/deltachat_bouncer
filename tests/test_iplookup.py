@@ -5,6 +5,7 @@ import time
 import tempfile
 import hashlib
 import ipaddress
+import socket
 from unittest.mock import MagicMock, patch
 
 # Setup test environment
@@ -210,6 +211,47 @@ class TestInternetDB(unittest.TestCase):
         self.assertIn("AS60729 Example", text)  # the rest of the report is still there
 
 
+class TestHostLookup(unittest.TestCase):
+    def test_parse_host(self):
+        for text, host in [("chatmail.uk", "chatmail.uk"), ("Example.ORG.", "example.org"),
+                           ("https://delta.chat/en/download", "delta.chat"), ("example.org:443", "example.org"),
+                           ("пример.рф", "xn--e1afmkfd.xn--p1ai")]:
+            self.assertEqual(iplookup.parse_host(text), host, text)
+        for text in ("localhost", "v2.0", "1.2.3.4.5", "-bad-.org", "a..b.org", ""):
+            self.assertIsNone(iplookup.parse_host(text), text)
+
+    def test_reply_takes_only_link_hosts(self):
+        self.assertEqual(iplookup.find_host_target("see https://chatmail.uk/info and delta.chat"), ("host", "chatmail.uk"))
+        self.assertIsNone(iplookup.find_host_target("write to a@chatmail.uk, version 2.0"))
+        self.assertEqual(iplookup.find_host_target("chatmail.uk", whole=True), ("host", "chatmail.uk"))
+
+    @patch.object(iplookup, "_http_get_json", side_effect=fake_get)
+    def test_host_report(self, _):
+        addrs = [ipaddress.ip_address(a) for a in ("2a01:4f8::1", "84.65.49.143", "84.65.49.144")]
+        with patch.object(iplookup.socket, "getaddrinfo",
+                          return_value=[(0, 0, 0, "", (a.compressed, 0)) for a in addrs]):
+            text = iplookup.lookup("host", "xn--e1afmkfd.xn--p1ai")
+        self.assertIn("🔤 **пример.рф** → 84.65.49.143", text)  # IPv4 first, Unicode name
+        self.assertIn("also: 84.65.49.144, 2a01:4f8::1", text)
+        self.assertIn("AS5378 Vodafone Limited", text)
+        self.assertNotIn("CDN", text)
+
+    @patch.object(iplookup, "_http_get_json")
+    def test_host_behind_cdn(self, mock_get):
+        mock_get.side_effect = lambda url, timeout=20: (
+            ({"status": "ok", "data": {"asns": ["13335"], "prefix": "104.16.0.0/13"}}, 200)
+            if "network-info" in url else fake_get(url))
+        with patch.object(iplookup.socket, "getaddrinfo", return_value=[(0, 0, 0, "", ("104.16.1.1", 0))]):
+            text = iplookup.lookup("host", "example.org")
+        self.assertIn("behind a CDN (Cloudflare)", text)
+
+    def test_host_not_resolving_or_private(self):
+        with patch.object(iplookup.socket, "getaddrinfo", side_effect=socket.gaierror):
+            self.assertIn("does not resolve", iplookup.lookup("host", "nope.invalid"))
+        with patch.object(iplookup.socket, "getaddrinfo", return_value=[(0, 0, 0, "", ("10.1.2.3", 0))]):
+            self.assertIn("Only private or reserved", iplookup.lookup("host", "intranet.example.org"))
+
+
 class TestIpCommand(unittest.TestCase):
     def setUp(self):
         self.bot = MagicMock()
@@ -254,6 +296,15 @@ class TestIpCommand(unittest.TestCase):
             iplookup.ip_command(self.bot, 1, self._event("AS24940", quote={"message_id": 55}))
         self.assertEqual(th.call_args.kwargs["args"][4:], ("asn", 24940))
         self.bot.rpc.get_message.assert_not_called()
+
+    def test_domain_argument_and_link_in_reply(self):
+        with patch.object(dc_helpers, "_react"), patch.object(iplookup.threading, "Thread") as th:
+            iplookup.ip_command(self.bot, 1, self._event("https://chatmail.uk/"))
+        self.assertEqual(th.call_args.kwargs["args"][4:], ("host", "chatmail.uk"))
+        self.bot.rpc.get_message.return_value = MagicMock(text="try https://delta.chat/en/ please")
+        with patch.object(dc_helpers, "_react"), patch.object(iplookup.threading, "Thread") as th:
+            iplookup.ip_command(self.bot, 1, self._event(quote={"message_id": 55}))
+        self.assertEqual(th.call_args.kwargs["args"][4:], ("host", "delta.chat"))
 
     def test_cached_answer_skips_queue(self):
         state._ip_lookup_cache["asn:5378"] = (time.time(), "cached report")

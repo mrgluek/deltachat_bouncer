@@ -22,7 +22,9 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import urllib.error
 import urllib.parse
@@ -65,7 +67,9 @@ USAGE = (
     "• `/ip <address>` — IP address: location, network and AS\n"
     "• `/ip <prefix>` — Network block, e.g. 84.64.0.0/13\n"
     "• `/ip AS<number>` — Autonomous system, e.g. AS5378\n"
-    "• Reply to a message with `/ip` to look up the first address, block or AS in it"
+    "• `/ip <domain>` — Resolve a host name and look up its address, e.g. chatmail.uk\n"
+    "• Reply to a message with `/ip` to look up the first address, block or AS in it "
+    "(or the host of its first link)"
 )
 
 # Candidates are found with loose patterns and then validated with the
@@ -77,6 +81,13 @@ _IPV4_RE = r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?(?!\.?\d)"
 _IPV6_RE = r"(?<![\w:])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?:/\d{1,3})?(?![\w:])"
 # "AS5378" / "as 5378" / "ASN5378"; a bare number is an AS only as /ip's argument.
 _ASN_RE = r"(?<![\w])ASN?\s?(\d{1,10})(?![\w])"
+# Host name: dot-separated labels, a TLD with a letter ("1.2.3.4.5" is no host).
+# Checked after IDNA encoding, so "пример.рф" passes as "xn--e1afmkfd.xn--p1ai".
+_HOST_RE = re.compile(r"^(?=.{4,253}$)(?:(?!-)[a-z0-9-]{1,63}(?<!-)\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$")
+RESOLVE_TIMEOUT_S = 10
+# CDN / reverse-proxy networks: a name resolving here hides the real server
+CDN_ASNS = {13335: "Cloudflare", 209242: "Cloudflare", 20940: "Akamai", 16625: "Akamai",
+            54113: "Fastly", 60068: "CDN77", 19551: "Imperva", 12222: "Akamai"}
 _TARGET_RE = re.compile(f"(?P<asn>{_ASN_RE})|(?P<ip>{_IPV4_RE}|{_IPV6_RE})", re.IGNORECASE)
 
 
@@ -99,11 +110,26 @@ def _is_public(obj) -> bool:
     return obj.is_global
 
 
+def parse_host(text: str) -> str | None:
+    """'Example.ORG', 'https://example.org/x', 'пример.рф.' -> normalized host name, or None."""
+    t = (text or "").strip()
+    if "://" in t:
+        t = urllib.parse.urlsplit(t).hostname or ""
+    t = t.split("/")[0].rstrip(".").lower()
+    if ":" in t and t.count(":") == 1:  # host:port
+        t = t.split(":")[0]
+    try:
+        t = t.encode("idna").decode("ascii")
+    except (UnicodeError, ValueError):
+        return None
+    return t if _HOST_RE.match(t) else None
+
+
 def find_target(text: str, bare_asn: bool = False):
     """First IP address, network or AS number in ``text``.
 
     Returns (kind, value) with kind 'ip' | 'net' | 'asn' (value is an int for
-    'asn'), or None. Private and reserved addresses are skipped, so a log line
+    'asn'), or None. Host names are not looked for here: see find_host_target. Private and reserved addresses are skipped, so a log line
     such as "10.0.0.5 -> 84.65.49.143" yields the public address.
     With ``bare_asn`` a lone number ("5378") is an AS - used for /ip's argument.
     """
@@ -122,6 +148,43 @@ def find_target(text: str, bare_asn: bool = False):
         if parsed and _is_public(parsed[1]):
             return parsed
     return None
+
+
+def find_host_target(text: str, whole: bool = False):
+    """('host', name) for a host name, or None.
+
+    ``whole``: ``text`` is /ip's argument and may itself be a name or a URL.
+    Otherwise only the host of the first link counts - bare words with dots
+    ("v2.0", "file.txt") are too easily taken for names, and an e-mail
+    domain needs MX records rather than an address.
+    """
+    if whole:
+        host = parse_host(text.split()[0]) if text.split() else None
+    else:
+        url = dc_helpers._extract_first_url(text or "")
+        host = parse_host(url) if url else None
+    return ("host", host) if host else None
+
+
+def resolve(host: str) -> list:
+    """Public addresses of ``host``, IPv4 first (Shodan rarely scans IPv6).
+    Uses the bot's own resolver, with a timeout - getaddrinfo has none."""
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ip-dns")
+    try:
+        infos = pool.submit(socket.getaddrinfo, host, None, 0, socket.SOCK_STREAM).result(timeout=RESOLVE_TIMEOUT_S)
+    except Exception:
+        return []
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    out = []
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        except ValueError:
+            continue
+        if ip not in out:
+            out.append(ip)
+    return sorted(out, key=lambda a: a.version)  # stable: resolver order within a family
 
 
 def _http_get_json(url: str, timeout: int = 20) -> tuple[dict | None, int]:
@@ -247,7 +310,7 @@ def _ripe_country(resource: str) -> str | None:
     return None
 
 
-def _format_ip(ip) -> str:
+def _format_ip(ip, host: str | None = None, others: list | None = None) -> str:
     ip_s = ip.compressed
     info = _ipinfo_ip(ip_s) or {}
     net = _ripestat("network-info", ip_s) or {}
@@ -255,7 +318,14 @@ def _format_ip(ip) -> str:
     prefix = net.get("prefix") or ""
     asns = net.get("asns") or []
 
-    lines = [f"🌐 **{ip_s}**"]
+    lines = []
+    if host:
+        lines.append(f"🔤 **{host}** → {ip_s}")
+        if others:
+            shown = ", ".join(a.compressed for a in others[:5])
+            more = f" and {len(others) - 5} more" if len(others) > 5 else ""
+            lines.append(f"   also: {shown}{more}")
+    lines.append(f"🌐 **{ip_s}**")
     if info.get("hostname"):
         lines.append(f"🖥 Host: {info['hostname']}")
     elif sdb and sdb.get("hostnames"):  # forward DNS names Shodan saw pointing here
@@ -303,6 +373,12 @@ def _format_ip(ip) -> str:
         lines.append(f"🕵️ Privacy: {', '.join(flags)}" if flags else "🕵️ Privacy: no VPN / proxy / Tor / hosting")
 
     lines += _internetdb_lines(sdb, ipv6=ip.version == 6)
+
+    if host:
+        cdn = next((CDN_ASNS[int(a)] for a in asns if str(a).isdigit() and int(a) in CDN_ASNS), None)
+        if cdn or "cdn" in ((sdb or {}).get("tags") or []):
+            lines.append(f"☁️ {host} is behind a CDN{f' ({cdn})' if cdn else ''}: "
+                         "this is the CDN's address, not the real server")
 
     if not info and not net and not sdb:
         return f"❌ Could not look up {ip_s}: ipinfo.io, RIPEstat and Shodan did not answer. Try again later."
@@ -393,7 +469,29 @@ def _format_asn(asn: int) -> str:
     return "\n".join(lines)
 
 
+def _display_host(host: str) -> str:
+    """Punycode back to Unicode for the reply: 'xn--e1afmkfd.xn--p1ai' -> 'пример.рф'."""
+    try:
+        return host.encode("ascii").decode("idna") if "xn--" in host else host
+    except UnicodeError:
+        return host
+
+
+def _format_host(host: str) -> str:
+    shown_host = _display_host(host)
+    addrs = resolve(host)
+    if not addrs:
+        return f"❌ {shown_host} does not resolve (no A / AAAA records, or DNS did not answer)."
+    public = [a for a in addrs if _is_public(a)]
+    if not public:
+        listed = ", ".join(a.compressed for a in addrs[:5])
+        return f"🔤 **{shown_host}** → {listed}\n❌ Only private or reserved addresses, nothing to look up."
+    return _format_ip(public[0], host=shown_host, others=public[1:])
+
+
 def lookup(kind: str, value) -> str:
+    if kind == "host":
+        return _format_host(value)
     if kind == "asn":
         return _format_asn(value)
     if kind == "net":
@@ -469,11 +567,11 @@ def ip_command(bot, accid, event):
     payload = (event.payload or "").strip()
 
     if payload:
-        target = find_target(payload, bare_asn=True)
+        target = find_target(payload, bare_asn=True) or find_host_target(payload, whole=True)
         if not target:
             parsed = _parse_candidate(payload.split()[0])
             reason = ("is a private or reserved address" if parsed and not _is_public(parsed[1])
-                      else "is not an IP address, network or AS number")
+                      else "is not an IP address, network, AS number or host name")
             dc_helpers._send(bot, accid, msg.chat_id, f"❌ `{payload[:60]}` {reason}.\n\n{USAGE}", reply_to_id=msg.id)
             return
     else:
@@ -481,10 +579,10 @@ def ip_command(bot, accid, event):
         if not quoted:
             dc_helpers._send(bot, accid, msg.chat_id, USAGE, reply_to_id=msg.id)
             return
-        target = find_target(quoted)
+        target = find_target(quoted) or find_host_target(quoted)
         if not target:
             dc_helpers._send(bot, accid, msg.chat_id,
-                             "❌ No public IP address, network or AS number found in that message.",
+                             "❌ No public IP address, network, AS number or link found in that message.",
                              reply_to_id=msg.id)
             return
 

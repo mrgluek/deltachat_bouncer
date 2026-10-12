@@ -647,7 +647,7 @@ def help_command(bot, accid, event):
         f"/cmcallhistory [server] — Call incidents (failing / degraded) per relay.\n"
         f"📞 Call me — I answer, echo your voice back and send call statistics (calls are not recorded).\n"
         f"/virus <url> — Scan URL or replied file/link with VirusTotal.\n"
-        f"/ip <IP | prefix | AS> — IP / network / AS lookup (or reply to a message containing one).\n"
+        f"/ip <IP | prefix | AS | domain> — IP / network / AS / host lookup (or reply to a message containing one).\n"
         f"/sticker — Convert replied or attached image to a WebP sticker.\n"
         f"/stickernobg — Convert image to a sticker with background removed.\n\n"
         f"/donate — Support development ❤️\n\n"
