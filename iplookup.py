@@ -4,6 +4,10 @@ Data sources:
 - ipinfo.io for a single IP address (city, region, country, organization,
   host name; VPN/proxy/hosting flags only on a paid token). Works without a
   token; IPINFO_TOKEN in .env is tried first when set.
+- Shodan InternetDB (internetdb.shodan.io) for the open ports, software
+  (CPE), tags (tor / vpn / proxy / cloud / self-signed ...) and known CVEs of
+  an IP. Free, no key; a snapshot of Shodan's periodic scans, so it can be
+  weeks old and miss ports, and IPv6 is rarely scanned.
 - RIPEstat (stat.ripe.net) for the announced prefix of an IP, for prefixes
   and for AS numbers. Free, no key, and global - it uses BGP data from all
   regions, not only the RIPE region. ipinfo's own ASN and IP-range APIs are
@@ -32,6 +36,28 @@ import state
 
 IPINFO_URL = "https://ipinfo.io"
 RIPESTAT_URL = "https://stat.ripe.net/data"
+INTERNETDB_URL = "https://internetdb.shodan.io"
+MAX_PORTS_SHOWN = 20
+MAX_VULNS_SHOWN = 5
+
+# Well-known TCP ports -> service, for the "Open ports" line
+PORT_NAMES = {
+    21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS", 80: "HTTP", 110: "POP3",
+    111: "RPC", 123: "NTP", 135: "MS-RPC", 139: "NetBIOS", 143: "IMAP", 161: "SNMP",
+    389: "LDAP", 443: "HTTPS", 445: "SMB", 465: "SMTPS", 500: "IPsec IKE", 554: "RTSP",
+    587: "SMTP submission", 853: "DNS over TLS", 993: "IMAPS", 995: "POP3S", 1080: "SOCKS",
+    1194: "OpenVPN", 1433: "MS SQL", 1701: "L2TP", 1723: "PPTP", 1883: "MQTT",
+    1900: "UPnP", 2049: "NFS", 3128: "HTTP proxy", 3306: "MySQL", 3389: "RDP",
+    3478: "STUN/TURN", 4500: "IPsec NAT-T", 5060: "SIP", 5222: "XMPP", 5269: "XMPP server",
+    5349: "TURN TLS", 5432: "PostgreSQL", 5900: "VNC", 6379: "Redis", 7547: "TR-069",
+    8080: "HTTP alt", 8291: "MikroTik Winbox", 8388: "Shadowsocks", 8443: "HTTPS alt",
+    9001: "Tor relay", 9030: "Tor directory", 9050: "Tor SOCKS", 9100: "printer",
+    9200: "Elasticsearch", 11211: "Memcached", 27017: "MongoDB", 51820: "WireGuard",
+}
+# Ports that usually mean a tunnel endpoint (VPN, proxy, Tor) runs on the address
+TUNNEL_PORTS = {500, 1080, 1194, 1701, 1723, 3128, 4500, 8388, 9001, 9030, 9050, 51820}
+# Remote management of a home / office router (ISP's TR-069, MikroTik, UPnP)
+ROUTER_PORTS = {1900, 7547, 8291}
 MAX_PREFIXES_SHOWN = 10
 
 USAGE = (
@@ -150,6 +176,54 @@ def _ipinfo_ip(ip: str) -> dict | None:
     return None
 
 
+def _internetdb(ip: str) -> dict | None:
+    """Shodan InternetDB record; {} when Shodan has seen nothing open, None on failure."""
+    data, status = _http_get_json(f"{INTERNETDB_URL}/{ip}", timeout=15)
+    if status == 404:  # {"detail": "No information available"}
+        return {}
+    return data if isinstance(data, dict) and "ports" in data else None
+
+
+def _cpe_product(cpe: str) -> str:
+    """'cpe:/a:f5:nginx:1.18.0' -> 'nginx 1.18.0'."""
+    parts = cpe.split(":")
+    if len(parts) < 4:
+        return cpe
+    return " ".join(p.replace("_", " ") for p in parts[3:5] if p)
+
+
+def _internetdb_lines(sdb: dict | None, ipv6: bool = False) -> list[str]:
+    if sdb is None:
+        return ["🔌 Open ports: Shodan InternetDB did not answer"]
+    ports = sorted(sdb.get("ports") or [])
+    if not ports:
+        # Shodan scans the whole IPv4 space but only IPv6 addresses it learns of
+        return ["🔌 Open ports: none seen by Shodan" + (" (IPv6 is rarely scanned)" if ipv6 else "")]
+    shown = [f"{p} {PORT_NAMES[p]}" if p in PORT_NAMES else str(p) for p in ports[:MAX_PORTS_SHOWN]]
+    more = f" and {len(ports) - MAX_PORTS_SHOWN} more" if len(ports) > MAX_PORTS_SHOWN else ""
+    lines = [f"🔌 Open ports: {', '.join(shown)}{more}"]
+
+    software = sorted({_cpe_product(c) for c in sdb.get("cpes") or []})
+    if software:
+        lines.append(f"🧩 Software: {', '.join(software[:8])}")
+    if sdb.get("tags"):
+        lines.append(f"🏷 Shodan tags: {', '.join(sdb['tags'])}")
+
+    # Hints, not verdicts: a port says what listens there, not who uses the address
+    tunnel = [p for p in ports if p in TUNNEL_PORTS]
+    if tunnel:
+        lines.append("🕵️ VPN / proxy / Tor ports: " + ", ".join(f"{p} {PORT_NAMES[p]}" for p in tunnel))
+    router = [p for p in ports if p in ROUTER_PORTS]
+    if router:
+        lines.append("🏠 Router management ports: " + ", ".join(f"{p} {PORT_NAMES[p]}" for p in router))
+
+    vulns = sorted(sdb.get("vulns") or [], reverse=True)  # newest CVE years first
+    if vulns:
+        more = f" and {len(vulns) - MAX_VULNS_SHOWN} more" if len(vulns) > MAX_VULNS_SHOWN else ""
+        lines.append(f"⚠️ Known CVEs (by software version): {', '.join(vulns[:MAX_VULNS_SHOWN])}{more}")
+    return lines
+
+
 def _flag(cc: str | None) -> str:
     """Country code -> flag emoji ("GB" -> 🇬🇧)."""
     if not cc or len(cc) != 2 or not cc.isalpha():
@@ -177,12 +251,16 @@ def _format_ip(ip) -> str:
     ip_s = ip.compressed
     info = _ipinfo_ip(ip_s) or {}
     net = _ripestat("network-info", ip_s) or {}
+    sdb = _internetdb(ip_s)
     prefix = net.get("prefix") or ""
     asns = net.get("asns") or []
 
     lines = [f"🌐 **{ip_s}**"]
     if info.get("hostname"):
         lines.append(f"🖥 Host: {info['hostname']}")
+    elif sdb and sdb.get("hostnames"):  # forward DNS names Shodan saw pointing here
+        names = sdb["hostnames"]
+        lines.append(f"🖥 Host names: {', '.join(names[:3])}" + (f" and {len(names) - 3} more" if len(names) > 3 else ""))
 
     # Full endpoint: country is a code; Lite API: country is a name, code in country_code
     cc = info.get("country_code") or (info.get("country") if len(info.get("country") or "") == 2 else None)
@@ -224,10 +302,14 @@ def _format_ip(ip) -> str:
             flags.append(privacy["service"])
         lines.append(f"🕵️ Privacy: {', '.join(flags)}" if flags else "🕵️ Privacy: no VPN / proxy / Tor / hosting")
 
-    if not info and not net:
-        return f"❌ Could not look up {ip_s}: ipinfo.io and RIPEstat did not answer. Try again later."
+    lines += _internetdb_lines(sdb, ipv6=ip.version == 6)
+
+    if not info and not net and not sdb:
+        return f"❌ Could not look up {ip_s}: ipinfo.io, RIPEstat and Shodan did not answer. Try again later."
     lines.append("")
     lines.append(f"🔎 {IPINFO_URL}/{ip_s}")
+    if sdb and sdb.get("ports"):
+        lines.append(f"🔎 https://www.shodan.io/host/{ip_s}")
     if prefix and asns:
         lines.append(f"🔎 {IPINFO_URL}/AS{asns[0]}/{prefix}")
     return "\n".join(lines)

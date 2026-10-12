@@ -169,6 +169,47 @@ class TestFormatting(unittest.TestCase):
         self.assertIn("84.0.0.0/8", text)
 
 
+class TestInternetDB(unittest.TestCase):
+    SHODAN = {"ip": "185.220.101.1", "ports": [9001, 443, 80, 7547, 4444],
+              "cpes": ["cpe:/a:f5:nginx:1.18.0"], "hostnames": ["exit.example.org"],
+              "tags": ["tor", "self-signed"], "vulns": ["CVE-2019-1", "CVE-2021-2"]}
+
+    def _get(self, shodan):
+        def get(url, timeout=20):
+            if "internetdb.shodan.io" in url:
+                return shodan
+            if "ipinfo.io" in url:
+                return {"ip": "185.220.101.1", "country": "DE", "org": "AS60729 Example"}, 200
+            return fake_get(url)
+        return get
+
+    def test_ports_software_tags_and_hints(self):
+        with patch.object(iplookup, "_http_get_json", side_effect=self._get((self.SHODAN, 200))):
+            text = iplookup.lookup("ip", ipaddress.ip_address("185.220.101.1"))
+        self.assertIn("Open ports: 80 HTTP, 443 HTTPS, 4444, 7547 TR-069, 9001 Tor relay", text)
+        self.assertIn("Software: nginx 1.18.0", text)
+        self.assertIn("Shodan tags: tor, self-signed", text)
+        self.assertIn("VPN / proxy / Tor ports: 9001 Tor relay", text)
+        self.assertIn("Router management ports: 7547 TR-069", text)
+        self.assertIn("CVE-2021-2, CVE-2019-1", text)
+        self.assertIn("Host names: exit.example.org", text)  # ipinfo had no hostname
+        self.assertIn("https://www.shodan.io/host/185.220.101.1", text)
+
+    def test_nothing_seen(self):
+        with patch.object(iplookup, "_http_get_json", side_effect=self._get((None, 404))):
+            text = iplookup.lookup("ip", ipaddress.ip_address("185.220.101.1"))
+            text6 = iplookup.lookup("ip", ipaddress.ip_address("2a01:4f8::1"))
+        self.assertIn("Open ports: none seen by Shodan", text)
+        self.assertNotIn("shodan.io/host", text)
+        self.assertIn("IPv6 is rarely scanned", text6)
+
+    def test_shodan_down(self):
+        with patch.object(iplookup, "_http_get_json", side_effect=self._get((None, 0))):
+            text = iplookup.lookup("ip", ipaddress.ip_address("185.220.101.1"))
+        self.assertIn("Shodan InternetDB did not answer", text)
+        self.assertIn("AS60729 Example", text)  # the rest of the report is still there
+
+
 class TestIpCommand(unittest.TestCase):
     def setUp(self):
         self.bot = MagicMock()
