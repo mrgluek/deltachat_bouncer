@@ -195,6 +195,14 @@ class TestServer(unittest.TestCase):
         self.assertEqual(res.nameservers, ["173.245.59.1"])
         self.assertIn("authoritative ray.ns.cloudflare.com", via)
 
+    def test_default_resolvers_are_public(self):
+        with patch.object(config, "DNS_RESOLVERS", ["1.1.1.1", "8.8.8.8"]):
+            res, via = dnscheck._resolve_server(None, "a.org", dnscheck.make_resolver())
+            self.assertEqual(res.nameservers, ["1.1.1.1", "8.8.8.8"])
+            self.assertEqual(via, "resolver 1.1.1.1, 8.8.8.8")
+        with patch.object(config, "DNS_RESOLVERS", []):
+            self.assertEqual(dnscheck.default_label(), "bot's resolver")
+
     def test_auth_needs_a_name(self):
         self.assertIn("domain names only", dnscheck.run(ipaddress.ip_address("1.1.1.1"), "PTR", "auth"))
 

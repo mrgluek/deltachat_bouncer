@@ -41,7 +41,7 @@ logger = logging.getLogger("bouncer_bot")
 if os.environ.get("CALL_DEBUG_LOG", "").strip().lower() not in ("1", "true", "yes", "on"):
     for _webrtc_logger in ("aioice", "aiortc"):
         logging.getLogger(_webrtc_logger).setLevel(logging.WARNING)
-VERSION = "2.32.0"
+VERSION = "2.32.1"
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -127,6 +127,8 @@ IP_LOOKUP_MAX_QUEUE = 5          # more waiting lookups are refused instead of q
 DNS_WORKERS = 3
 DNS_MAX_QUEUE = 50               # waiting + running; more are refused (spam guard)
 DNS_CACHE_SECONDS = 300          # short: DNS is often checked right after a change
+# Resolvers /dns asks by default; empty DNS_RESOLVERS= in .env uses the system resolver
+DNS_RESOLVERS = [x.strip() for x in os.environ.get("DNS_RESOLVERS", "1.1.1.1,8.8.8.8").split(",") if x.strip()]
 
 # CMPing monitoring
 CMPING_MONITOR_INTERVAL = int(os.environ.get("CMPING_MONITOR_INTERVAL", "1800"))  # default 30 min

@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.32.1] - 2026-10-12
+
+### Fixed
+- **`/dns` Showed Every Zone As DNSSEC-Unsigned On de2**: the bot asked the system resolver, which on Ubuntu hosts is systemd-resolved - and it answers DS queries with nothing. `/dns` now asks public resolvers by default.
+
+### Added
+- **`DNS_RESOLVERS`** (`.env`, default `1.1.1.1,8.8.8.8`): the resolvers `/dns` asks. Not the system resolver by default - on Ubuntu hosts that is systemd-resolved, which drops DS records (every zone looked DNSSEC-unsigned), and public resolvers show what the internet sees. Empty = system resolver.
+
 ## [2.32.0] - 2026-10-12
 
 ### Added

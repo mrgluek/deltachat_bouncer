@@ -92,13 +92,24 @@ def _rdata_text(rd) -> str:
 
 
 def make_resolver(nameservers: list[str] | None = None) -> dns.resolver.Resolver:
-    r = dns.resolver.Resolver()  # system config (/etc/resolv.conf)
+    """Resolver for ``nameservers``; by default the public ones in DNS_RESOLVERS.
+
+    Not the system resolver: on de2 that is systemd-resolved, which answers DS
+    queries with nothing (so every zone looked unsigned) - and public resolvers
+    show what the rest of the internet sees.
+    """
+    nameservers = nameservers or config.DNS_RESOLVERS
+    r = dns.resolver.Resolver(configure=not nameservers)  # system config only if none set
     r.timeout = 3
     r.lifetime = 6
     r.cache = None
     if nameservers:
         r.nameservers = nameservers
     return r
+
+
+def default_label() -> str:
+    return f"resolver {', '.join(config.DNS_RESOLVERS)}" if config.DNS_RESOLVERS else "bot's resolver"
 
 
 def query(res: dns.resolver.Resolver, name: str, rtype: str) -> Res:
@@ -182,7 +193,7 @@ def parse_args(payload: str):
 def _resolve_server(server: str | None, name: str, sysres) -> tuple[dns.resolver.Resolver, str] | str:
     """Resolver for ``@server`` and a label saying which one answered, or an error string."""
     if not server:
-        return sysres, "bot's resolver"
+        return sysres, default_label()
     if server == "auth":
         try:
             zone = dns.resolver.zone_for_name(name, resolver=sysres).to_text().rstrip(".")
