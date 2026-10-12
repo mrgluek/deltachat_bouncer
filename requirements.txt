@@ -9,3 +9,4 @@ aiortc>=1.9.0
 cmcall @ git+https://github.com/mrgluek/cmcall.git@407e794ce6c76fd186abfcfb5394a13687c41cc9
 cryptography>=42.0.0,<45.0.0
 rembg[cpu]>=2.0.50
+dnspython>=2.6.0

@@ -327,10 +327,10 @@ def _format_ip(ip, host: str | None = None, others: list | None = None) -> str:
             lines.append(f"   also: {shown}{more}")
     lines.append(f"🌐 **{ip_s}**")
     if info.get("hostname"):
-        lines.append(f"🖥 Host: {info['hostname']}")
+        lines.append(f"🖥 Host: {_display_host(info['hostname'])}")
     elif sdb and sdb.get("hostnames"):  # forward DNS names Shodan saw pointing here
         names = sdb["hostnames"]
-        lines.append(f"🖥 Host names: {', '.join(names[:3])}" + (f" and {len(names) - 3} more" if len(names) > 3 else ""))
+        lines.append(f"🖥 Host names: {', '.join(map(_display_host, names[:3]))}" + (f" and {len(names) - 3} more" if len(names) > 3 else ""))
 
     # Full endpoint: country is a code; Lite API: country is a name, code in country_code
     cc = info.get("country_code") or (info.get("country") if len(info.get("country") or "") == 2 else None)
@@ -486,7 +486,7 @@ def _format_host(host: str) -> str:
     if not public:
         listed = ", ".join(a.compressed for a in addrs[:5])
         return f"🔤 **{shown_host}** → {listed}\n❌ Only private or reserved addresses, nothing to look up."
-    return _format_ip(public[0], host=shown_host, others=public[1:])
+    return _format_ip(public[0], host=shown_host, others=public[1:]) + f"\n💡 `/dns {shown_host}` — its DNS records"
 
 
 def lookup(kind: str, value) -> str:

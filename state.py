@@ -70,6 +70,11 @@ _ip_lookup_cache: dict[str, tuple[float, str]] = {}
 _ip_lookup_pending = 0
 _ip_lookup_last_time = 0.0
 
+# /dns: cache (key -> (time, text)) and the number of queued + running reports
+_dns_lock = threading.Lock()
+_dns_cache: dict[str, tuple[float, str]] = {}
+_dns_pending = 0
+
 # CMPing monitoring state
 _cmping_monitor_idx_db = database.get_config("cmping_monitor_index")
 _cmping_monitor_index = int(_cmping_monitor_idx_db) if _cmping_monitor_idx_db is not None else 0
