@@ -20,6 +20,7 @@ dc_accid = None
 _chat_bounce_anti_spam: dict[int, float] = {}
 _chat_top_anti_spam: dict[int, float] = {}
 _chat_invite_anti_spam: dict[int, float] = {}
+_newgroup_anti_spam: dict[int, float] = {}  # keyed by sender contact id, not chat
 _chat_anti_spam = _chat_bounce_anti_spam  # alias for backwards compatibility
 _chat_relays_anti_spam: dict[int, float] = {}
 _chat_search_anti_spam: dict[int, float] = {}

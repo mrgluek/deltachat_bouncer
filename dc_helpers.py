@@ -31,6 +31,7 @@ def _prune_anti_spam_dicts():
         state._chat_bounce_anti_spam,
         state._chat_top_anti_spam,
         state._chat_invite_anti_spam,
+        state._newgroup_anti_spam,
         state._chat_relays_anti_spam,
         state._chat_search_anti_spam,
         state._chat_cmping_anti_spam,
@@ -382,6 +383,36 @@ def find_contact_in_chat(bot, accid, chat_id, name_or_address):
         logger.error(f"Error searching chat contacts for {name_or_address}: {e}")
 
     return None
+
+
+def is_ntfy_bot_address(address: str, ntfy_addrs) -> bool:
+    """True if address is one of ntfy_addrs (full address or bare local part)."""
+    addr = (address or "").strip().lower()
+    if not addr:
+        return False
+    local_part = addr.split("@", 1)[0]
+    return any(a == addr or ("@" not in a and a == local_part) for a in ntfy_addrs)
+
+
+def chat_has_ntfy_bot(bot, accid, chat_id, ntfy_addrs) -> bool:
+    """True if a member of chat_id is Ntfy Bot (matched by address, see config.NTFY_BOT_ADDRS).
+    Matching by address and not by display name: anyone can call themselves "Ntfy Bot"."""
+    if not ntfy_addrs:
+        return False
+    try:
+        contacts = bot.rpc.get_chat_contacts(accid, chat_id)
+    except Exception:
+        return False
+    for contact_id in contacts:
+        if contact_id == 1:  # ourselves
+            continue
+        try:
+            contact = bot.rpc.get_contact(accid, contact_id)
+        except Exception:
+            continue
+        if is_ntfy_bot_address(getattr(contact, "address", ""), ntfy_addrs):
+            return True
+    return False
 
 
 def get_user_chat_count(bot, accid, contact_id):

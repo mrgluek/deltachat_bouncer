@@ -17,6 +17,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - 📖 **Group FAQ (`/faq`, `/save`, `/remove`):** Drop-in replacement for the standalone FAQ Bot. Reply to any message (text, image, file…) with `/save <topic>` to make it the answer to that topic; afterwards anyone who sends exactly the topic name (case-insensitive) gets the answer. If the topic is sent as a reply to someone ("rules" in reply to a newcomer), the answer goes to that person. Answers can contain `{faq}` (the list of topics) and `{name}` (the name of whoever asked). `/faq` lists the topics, `/faq <topic>` shows one. Unlike the FAQ Bot, only a topic's author or the bot admin can overwrite or `/remove` it, the same topic is answered at most once per 30 s per chat, and answers are stored as copies (text in the database, files in `./data/faq/`) so they survive the 36-hour message cleanup. **Coexistence:** while a bot whose name contains "FAQ" (with the Delta Chat bot flag) is a member of the group, Bouncer stays silent on FAQ commands and topics but keeps mirroring `/save` and `/remove` in the background, so when the FAQ Bot is removed the topics saved in the meantime are already there (topics saved before Bouncer joined have to be saved again). `/faq@boun` is always answered.
 - 👋🏻 **Custom Welcome Messages (`/welcome`):** Configure customizable welcoming greetings for new members joining the group with custom rules text and visual age badges.
 - 🔗 **Invite Link (`/invite`):** Generate a SecureJoin invite link and QR code image for the current group chat. Available to all users with an independent 1-minute cooldown (admins are exempt). For private group chats, the generated link is single-use and will be automatically deleted from the chat once a new member joins.
+- ➕ **New Group (`/newgroup <name>`):** Create a new group with the bot in it and get its join link. Available to all users with a 1-minute cooldown per sender (admins are exempt). In a group where Ntfy Bot is a member, plain `/newgroup` is left to Ntfy Bot so one command does not create two groups (`/newgroup@bouncer` still works). Ntfy Bot is recognized by address, set by `NTFY_BOT_ADDRS` (comma-separated full addresses or local parts, default `ntfydcbot`).
 - 🔍 **Member Search (`/search [email1] ...`):** Find group members by one or more email terms (case-insensitive substring matching) or by replying to a message containing email addresses. Displays user role badges (`👑`, `⭐`, `💤`), multi-chat indicators (`🟥`..`⬜`), and searches across all active transports (both primary and secondary addresses).
 - 📬 **Relay Check (`/relays`):** Scan for group members using public Russian mail providers (Yandex, Mail.ru, etc.).
 - 🏆 **Activity Ranking (`/top`):** Show the 10 most active members in the last 24 hours (independent 60s cooldown).
@@ -81,6 +82,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/relays` — Find group members using public Russian mail providers.
 - `/top` — Show the 10 most active members in the last 24 hours.
 - `/invite` — Generate an invite link and QR code for this group.
+- `/newgroup <name>` — Create a new group with the bot in it and get its join link.
 - `/chats` — Show the catalog of registered group chats available to join.
 - `/chat<ID> [message]` — Request an invite link to the group (Private chat only).
 - `/dchannels` — Show the catalog of registered Delta Chat channels with invite links and web preview URLs.
@@ -311,3 +313,7 @@ If you find this bot useful, consider supporting its development:
 
 - **Git:** [gluek/deltachat_bouncer](https://git.gluek.info/gluek/deltachat_bouncer)
 - **Donations:** Use the `/donate` command in Delta Chat.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

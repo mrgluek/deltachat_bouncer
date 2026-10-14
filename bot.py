@@ -458,7 +458,13 @@ def setup_custom_command_parser(bot, allowed_prefixes):
             original_parse_command(accid, event)
             
             # /help is not suppressed: plain /help in a group is answered privately (see help_command)
-            if event.command == "/stats":
+            if event.command == "/newgroup":
+                # Ntfy Bot has the same command: if it is in this chat, let it answer
+                # alone. /newgroup@bouncer (handled above) still reaches us.
+                if dc_helpers.chat_has_ntfy_bot(bot, accid, event.msg.chat_id, config.NTFY_BOT_ADDRS):
+                    event.command = ""
+                    event.payload = ""
+            elif event.command == "/stats":
                 try:
                     chat = bot.rpc.get_chat(accid, event.msg.chat_id)
                     is_group = getattr(chat, "chat_type", "Single") != "Single"

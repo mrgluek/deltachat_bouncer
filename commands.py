@@ -1,5 +1,5 @@
 """General bot commands: /initadmin, /bounce, /slap, /me, /away, /back,
-/search, /help, /donate, /invite, /relays, /url, /welcome.
+/search, /help, /donate, /invite, /newgroup, /relays, /url, /welcome.
 
 Calls into moderation.py for the autokick overview/inactivity report used
 by /bounce, and into web.routes for cache invalidation used by /url."""
@@ -623,6 +623,7 @@ def help_command(bot, accid, event):
         f"/relays — Find group members using public Russian mail providers (Yandex, Mail.ru, etc.).\n"
         f"/top    — Show top 10 posters in the last 24 hours.\n"
         f"/invite — Generate an invite link/QR code for this group.\n"
+        f"/newgroup <name> — Create a new group with me in it and get its join link.\n"
         f"/slap <username> — Reply to the user's last message with a trout slap.\n"
         f"/me <action> — Perform an IRC-style action (e.g. /me waves).\n"
         f"/away <text> — Set your away status, auto-notifying anyone who mentions you or replies.\n"
@@ -708,6 +709,15 @@ def donate_command(bot, accid, event):
           "🚀 Tribute: https://web.tribute.tg/d/IWb (🇷🇺 russian cards, SBP)\n\n"
           "Thank you! 🙏")
 
+def _qr_to_invite_link(qrdata: str) -> str:
+    """Turn securejoin QR data into a clickable https://i.delta.chat/# link
+    (older cores return OPEN-CHAT:/OPEN:/dcqr:// forms, newer ones the link itself)."""
+    for prefix in ("OPEN-CHAT:", "OPEN:", "dcqr://"):
+        if qrdata.startswith(prefix):
+            return "https://i.delta.chat/#" + qrdata[len(prefix):]
+    return qrdata
+
+
 @config.dc_cli.on(events.NewMessage(command="/invite"))
 def invite_command(bot, accid, event, skip_cooldown: bool = False):
     msg = event.msg
@@ -743,14 +753,7 @@ def invite_command(bot, accid, event, skip_cooldown: bool = False):
         # Generate securejoin QR link
         qrdata = bot.rpc.get_chat_securejoin_qr_code(accid, msg.chat_id)
         
-        # Clean/Format the invite link
-        invite_link = qrdata
-        if qrdata.startswith("OPEN-CHAT:"):
-            invite_link = "https://i.delta.chat/#" + qrdata[10:]
-        elif qrdata.startswith("OPEN:"):
-            invite_link = "https://i.delta.chat/#" + qrdata[5:]
-        elif qrdata.startswith("dcqr://"):
-            invite_link = "https://i.delta.chat/#" + qrdata[7:]
+        invite_link = _qr_to_invite_link(qrdata)
 
         # Check if chat is private in our catalog
         catalog_chat = database.get_catalog_chat_by_chat_id(msg.chat_id)
@@ -805,6 +808,40 @@ def invite_command(bot, accid, event, skip_cooldown: bool = False):
     except Exception as e:
         config.logger.error(f"Failed to generate invite: {e}")
         dc_helpers._send(bot, accid, msg.chat_id, "❌ Failed to generate invite link. Please try again later.")
+
+@config.dc_cli.on(events.NewMessage(command="/newgroup"))
+def newgroup_command(bot, accid, event):
+    """Create a new group with the bot in it and reply with its join link.
+    Skipped by the command parser in chats where Ntfy Bot is a member (see bot.py)."""
+    msg = event.msg
+    group_name = (event.payload or "").strip()
+    if not group_name:
+        dc_helpers._send(bot, accid, msg.chat_id, "Usage: `/newgroup <name>`\nExample: /newgroup Delta Cats")
+        return
+
+    # Cooldown per sender, not per chat: the point is to stop one user from making the
+    # bot create many groups, and they could just switch chats. Admins are exempt.
+    # No delayed queue like /invite: creating a group a minute later is not what anyone wants.
+    now = time.time()
+    if not dc_helpers._is_dc_admin(bot, accid, msg.from_id):
+        diff = now - state._newgroup_anti_spam.get(msg.from_id, 0)
+        if diff < config.NEWGROUP_COOLDOWN_SECONDS:
+            remaining_sec = max(1, int(config.NEWGROUP_COOLDOWN_SECONDS - diff))
+            dc_helpers._send(bot, accid, msg.chat_id, f"⏳ You can create another group in {remaining_sec}s.")
+            return
+    state._newgroup_anti_spam[msg.from_id] = now
+
+    try:
+        new_chat_id = bot.rpc.create_group_chat(accid, group_name, False)  # False = not protected
+        invite_link = _qr_to_invite_link(bot.rpc.get_chat_securejoin_qr_code(accid, new_chat_id))
+    except Exception as e:
+        config.logger.error(f"Failed to create group {group_name!r}: {e}")
+        dc_helpers._send(bot, accid, msg.chat_id, "❌ Failed to create group. Please try again later.")
+        return
+
+    config.logger.info(f"/newgroup: created chat {new_chat_id} {group_name!r} for contact {msg.from_id}")
+    dc_helpers._send(bot, accid, msg.chat_id, f"✅ Group '{group_name}' created!\n\nJoin link: {invite_link}")
+
 
 @config.dc_cli.on(events.NewMessage(command="/relays"))
 def relays_command(bot, accid, event, skip_cooldown: bool = False):

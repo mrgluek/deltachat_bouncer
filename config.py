@@ -41,7 +41,17 @@ logger = logging.getLogger("bouncer_bot")
 if os.environ.get("CALL_DEBUG_LOG", "").strip().lower() not in ("1", "true", "yes", "on"):
     for _webrtc_logger in ("aioice", "aiortc"):
         logging.getLogger(_webrtc_logger).setLevel(logging.WARNING)
-VERSION = "2.34.0"
+VERSION = "2.35.0"
+
+# Ntfy Bot has its own /newgroup. In a group where it is a member, the bouncer
+# leaves plain /newgroup to it so one command does not create two groups.
+# Entries are full addresses or local parts (a local part matches the bot on
+# every relay it uses, e.g. ntfydcbot@chat.gluek.info and ntfydcbot@chatmail.uk).
+NTFY_BOT_ADDRS = [
+    a.strip().lower()
+    for a in os.environ.get("NTFY_BOT_ADDRS", "ntfydcbot").split(",")
+    if a.strip()
+]
 
 DC_FALLBACK_PATTERN = re.compile(
     r'\s*\[(?:Image|Video|Voice|Audio|Document|File|Sticker|Gif)[ \-–]+[^\]]+\]',
@@ -148,6 +158,7 @@ SLAP_COOLDOWN_SECONDS = 15     # 15 seconds for /slap command
 STICKER_COOLDOWN_SECONDS = 5   # 5 seconds for /sticker commands
 STICKER_NOBG_COOLDOWN_SECONDS = 15 # 15 seconds for /stickernobg commands
 CMCALL_COOLDOWN_SECONDS = 60   # 60 seconds for /cmcall (a call test takes ~30-60s)
+NEWGROUP_COOLDOWN_SECONDS = 60  # /newgroup: at most one new group per minute per sender
 FAQ_COOLDOWN_SECONDS = 30      # same FAQ topic (or the /faq list) at most once per 30s per chat
 FAQ_MAX_TAG_LENGTH = 100       # longer messages are never checked against FAQ topics
 FAQ_MAX_FILE_BYTES = 25 * 1024 * 1024  # largest attachment /save keeps a copy of

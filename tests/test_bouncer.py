@@ -2206,6 +2206,123 @@ class TestHelpPrivateReply(unittest.TestCase):
         self.assertIn("/help@bouncer", mock_send.call_args[0][3])
 
 
+class TestNewGroup(unittest.TestCase):
+    """/newgroup creates a group and replies with its join link; skipped where Ntfy Bot is a member."""
+
+    def setUp(self):
+        state._newgroup_anti_spam.clear()
+
+    def _event(self, payload="Delta Cats", text=None, from_id=7):
+        event = MagicMock()
+        event.payload = payload
+        event.msg.chat_id = 42
+        event.msg.from_id = from_id
+        event.msg.text = text if text is not None else f"/newgroup {payload}".strip()
+        return event
+
+    def _bot(self):
+        mock_bot = MagicMock()
+        mock_bot.rpc.create_group_chat.return_value = 900
+        mock_bot.rpc.get_chat_securejoin_qr_code.return_value = "https://i.delta.chat/#ABC&g=Delta+Cats"
+        return mock_bot
+
+    @patch("commands.dc_helpers._is_dc_admin", return_value=False)
+    @patch("commands.dc_helpers._send")
+    def test_creates_group_and_sends_link(self, mock_send, _admin):
+        mock_bot = self._bot()
+        commands.newgroup_command(mock_bot, 1, self._event())
+        mock_bot.rpc.create_group_chat.assert_called_once_with(1, "Delta Cats", False)
+        mock_bot.rpc.get_chat_securejoin_qr_code.assert_called_once_with(1, 900)
+        text = mock_send.call_args[0][3]
+        self.assertEqual(text, "✅ Group 'Delta Cats' created!\n\nJoin link: https://i.delta.chat/#ABC&g=Delta+Cats")
+        self.assertNotIn("Share this link", text)
+
+    @patch("commands.dc_helpers._is_dc_admin", return_value=False)
+    @patch("commands.dc_helpers._send")
+    def test_old_qr_format_becomes_link(self, mock_send, _admin):
+        mock_bot = self._bot()
+        mock_bot.rpc.get_chat_securejoin_qr_code.return_value = "OPEN:ABC"
+        commands.newgroup_command(mock_bot, 1, self._event())
+        self.assertIn("Join link: https://i.delta.chat/#ABC", mock_send.call_args[0][3])
+
+    @patch("commands.dc_helpers._send")
+    def test_no_name_shows_usage(self, mock_send):
+        mock_bot = self._bot()
+        commands.newgroup_command(mock_bot, 1, self._event(payload="  "))
+        mock_bot.rpc.create_group_chat.assert_not_called()
+        self.assertIn("Usage: `/newgroup <name>`", mock_send.call_args[0][3])
+
+    @patch("commands.dc_helpers._is_dc_admin", return_value=False)
+    @patch("commands.dc_helpers._send")
+    def test_cooldown_per_sender(self, mock_send, _admin):
+        mock_bot = self._bot()
+        commands.newgroup_command(mock_bot, 1, self._event())
+        commands.newgroup_command(mock_bot, 1, self._event(payload="Second"))
+        self.assertEqual(mock_bot.rpc.create_group_chat.call_count, 1)
+        self.assertIn("⏳", mock_send.call_args[0][3])
+        # another sender is not blocked
+        commands.newgroup_command(mock_bot, 1, self._event(payload="Other", from_id=8))
+        self.assertEqual(mock_bot.rpc.create_group_chat.call_count, 2)
+
+    @patch("commands.dc_helpers._is_dc_admin", return_value=True)
+    @patch("commands.dc_helpers._send")
+    def test_admin_has_no_cooldown(self, mock_send, _admin):
+        mock_bot = self._bot()
+        commands.newgroup_command(mock_bot, 1, self._event())
+        commands.newgroup_command(mock_bot, 1, self._event(payload="Second"))
+        self.assertEqual(mock_bot.rpc.create_group_chat.call_count, 2)
+
+    def test_ntfy_address_matching(self):
+        addrs = ["ntfydcbot", "other@example.org"]
+        self.assertTrue(dc_helpers.is_ntfy_bot_address("NtfyDCBot@chat.gluek.info", addrs))
+        self.assertTrue(dc_helpers.is_ntfy_bot_address("ntfydcbot@chatmail.uk", addrs))
+        self.assertTrue(dc_helpers.is_ntfy_bot_address("other@example.org", addrs))
+        self.assertFalse(dc_helpers.is_ntfy_bot_address("other@example.com", addrs))
+        self.assertFalse(dc_helpers.is_ntfy_bot_address("ntfydcbot2@chat.gluek.info", addrs))
+        self.assertFalse(dc_helpers.is_ntfy_bot_address("", addrs))
+
+    def _parse(self, text, member_addrs):
+        """Run the bot's command parser on text in a chat with the given member addresses."""
+        mock_bot = MagicMock()
+        mock_bot._hooks = {}
+
+        def fake_parse(accid, event):
+            parts = (event.msg.text or "").split(maxsplit=1)
+            event.command = parts[0] if parts and parts[0].startswith("/") else ""
+            event.payload = parts[1] if len(parts) > 1 else ""
+
+        mock_bot._parse_command = fake_parse
+        mock_bot.rpc.get_chat_contacts.return_value = [1] + list(range(10, 10 + len(member_addrs)))
+
+        def get_contact(accid, cid):
+            c = MagicMock()
+            c.address = "bouncer@example.org" if cid == 1 else member_addrs[cid - 10]
+            return c
+
+        mock_bot.rpc.get_contact.side_effect = get_contact
+        bot.setup_custom_command_parser(mock_bot, ["bouncer"])
+        class _Msg(dict):  # like deltachat2's AttrDict: msg["text"] and msg.text are the same
+            __getattr__ = dict.__getitem__
+
+        event = MagicMock()
+        event.msg = _Msg(text=text, chat_id=42)
+        mock_bot._parse_command(1, event)
+        return event
+
+    def test_parser_skips_when_ntfy_bot_in_chat(self):
+        event = self._parse("/newgroup Delta Cats", ["alice@example.org", "ntfydcbot@chatmail.uk"])
+        self.assertEqual(event.command, "")
+
+    def test_parser_keeps_without_ntfy_bot(self):
+        event = self._parse("/newgroup Delta Cats", ["alice@example.org"])
+        self.assertEqual(event.command, "/newgroup")
+        self.assertEqual(event.payload, "Delta Cats")
+
+    def test_parser_keeps_when_addressed_to_bouncer(self):
+        event = self._parse("/newgroup@bouncer Delta Cats", ["ntfydcbot@chat.gluek.info"])
+        self.assertEqual(event.command, "/newgroup")
+
+
 if __name__ == '__main__':
     unittest.main()
 
