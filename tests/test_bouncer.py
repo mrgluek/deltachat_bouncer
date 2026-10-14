@@ -1960,6 +1960,64 @@ class TestBouncerBot(unittest.TestCase):
 
 
 
+    # ── /dchanneladd join worker ──
+
+    def _join_bot(self, chat_type="InBroadcast", self_in_group=True):
+        mock_bot = MagicMock()
+        mock_bot.rpc.secure_join.return_value = 49
+        mock_bot.rpc.get_basic_chat_info.return_value = {"name": "ArcaneChat Channel", "chat_type": chat_type}
+        mock_bot.rpc.get_full_chat_by_id.return_value = {"self_in_group": self_in_group}
+        mock_bot.rpc.get_chat_description.return_value = ""
+        mock_bot.rpc.get_message_ids.return_value = []
+        return mock_bot
+
+    @patch('channels.time.sleep')
+    @patch('dc_helpers._send')
+    def test_dchanneladd_uses_chat_returned_by_secure_join(self, mock_send, _sleep):
+        # The channel chat already existed from an earlier join: it must be catalogued,
+        # not the 1:1 chat with the channel owner.
+        mock_bot = self._join_bot()
+        channels.bg_channel_join_worker(mock_bot, 1, 7, "https://i.delta.chat/#X", "ArcaneChat Channel",
+                                        {"kind": "askJoinBroadcast", "contact_id": 457})
+        mock_bot.rpc.create_chat_by_contact_id.assert_not_called()
+        ch = database.get_catalog_channel_by_chat_id(49)
+        self.assertIsNotNone(ch)
+        self.assertEqual(ch["is_public"], 0)
+        self.assertIn("has been joined", mock_send.call_args_list[-1][0][3])
+
+    @patch('channels.JOIN_QUICK_WAIT', 0)
+    @patch('channels.JOIN_BACKGROUND_WAIT', 0)
+    @patch('channels.time.sleep')
+    @patch('dc_helpers._send')
+    def test_dchanneladd_pending_join_is_reported_not_success(self, mock_send, _sleep):
+        mock_bot = self._join_bot(self_in_group=False)
+        channels.bg_channel_join_worker(mock_bot, 1, 7, "https://i.delta.chat/#X", "ArcaneChat Channel",
+                                        {"kind": "askJoinBroadcast"})
+        # Registered right away so posts arriving after the handshake are cached.
+        self.assertIsNotNone(database.get_catalog_channel_by_chat_id(49))
+        texts = [c[0][3] for c in mock_send.call_args_list]
+        self.assertTrue(any("not finished yet" in t for t in texts))
+        self.assertFalse(any("has been joined" in t for t in texts))
+
+    @patch('channels.time.sleep')
+    @patch('dc_helpers._send')
+    def test_dchanneladd_rejects_private_chat_for_channel_link(self, mock_send, _sleep):
+        mock_bot = self._join_bot(chat_type="Single")
+        channels.bg_channel_join_worker(mock_bot, 1, 7, "https://i.delta.chat/#X", "ArcaneChat",
+                                        {"kind": "askJoinBroadcast"})
+        self.assertIsNone(database.get_catalog_channel_by_chat_id(49))
+        self.assertIn("private chat", mock_send.call_args_list[-1][0][3])
+
+    def test_readded_channel_takes_new_visibility(self):
+        database.add_catalog_channel(49, "Ch", "", 0, "old", is_public=1)
+        database.remove_catalog_channel(49)
+        database.add_catalog_channel(49, "Ch", "", 0, "new", is_public=0)
+        self.assertEqual(database.get_catalog_channel_by_chat_id(49)["is_public"], 0)
+        # A live channel keeps the visibility the admin chose.
+        database.add_catalog_channel(49, "Ch", "", 0, "new", is_public=1)
+        self.assertEqual(database.get_catalog_channel_by_chat_id(49)["is_public"], 0)
+
+
 class TestPerformanceAndPooling(unittest.TestCase):
     def setUp(self):
         database.close_db()

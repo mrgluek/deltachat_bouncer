@@ -1113,9 +1113,12 @@ def add_catalog_channel(chat_id: int, name: str, description: str, member_count:
                 member_count=excluded.member_count,
                 invite_link=excluded.invite_link,
                 token=COALESCE(catalog_channels.token, excluded.token),
+                -- A re-added (previously removed) channel takes the new visibility,
+                -- a live one keeps whatever the admin set. Right-hand side sees the old row.
+                is_public=CASE WHEN catalog_channels.is_deleted = 1 THEN excluded.is_public
+                               ELSE COALESCE(catalog_channels.is_public, excluded.is_public) END,
                 is_deleted=0,
-                deleted_at=NULL,
-                is_public=COALESCE(catalog_channels.is_public, excluded.is_public)
+                deleted_at=NULL
         ''', (chat_id, name, description, member_count, invite_link, token, 1 if is_public else 0))
         return token
 

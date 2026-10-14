@@ -376,111 +376,144 @@ def private_command(bot, accid, event):
     status_str = "private (by request)" if is_private else "public"
     dc_helpers._send(bot, accid, msg.chat_id, f"✅ Chat is now {status_str}.")
 
+# How long /dchanneladd waits for the inviter's device before reporting "pending",
+# and how long it keeps watching in the background after that.
+JOIN_QUICK_WAIT = 30
+JOIN_BACKGROUND_WAIT = 30 * 60
+
+
+def _self_in_chat(bot, accid, chat_id: int) -> bool:
+    """True once the bot is a member of the chat, i.e. the securejoin handshake finished."""
+    try:
+        full = bot.rpc.get_full_chat_by_id(accid, chat_id)
+    except Exception:
+        return False
+    return bool(_chat_field(full, "self_in_group", "selfInGroup"))
+
+
+def _wait_for_join(bot, accid, chat_id: int, timeout: float, step: float) -> bool:
+    deadline = time.time() + timeout
+    while True:
+        if _self_in_chat(bot, accid, chat_id):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(step)
+
+
+def _backfill_channel(bot, accid, chat_id: int, token: str):
+    """Cache the last messages core already has in the chat.
+
+    A channel join delivers up to 10 recent posts; they may arrive before the catalog
+    row exists or while the bot is busy, so pull them from core once the join is done.
+    Ingestion is idempotent (msg_id is unique), so overlap with the live handler is fine.
+    """
+    try:
+        chat_msgs = bot.rpc.get_message_ids(accid, chat_id, False, False)
+    except Exception as e:
+        config.logger.warning(f"Failed to backfill messages for channel {chat_id}: {e}")
+        return
+    for mid in chat_msgs[-10:]:
+        if isinstance(mid, int) and mid > 0:
+            try:
+                m = bot.rpc.get_message(accid, mid)
+                if m and not getattr(m, "is_info", False):
+                    _ingest_channel_post(bot, accid, m, {"chat_id": chat_id, "token": token}, token)
+            except Exception as e:
+                config.logger.warning(f"Failed to backfill msg {mid}: {e}")
+
+
+def _channel_description(bot, accid, chat_id: int, chat_type) -> str:
+    try:
+        if str(chat_type) == "Single":
+            contacts = bot.rpc.get_chat_contacts(accid, chat_id)
+            other_contacts = [c for c in contacts if c != 1]
+            if not other_contacts:
+                return ""
+            contact = bot.rpc.get_contact(accid, other_contacts[0])
+            status = contact.get('status') if isinstance(contact, dict) else getattr(contact, 'status', '')
+            return (status or "").strip()
+        return (bot.rpc.get_chat_description(accid, chat_id) or "").strip()
+    except Exception as e:
+        config.logger.warning(f"Failed to get description for chat {chat_id}: {e}")
+        return ""
+
+
 def bg_channel_join_worker(bot, accid, admin_chat_id, url, chat_name, qr_info=None):
     try:
-        old_chats = set(bot.rpc.get_chatlist_entries(accid, None, None, None))
-        bot.rpc.secure_join(accid, url)
-        
-        joined_chat_id = None
-        delays = [0.25, 0.25, 0.5, 0.5, 1.0, 1.0, 1.5, 2.0, 2.0, 3.0, 3.0, 4.0, 5.0, 5.0]
-        for delay in delays:
-            time.sleep(delay)
-            new_chats = set(bot.rpc.get_chatlist_entries(accid, None, None, None))
-            added_chats = new_chats - old_chats
-            if added_chats:
-                joined_chat_id = list(added_chats)[0]
-                break
-        
-        if not joined_chat_id and qr_info:
-            contact_id = qr_info.get("contact_id")
-            if contact_id:
-                try:
-                    joined_chat_id = bot.rpc.create_chat_by_contact_id(accid, int(contact_id))
-                except Exception:
-                    pass
-            
-            if not joined_chat_id:
-                try:
-                    grpid = qr_info.get("grpid")
-                    chats = bot.rpc.get_chatlist_entries(accid, None, None, None)
-                    for cid in chats:
-                        if not isinstance(cid, int):
-                            continue
-                        try:
-                            c_info = bot.rpc.get_basic_chat_info(accid, cid)
-                            c_grpid = c_info.get("grpid") if isinstance(c_info, dict) else getattr(c_info, "grpid", None)
-                            if grpid and c_grpid == grpid:
-                                joined_chat_id = cid
-                                break
-                            
-                            c_name = c_info.get("name") if isinstance(c_info, dict) else getattr(c_info, "name", None)
-                            if c_name == chat_name:
-                                joined_chat_id = cid
-                                break
-                        except Exception:
-                            continue
-                except Exception:
-                    pass
+        kind = str((qr_info or {}).get("kind", "")).lower()
+        # secure_join returns the chat the link leads to: the channel/group chat for
+        # group and channel links (created right away, even while the handshake is still
+        # waiting for the inviter), the 1:1 chat for contact links. Before 2.33.1 the bot
+        # diffed the chat list instead and, when the channel chat already existed from an
+        # earlier join, fell back to the 1:1 chat with the channel owner and catalogued that.
+        joined_chat_id = bot.rpc.secure_join(accid, url)
+        if not isinstance(joined_chat_id, int) or joined_chat_id <= 0:
+            dc_helpers._send(bot, accid, admin_chat_id, f"❌ Failed to join channel **{chat_name or 'Channel'}**: core returned no chat.")
+            return
 
-        if joined_chat_id:
-            chat = bot.rpc.get_basic_chat_info(accid, joined_chat_id)
-            c_name = chat.get('name') if isinstance(chat, dict) else getattr(chat, 'name', chat_name or 'Channel')
-            chat_type = chat.get('chat_type') if isinstance(chat, dict) else getattr(chat, 'chat_type', 'Single')
-            
-            description = ""
-            if str(chat_type) == "Single":
-                try:
-                    contacts = bot.rpc.get_chat_contacts(accid, joined_chat_id)
-                    other_contacts = [c for c in contacts if c != 1]
-                    if other_contacts:
-                        contact = bot.rpc.get_contact(accid, other_contacts[0])
-                        description = contact.get('status') if isinstance(contact, dict) else getattr(contact, 'status', '')
-                        description = description.strip() if description else ""
-                except Exception as e:
-                    config.logger.warning(f"Failed to get contact status: {e}")
-            else:
-                try:
-                    description = bot.rpc.get_chat_description(accid, joined_chat_id) or ""
-                    description = description.strip()
-                except Exception:
-                    pass
-                
-            token = database.add_catalog_channel(joined_chat_id, c_name, description, 0, url, is_public=0)
-            
-            # Backfill initial messages delivered by core (up to 10 messages from handshake)
-            try:
-                chat_msgs = bot.rpc.get_message_ids(accid, joined_chat_id, False, False)
-                for mid in chat_msgs[-10:]:
-                    if isinstance(mid, int) and mid > 0:
-                        try:
-                            m = bot.rpc.get_message(accid, mid)
-                            if m and not getattr(m, "is_info", False):
-                                _ingest_channel_post(bot, accid, m, {"chat_id": joined_chat_id, "token": token}, token)
-                        except Exception as e:
-                            config.logger.warning(f"Failed to backfill msg {mid}: {e}")
-            except Exception as e:
-                config.logger.warning(f"Failed to backfill messages for channel {joined_chat_id}: {e}")
+        chat = bot.rpc.get_basic_chat_info(accid, joined_chat_id)
+        c_name = chat.get('name') if isinstance(chat, dict) else getattr(chat, 'name', None)
+        c_name = c_name or chat_name or 'Channel'
+        chat_type = chat.get('chat_type') if isinstance(chat, dict) else getattr(chat, 'chat_type', 'Single')
 
-            ch = database.get_catalog_channel_by_chat_id(joined_chat_id)
-            ch_id = ch['id'] if ch else ""
-            base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
-            preview_url = f"{base_url.rstrip('/')}/c/{token}" if base_url else f"/c/{token}"
-            rss_url = f"{preview_url}/rss.xml"
+        # A group/channel link must never end up as a 1:1 chat in the catalog.
+        if "contact" not in kind and str(chat_type) == "Single":
+            dc_helpers._send(bot, accid, admin_chat_id, f"❌ Failed to join channel **{c_name}**: the link opened a private chat, not a channel.")
+            return
+
+        # Contact links have nothing to wait for; for channels and groups the bot is only
+        # a member after the inviter's device answers the handshake.
+        joined = "contact" in kind or _wait_for_join(bot, accid, joined_chat_id, JOIN_QUICK_WAIT, 1.0)
+
+        # Register the chat right away, even while pending, so posts that arrive when the
+        # join completes are cached by the normal incoming-message handler.
+        description = _channel_description(bot, accid, joined_chat_id, chat_type)
+        token = database.add_catalog_channel(joined_chat_id, c_name, description, 0, url, is_public=0)
+        ch = database.get_catalog_channel_by_chat_id(joined_chat_id)
+        ch_id = ch['id'] if ch else ""
+        base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
+        preview_url = f"{base_url.rstrip('/')}/c/{token}" if base_url else f"/c/{token}"
+        links = (
+            f"🌐 Web preview: {preview_url}\n"
+            f"📡 RSS feed: {preview_url}/rss.xml\n"
+            f"🔗 Invite link: {url}\n\n"
+        )
+        publish_hint = (
+            f"ℹ️ This channel is currently unlisted (hidden from the public /dchannels catalog and web landing page).\n"
+            f"To make it publicly visible in the catalog, send:\n"
+            f"/dchannelpub{ch_id}on"
+        )
+
+        if joined:
+            _backfill_channel(bot, accid, joined_chat_id, token)
             dc_helpers._send(
-                bot,
-                accid,
-                admin_chat_id,
+                bot, accid, admin_chat_id,
                 f"✅ Channel **{c_name}** has been joined and added as **unlisted** (ID: {ch_id}).\n\n"
-                f"🌐 Web preview: {preview_url}\n"
-                f"📡 RSS feed: {rss_url}\n"
-                f"🔗 Invite link: {url}\n\n"
-                f"ℹ️ This channel is currently unlisted (hidden from the public /dchannels catalog and web landing page).\n"
-                f"To make it publicly visible in the catalog, send:\n"
-                f"/dchannelpub{ch_id}on"
+                + links + publish_hint
             )
+            return
+
+        dc_helpers._send(
+            bot, accid, admin_chat_id,
+            f"⏳ Channel **{c_name}** was added as **unlisted** (ID: {ch_id}), but the join is not finished yet: "
+            f"the channel owner's device has not answered. Delta Chat completes the join as soon as that device "
+            f"comes online; posts will appear automatically. I will report here when it happens "
+            f"(watching for {JOIN_BACKGROUND_WAIT // 60} minutes).\n\n"
+            + links + publish_hint
+        )
+        if _wait_for_join(bot, accid, joined_chat_id, JOIN_BACKGROUND_WAIT, 15.0):
+            _backfill_channel(bot, accid, joined_chat_id, token)
+            dc_helpers._send(bot, accid, admin_chat_id, f"✅ Joined channel **{c_name}** (ID: {ch_id}). Recent posts are now on {preview_url}")
         else:
-            dc_helpers._send(bot, accid, admin_chat_id, f"❌ Failed to join channel **{chat_name or 'Channel'}**. The securejoin handshake timed out. Please check that the link is correct and try again.")
-            
+            config.logger.info(f"Channel join for chat {joined_chat_id} still pending after {JOIN_BACKGROUND_WAIT}s")
+            dc_helpers._send(
+                bot, accid, admin_chat_id,
+                f"⚠️ Channel **{c_name}** (ID: {ch_id}): the owner's device still has not answered the join request. "
+                f"It stays in the catalog and fills up if the join completes later; otherwise ask the owner for a fresh invite link, "
+                f"remove the entry with /dchannelremove {ch_id} and add the new link."
+            )
+
     except Exception as e:
         config.logger.error(f"Error in bg_channel_join_worker: {e}")
         dc_helpers._send(bot, accid, admin_chat_id, f"❌ An error occurred while adding the channel: {e}")
