@@ -383,6 +383,7 @@ def _format_ip(ip, host: str | None = None, others: list | None = None) -> str:
     if not info and not net and not sdb:
         return f"❌ Could not look up {ip_s}: ipinfo.io, RIPEstat and Shodan did not answer. Try again later."
     lines.append("")
+    lines.append(f"💡 `/whois {ip_s}` — holder and abuse contact")
     lines.append(f"🔎 {IPINFO_URL}/{ip_s}")
     if sdb and sdb.get("ports"):
         lines.append(f"🔎 https://www.shodan.io/host/{ip_s}")
@@ -486,7 +487,8 @@ def _format_host(host: str) -> str:
     if not public:
         listed = ", ".join(a.compressed for a in addrs[:5])
         return f"🔤 **{shown_host}** → {listed}\n❌ Only private or reserved addresses, nothing to look up."
-    return _format_ip(public[0], host=shown_host, others=public[1:]) + f"\n💡 `/dns {shown_host}` — its DNS records"
+    return (_format_ip(public[0], host=shown_host, others=public[1:])
+            + f"\n💡 `/dns {shown_host}` — its DNS records · `/whois {shown_host}` — registration")
 
 
 def lookup(kind: str, value) -> str:

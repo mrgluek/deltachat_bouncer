@@ -49,7 +49,7 @@ SRV_SERVICES = (("_submission._tcp", 587), ("_submissions._tcp", 465),
 MTA_STS_MAX_BYTES = 64 * 1024
 
 USAGE = (
-    "Usage (like dig):\n"
+    "Usage (like dig; `/dig` works too):\n"
     "• `/dns <domain>` — Full report: addresses, zone, mail (MX, SPF, DKIM, DMARC, MTA-STS); "
     "chatmail relays are checked against what cmdeploy expects\n"
     "• `/dns <name> <TYPE>` — One record type, e.g. `/dns chatmail.uk MX`\n"
@@ -417,6 +417,7 @@ def build_report(domain: str, res: dns.resolver.Resolver, via: str, sysres) -> s
     lines += chatmail
 
     lines += ["", f"💡 `/dns {_display(domain)} <TYPE>` for raw records, `@auth` to bypass caches"]
+    lines.append(f"💡 `/whois {_display(domain)}` — registrar, expiry date")
     if addrs:
         lines.append(f"💡 `/ip {addrs[0]}` — who hosts it, open ports")
     return "\n".join(lines)
@@ -671,6 +672,7 @@ def _worker(bot, accid, chat_id, msg_id, name, rtype, server, key):
 _pool = ThreadPoolExecutor(max_workers=config.DNS_WORKERS, thread_name_prefix="dns-report")
 
 
+@config.dc_cli.on(events.NewMessage(command="/dig"))  # alias, for dig users
 @config.dc_cli.on(events.NewMessage(command="/dns"))
 def dns_command(bot, accid, event):
     msg = event.msg

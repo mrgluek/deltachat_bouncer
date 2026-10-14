@@ -75,6 +75,16 @@ _dns_lock = threading.Lock()
 _dns_cache: dict[str, tuple[float, str]] = {}
 _dns_pending = 0
 
+# /whois: cache, queue counter, per-server pacing and bootstrap data
+_whois_lock = threading.Lock()
+_whois_cache: dict[str, tuple[float, str]] = {}
+_whois_pending = 0
+_whois_host_locks: dict[str, threading.Lock] = {}
+_whois_host_last: dict[str, float] = {}
+_whois_bootstrap: dict[str, tuple[float, list]] = {}  # IANA RDAP: dns / ipv4 / ipv6 / asn
+_whois_servers: dict[str, str | None] = {}            # TLD -> port-43 server
+_whois_psl = None                                     # (fetched_at, Public Suffix List rules)
+
 # CMPing monitoring state
 _cmping_monitor_idx_db = database.get_config("cmping_monitor_index")
 _cmping_monitor_index = int(_cmping_monitor_idx_db) if _cmping_monitor_idx_db is not None else 0

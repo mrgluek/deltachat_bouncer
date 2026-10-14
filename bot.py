@@ -31,6 +31,7 @@ import faq  # noqa: F401  (registers /faq, /save, /remove and topic answers)
 import handlers
 import dnscheck  # noqa: F401  (registers /dns)
 import iplookup  # noqa: F401  (registers /ip)
+import whoislookup  # noqa: F401  (registers /whois)
 import meet  # noqa: F401  (registers /meet, /join, /meets)
 import moderation
 import security
@@ -379,8 +380,36 @@ def on_init(bot, args):
             bot.logger.warning(f"Could not configure storage optimization in on_init: {e}")
 
 
+def case_insensitive_parser(bot, parse):
+    """Wrap deltachat2's command parser so /DNS, /Help or /WHOIS work like /dns.
+
+    deltachat2 matches the first word against the registered commands exactly.
+    When that finds nothing, parse again with the first word in lower case;
+    the rest of the text (the payload) is left as typed.
+    """
+    from deltachat2 import events as dc_events
+
+    def parse_ci(accid: int, event) -> None:
+        parse(accid, event)
+        cmds = {hook[1].command for hook in bot._hooks.get(dc_events.NewMessage, []) if hook[1].command}
+        text = event.msg.text or ""
+        first = text.split(maxsplit=1)[0] if text.strip() else ""
+        if not event.command or event.command in cmds or first == first.lower():
+            return
+        original_text = text
+        event.msg["text"] = first.lower() + text[text.index(first) + len(first):]
+        try:
+            parse(accid, event)
+        finally:
+            event.msg["text"] = original_text
+        if event.command not in cmds:  # not a command in any case: keep what the first parse gave
+            parse(accid, event)
+
+    return parse_ci
+
+
 def setup_custom_command_parser(bot, allowed_prefixes):
-    original_parse_command = bot._parse_command
+    original_parse_command = case_insensitive_parser(bot, bot._parse_command)
 
     def custom_parse_command(accid: int, event) -> None:
         text = event.msg.text
