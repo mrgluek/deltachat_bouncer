@@ -789,13 +789,6 @@ def invite_command(bot, accid, event, skip_cooldown: bool = False):
             # Send file + text
             sent_msg_id = bot.rpc.send_msg(accid, msg.chat_id, MsgData(file=temp_path, text=invite_text))
             
-            # Track success
-            try:
-                addr = bot.rpc.get_config(accid, "configured_addr") or bot.rpc.get_config(accid, "addr") or "unknown"
-                if addr and isinstance(addr, str) and addr != "unknown":
-                    database.increment_transport_sent(addr)
-            except Exception:
-                pass
         except Exception as qr_err:
             config.logger.warning(f"Could not generate QR image, falling back to text message: {qr_err}")
             sent_msg_id = dc_helpers._send(bot, accid, msg.chat_id, invite_text)

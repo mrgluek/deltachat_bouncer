@@ -7,6 +7,7 @@ from deltachat2 import events
 
 import config
 import database
+import transports_view
 import dc_helpers
 
 @config.dc_cli.on(events.NewMessage(command="/transports"))
@@ -27,77 +28,9 @@ def transports_command(bot, accid, event):
         dc_helpers._send(bot, accid, msg.chat_id, "No transports configured.")
         return
 
-    # Get connectivity status
-    connectivity_label = "❓ Unknown"
-    try:
-        connectivity = bot.rpc.get_connectivity(accid)
-        if connectivity >= 4000:
-            connectivity_label = "🟢 Connected"
-        elif connectivity >= 3000:
-            connectivity_label = "🔄 Working"
-        elif connectivity >= 2000:
-            connectivity_label = "🟡 Connecting"
-        else:
-            connectivity_label = "🔴 Not connected"
-    except Exception:
-        pass
-
-    # Get connectivity HTML to parse per-transport status
-    connectivity_html = ""
-    try:
-        connectivity_html = bot.rpc.get_connectivity_html(accid)
-    except Exception:
-        pass
-
-    # Get per-transport statistics
-    stats_map = {}
-    for s in database.get_all_transport_stats():
-        stats_map[s['addr']] = s
-
-    # The core tries the newest relay first when sending, so list newest first.
-    transport_addrs = []
-    for t in reversed(transports):
-        addr = t.get('addr', '') if isinstance(t, dict) else getattr(t, 'addr', '')
-        transport_addrs.append(addr)
-
-    reply = f"🔌 **Mail Relays (Transports)**\n\nStatus: {connectivity_label}\nSending order: top to bottom (core falls back to the next relay if one is unreachable)\n\n"
-
-    import re
-    for idx, addr in enumerate(transport_addrs, 1):
-        # Determine status label from HTML
-        status_label = "❓ Unknown"
-        if connectivity_html:
-            domain = addr.split('@')[-1] if '@' in addr else addr
-            pattern = rf'class="([^"]+)\s+dot".*?<b>{re.escape(domain)}:</b>\s*([^<]+)'
-            match = re.search(pattern, connectivity_html, re.IGNORECASE)
-            if match:
-                color = match.group(1).lower()
-                status_text = match.group(2).strip().lower()
-                if "yellow" in color or "connecting" in status_text:
-                    status_label = "🟡 Connecting"
-                elif "green" in color:
-                    status_label = "🔄 Working"
-                elif "red" in color or "lost" in status_text or "error" in status_text:
-                    status_label = "🔴 Not connected"
-
-        reply += f"{idx}. **{status_label}:** `{addr}`\n"
-
-        stats = stats_map.get(addr)
-        if stats:
-            reply += f"  📤 Sent: {stats['msgs_sent']}  📥 Received: {stats['msgs_received']}\n"
-            if stats.get('last_sent_at'):
-                import datetime
-                last_sent = datetime.datetime.fromtimestamp(stats['last_sent_at']).strftime('%Y-%m-%d %H:%M')
-                reply += f"  Last sent: {last_sent}\n"
-            if stats.get('last_received_at'):
-                import datetime
-                last_recv = datetime.datetime.fromtimestamp(stats['last_received_at']).strftime('%Y-%m-%d %H:%M')
-                reply += f"  Last received: {last_recv}\n"
-        else:
-            reply += f"  📤 Sent: 0  📥 Received: 0\n"
-        reply += "\n"
-
-    reply += f"Total transports: {len(transport_addrs)}"
+    # Which relay the core really sends through, its send queue, and per-relay
+    # incoming status and storage (see transports_view.py).
+    reply = transports_view.build_transports_report(bot.rpc, accid, transports)
     dc_helpers._send(bot, accid, msg.chat_id, reply)
 
 @config.dc_cli.on(events.NewMessage(command="/addtransport"))

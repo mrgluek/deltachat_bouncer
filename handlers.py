@@ -229,13 +229,6 @@ def handle_all_messages(bot, accid, event):
     """Handle dynamic commands like /contact123"""
     msg = event.msg
     
-    # Track receiving stats
-    try:
-        addr = bot.rpc.get_config(accid, "configured_addr") or bot.rpc.get_config(accid, "addr")
-        if addr:
-            database.increment_transport_received(addr)
-    except Exception:
-        pass
 
     # ── Public Channel Post Ingestion ──
     try:
@@ -654,12 +647,6 @@ def handle_all_messages(bot, accid, event):
                             
                             # Send the vCard as a message
                             bot.rpc.send_msg(accid, msg.chat_id, MsgData(file=temp_path, viewtype="Vcard"))
-                            try:
-                                addr = bot.rpc.get_config(accid, "configured_addr") or bot.rpc.get_config(accid, "addr") or "unknown"
-                                if addr and isinstance(addr, str) and addr != "unknown":
-                                    database.increment_transport_sent(addr)
-                            except Exception:
-                                pass
                             config.logger.debug(f"Successfully shared contact {contact_id}")
                         finally:
                             if temp_path and os.path.exists(temp_path):

@@ -154,13 +154,6 @@ def _send_sticker(bot, accid, chat_id, sticker_path, reply_to_id=None):
         else:
             raise
 
-    # Track transport stats
-    try:
-        addr = bot.rpc.get_config(accid, "configured_addr") or bot.rpc.get_config(accid, "addr") or "unknown"
-        if addr and isinstance(addr, str) and addr != "unknown":
-            database.increment_transport_sent(addr)
-    except Exception:
-        pass
 
     return sent_msg_id
 

@@ -280,13 +280,6 @@ def _send(bot, accid, chat_id, text, reply_to_id=None, file=None, viewtype=None)
     try:
         msg_id = bot.rpc.send_msg(accid, chat_id, msg_data)
 
-        # Track success
-        try:
-            addr = bot.rpc.get_config(accid, "configured_addr") or bot.rpc.get_config(accid, "addr") or "unknown"
-            if addr and isinstance(addr, str) and addr != "unknown":
-                database.increment_transport_sent(addr)
-        except Exception:
-            pass
 
         return msg_id
     except Exception as e:

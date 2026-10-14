@@ -119,7 +119,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/url [base_url]` — Show or set the base web URL used for public channel previews and RSS feeds (Admin only).
 - `/private <on/off>` — Toggle cataloged chat privacy status (Admin only).
 - `/welcome [on/off/on <text>]` — Configure welcome messages for new members (Admin only).
-- `/transports` — Show configured mail relays & stats (Admin only).
+- `/transports` — Show mail relays: relay used for sending, send queue, incoming status and storage (Admin only).
 - `/addtransport` — Add a backup mail relay (Admin only, private 1-on-1 chat only for credential security).
 - `/rmtransport <addr>` — Remove a mail relay (Admin only).
 - `/cmpingadd <server>` — Add a server to connectivity monitoring rotation (Admin only).
@@ -137,7 +137,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/radioadd <url> [name]` / `/radiodel <number>` — Add an http(s) audio stream to the meeting radio (checked before it is added; the name defaults to the stream's `icy-name`) or remove one (Admin only).
 - `/cmreport <on/off>` — Toggle monitoring alerts for current chat (Admin only).
 
-Relay selection and failover are handled by the Delta Chat core (2.61+): it sends via the newest relay first and falls back to the next one if a relay is unreachable. `/transports` lists relays in that order. The former `/setprimary` and `/resilient` commands are deprecated and only reply with this explanation.
+Relay selection and failover are handled by the Delta Chat core (2.61+): it keeps sending through the relay that last worked and moves to the next one only if it cannot connect, so the relay used for sending can differ from the account's main address. `/transports` shows which relay that is, the core's send queue, and per relay the incoming status, the last received message and mailbox storage. The former `/setprimary` and `/resilient` commands are deprecated and only reply with this explanation.
 
 ### Target-Specific Commands in Group Chats
 
