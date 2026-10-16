@@ -10,6 +10,9 @@ All notable changes to this project will be documented in this file.
   - The last 500 messages are searched for the person's latest one; without one nothing is sent. Only the text is copied, not attachments. One mention reply per sender every 10 seconds per group; the lookup runs off the event thread. `MENTION_REPLY=0` turns the feature off.
 - **Mentions of People Not in the Chat**: if nobody in the group has the nick and Username Bot is a member, the nick is looked up with Username Bot's new `/api/username/<name>` endpoint (`USERNAME_LOOKUP_URL`, default `https://deltachat.id`) and only the author gets a private message with the short link (person, group or channel), so they can write to them or invite them. The bot never messages the mentioned person and posts nothing in the group. Username Bot is recognized by address (`USERNAME_BOT_ADDRS`, default `usernamebot`), not by display name. Only names Username Bot allows (3-32 letters, digits, `_`, `-`) are looked up, not `@all` / `@here`; answers (also "not registered") are cached for an hour, errors are not; the 10-second per-sender cooldown applies. Unknown nicks get no reply.
 
+### Fixed
+- **Settings From `.env` Ignored in Docker**: `docker-compose.yml` passes only listed variables to the container, and `IPINFO_TOKEN`, `DNS_RESOLVERS` and `NTFY_BOT_ADDRS` were missing, so values set in `.env` never reached the bot. They are passed now, together with the new `MENTION_REPLY`, `USERNAME_BOT_ADDRS` and `USERNAME_LOOKUP_URL`.
+
 ## [2.35.0] - 2026-10-14
 
 ### Added
