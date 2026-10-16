@@ -37,6 +37,7 @@ def _prune_anti_spam_dicts():
         state._chat_cmping_anti_spam,
         state._chat_cmcall_anti_spam,
         state._chat_slap_anti_spam,
+        state._mention_anti_spam,
         state._chat_sticker_anti_spam,
         state._chat_stickernobg_anti_spam,
         state._faq_anti_spam,

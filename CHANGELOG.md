@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.36.0] - 2026-10-16
+
+### Added
+- **@Mentions With Notifications**: a group message that starts with `@Nick` (e.g. `@Gluek посмотри?`) is sent again by the bot as a reply to Nick's last message in the chat, under the author's name (`override_sender_name`, shown as `~Alice`, like TG Bridge). Delta Chat has no real mentions; a reply to your own message is what makes the apps notify you, also in a muted chat.
+  - The nick is compared, case-insensitively, with each member's name (also without spaces), display name, address and address local part; a prefix of 3+ letters works when only one member fits (`@Gle` for Gleb). Ambiguous or unknown nicks, mentions of yourself or the bot, and messages that already reply to that person are ignored; so are 1:1 chats and channels.
+  - The last 500 messages are searched for the person's latest one; without one nothing is sent. Only the text is copied, not attachments. One mention reply per sender every 10 seconds per group; the lookup runs off the event thread. `MENTION_REPLY=0` turns the feature off.
+
 ## [2.35.0] - 2026-10-14
 
 ### Added
