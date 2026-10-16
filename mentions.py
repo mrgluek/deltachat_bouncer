@@ -4,15 +4,26 @@ as a reply to Nick's last message in the chat, so Nick gets a notification.
 Delta Chat has no real mentions; a reply to someone's message is what makes
 their client notify them (also in a muted chat). The copy goes out under the
 author's name (override_sender_name, shown as "~Name"), like TG Bridge does.
+
+When nobody in the chat has that nick but Username Bot is a member, the bot
+asks Username Bot's web API for it and tells only the author, in private, the
+short link (https://deltachat.id/nick). It never writes to the mentioned
+person: that would carry group messages outside the group and let anyone make
+the bot message strangers.
 """
 
+import json
 import re
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
 from deltachat2 import MsgData
 
 import config
+import dc_helpers
 import state
 
 # "@Nick" at the very start; the nick ends at whitespace or punctuation
@@ -61,23 +72,31 @@ def _match_rank(contact, nick: str) -> int:
     return 0
 
 
-def resolve_mention(bot, accid, chat_id: int, nick: str, sender_id: int):
-    """The chat member that nick names, as (contact_id, contact), or None.
-    An exact match wins; otherwise a prefix match is used only when it is unique."""
+def _chat_members(bot, accid, chat_id: int) -> list | None:
+    """Members of the chat as (contact_id, contact), the bot itself included."""
     try:
         member_ids = bot.rpc.get_chat_contacts(accid, chat_id)
     except Exception as e:
         config.logger.error(f"Failed to get chat contacts for mention in chat {chat_id}: {e}")
         return None
 
-    exact, prefix = [], []
+    members = []
     for contact_id in member_ids:
-        if contact_id <= 9 or contact_id == sender_id:
+        if contact_id <= 9 and contact_id != config.DC_CONTACT_ID_SELF:
             continue
         try:
-            contact = bot.rpc.get_contact(accid, contact_id)
+            members.append((contact_id, bot.rpc.get_contact(accid, contact_id)))
         except Exception:
             continue
+    return members
+
+
+def resolve_mention(members, nick: str):
+    """(member, matched) for nick: member is the (contact_id, contact) it names or None;
+    matched is False when nick fits no member at all (not even ambiguously).
+    An exact match wins; otherwise a prefix match is used only when it is unique."""
+    exact, prefix = [], []
+    for contact_id, contact in members:
         rank = _match_rank(contact, nick)
         if rank == 2:
             exact.append((contact_id, contact))
@@ -85,10 +104,98 @@ def resolve_mention(bot, accid, chat_id: int, nick: str, sender_id: int):
             prefix.append((contact_id, contact))
 
     if len(exact) == 1:
-        return exact[0]
+        return exact[0], True
     if not exact and len(prefix) == 1:
-        return prefix[0]
-    return None
+        return prefix[0], True
+    return None, bool(exact or prefix)
+
+
+# --- Username Bot lookup for people who are not in the chat ---
+
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}$")  # Username Bot's own rule
+USERNAME_STOPWORDS = {"all", "here", "everyone", "channel", "admin", "admins"}
+USERNAME_CACHE_SECONDS = 3600
+_username_cache: dict[str, tuple[float, dict | None]] = {}
+_username_cache_lock = threading.Lock()
+
+
+def has_username_bot(members) -> bool:
+    """True if Username Bot is a member (matched by address, not by display name)."""
+    return any(
+        dc_helpers.is_bot_address(getattr(contact, "address", ""), config.USERNAME_BOT_ADDRS)
+        for contact_id, contact in members
+        if contact_id != config.DC_CONTACT_ID_SELF
+    )
+
+
+def lookup_username(nick: str) -> dict | None:
+    """Username Bot's public record for nick ({username, type, display_name, url}) or None.
+    Found and not-found answers are cached for an hour; errors are not cached."""
+    nick = nick.lower()
+    if not config.USERNAME_LOOKUP_URL or not USERNAME_RE.match(nick) or nick in USERNAME_STOPWORDS:
+        return None
+
+    now = time.time()
+    with _username_cache_lock:
+        cached = _username_cache.get(nick)
+        if cached and now - cached[0] < USERNAME_CACHE_SECONDS:
+            return cached[1]
+
+    url = f"{config.USERNAME_LOOKUP_URL.rstrip('/')}/api/username/{urllib.parse.quote(nick)}"
+    req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": f"BouncerBot/{config.VERSION}"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        result = data if isinstance(data, dict) and data.get("url") else None
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            config.logger.warning(f"Username lookup for {nick} failed: HTTP {e.code}")
+            return None
+        result = None
+    except Exception as e:
+        config.logger.warning(f"Username lookup for {nick} failed: {e}")
+        return None
+
+    with _username_cache_lock:
+        if len(_username_cache) > 1000:
+            for key in [k for k, (ts, _) in _username_cache.items() if now - ts >= USERNAME_CACHE_SECONDS]:
+                _username_cache.pop(key, None)
+        _username_cache[nick] = (now, result)
+    return result
+
+
+def _format_username_hint(nick: str, record: dict) -> str:
+    username = record.get("username") or nick.lower()
+    name = (record.get("display_name") or "").strip()
+    who = f"**{name}** (@{username})" if name and name.lower() != username else f"**@{username}**"
+    kind = record.get("type")
+    if kind == "group":
+        what = f"@{username} is not a member here, it is the username of the group {who}"
+        tail = "Open the link to join it."
+    elif kind == "channel":
+        what = f"@{username} is not a member here, it is the username of the channel {who}"
+        tail = "Open the link to join it."
+    else:
+        what = f"{who} is not in this chat"
+        tail = "They won't see your message here: write to them directly, or send them this chat's invite link."
+    return f"🔎 {what}. Found via Username Bot:\n{record['url']}\n\n{tail}"
+
+
+def _send_username_hint(bot, accid, msg, nick: str, members, cooldown_key, now: float) -> bool:
+    """Tell the author, privately, how to reach a nick that is not in the chat."""
+    if not has_username_bot(members) or not USERNAME_RE.match(nick) or nick.lower() in USERNAME_STOPWORDS:
+        return False
+    state._mention_anti_spam[cooldown_key] = now
+    record = lookup_username(nick)
+    if not record:
+        return False
+    try:
+        private_chat_id = bot.rpc.create_chat_by_contact_id(accid, msg.from_id)
+        bot.rpc.send_msg(accid, private_chat_id, MsgData(text=_format_username_hint(nick, record)))
+    except Exception as e:
+        config.logger.error(f"Failed to send username hint to {msg.from_id}: {e}")
+        return False
+    return True
 
 
 def find_last_message_from(bot, accid, chat_id: int, contact_id: int, before_msg_id: int) -> int | None:
@@ -147,10 +254,18 @@ def handle_mention(bot, accid, msg) -> bool:
     if now - state._mention_anti_spam.get(key, 0) < config.MENTION_COOLDOWN_SECONDS:
         return False
 
-    target = resolve_mention(bot, accid, msg.chat_id, nick, msg.from_id)
-    if not target:
+    members = _chat_members(bot, accid, msg.chat_id)
+    if members is None:
         return False
+    target, matched = resolve_mention(members, nick)
+    if not target:
+        if matched:
+            return False  # ambiguous
+        # Nobody here by that name: maybe Username Bot knows them
+        return _send_username_hint(bot, accid, msg, nick, members, key, now)
     target_id, _target_contact = target
+    if target_id in (msg.from_id, config.DC_CONTACT_ID_SELF):
+        return False
 
     # Already a reply to the mentioned user: their client notifies them anyway
     if _quoted_sender(bot, accid, msg) == target_id:

@@ -386,13 +386,16 @@ def find_contact_in_chat(bot, accid, chat_id, name_or_address):
     return None
 
 
-def is_ntfy_bot_address(address: str, ntfy_addrs) -> bool:
-    """True if address is one of ntfy_addrs (full address or bare local part)."""
+def is_bot_address(address: str, bot_addrs) -> bool:
+    """True if address is one of bot_addrs (full address or bare local part)."""
     addr = (address or "").strip().lower()
     if not addr:
         return False
     local_part = addr.split("@", 1)[0]
-    return any(a == addr or ("@" not in a and a == local_part) for a in ntfy_addrs)
+    return any(a == addr or ("@" not in a and a == local_part) for a in bot_addrs)
+
+
+is_ntfy_bot_address = is_bot_address
 
 
 def chat_has_ntfy_bot(bot, accid, chat_id, ntfy_addrs) -> bool:

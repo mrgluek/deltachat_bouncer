@@ -173,6 +173,16 @@ def _env_flag(name: str, default: str) -> bool:
 # reply to Nick's last message, so Nick gets a notification (MENTION_REPLY=0 turns it off)
 MENTION_REPLY_ENABLED = _env_flag("MENTION_REPLY", "1")
 MENTION_COOLDOWN_SECONDS = 10  # per sender per group
+# A nick nobody in the group has is looked up with Username Bot (only in groups
+# where it is a member) and its short link sent privately to the author.
+# Username Bot is recognized by address (full addresses or local parts);
+# an empty USERNAME_LOOKUP_URL turns the lookup off.
+USERNAME_BOT_ADDRS = [
+    a.strip().lower()
+    for a in os.environ.get("USERNAME_BOT_ADDRS", "usernamebot").split(",")
+    if a.strip()
+]
+USERNAME_LOOKUP_URL = os.environ.get("USERNAME_LOOKUP_URL", "https://deltachat.id").strip()
 
 
 # Echo calls: the bot answers Delta Chat calls and echoes the caller's audio

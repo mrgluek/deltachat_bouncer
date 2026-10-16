@@ -1,8 +1,9 @@
 import os
 import sys
 import unittest
+import urllib.error
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # Mock deltachat2 if not installed
 try:
@@ -48,6 +49,7 @@ ALICE = 20   # sender
 GLUEK = 21
 GLEB = 22
 BOB = 23
+USERNAMEBOT = 24
 
 
 def contact(name, address, display_name=None):
@@ -81,6 +83,9 @@ class FakeRpc:
 
     def get_basic_chat_info(self, accid, chat_id):
         return {"chat_type": self.chat_type}
+
+    def create_chat_by_contact_id(self, accid, contact_id):
+        return 5000 + contact_id
 
     def send_msg(self, accid, chat_id, data):
         self.sent.append((chat_id, data))
@@ -185,6 +190,110 @@ class TestHandleMention(unittest.TestCase):
         self.assertFalse(self.send("@Gluek two", msg_id=201))
         self.assertTrue(self.send("@Gluek from bob", from_id=BOB, msg_id=202))
         self.assertEqual(len(self.rpc.sent), 2)
+
+
+class FakeResponse:
+    def __init__(self, body):
+        self.body = body
+
+    def read(self):
+        return self.body.encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+DOESNM = '{"username": "doesnm", "type": "contact", "display_name": "doesnm", "url": "https://deltachat.id/doesnm"}'
+
+
+class TestUsernameLookup(unittest.TestCase):
+    def setUp(self):
+        state._mention_anti_spam.clear()
+        mentions._username_cache.clear()
+        self.messages = {101: msg(101, GLUEK, "hi")}
+        self.rpc = FakeRpc(self.messages)
+        self.rpc.contacts[USERNAMEBOT] = contact("Username Bot", "usernamebot@chatmail.uk")
+        self.bot = SimpleNamespace(rpc=self.rpc)
+
+    def send(self, text, msg_id=200, from_id=ALICE):
+        m = msg(msg_id, from_id, text)
+        self.messages[msg_id] = m
+        return mentions.handle_mention(self.bot, 1, m)
+
+    @patch("mentions.urllib.request.urlopen")
+    def test_unknown_member_found_via_username_bot(self, urlopen):
+        urlopen.return_value = FakeResponse(DOESNM)
+        self.assertTrue(self.send("@doesnm посмотри?"))
+        self.assertEqual(urlopen.call_args[0][0].full_url, "https://deltachat.id/api/username/doesnm")
+        # Only the author is told, in private; nothing goes to the group
+        self.assertEqual(len(self.rpc.sent), 1)
+        chat_id, data = self.rpc.sent[0]
+        self.assertEqual(chat_id, 5000 + ALICE)
+        self.assertIn("https://deltachat.id/doesnm", data.text)
+        self.assertIn("not in this chat", data.text)
+        self.assertIsNone(data.quoted_message_id)
+
+    @patch("mentions.urllib.request.urlopen")
+    def test_group_username(self, urlopen):
+        urlopen.return_value = FakeResponse(
+            '{"username": "dcfans", "type": "group", "display_name": "DC Fans", "url": "https://deltachat.id/dcfans"}'
+        )
+        self.assertTrue(self.send("@dcfans hi"))
+        self.assertIn("group **DC Fans** (@dcfans)", self.rpc.sent[0][1].text)
+
+    @patch("mentions.urllib.request.urlopen")
+    def test_not_registered_is_silent_and_cached(self, urlopen):
+        urlopen.side_effect = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        self.assertFalse(self.send("@nobody hi"))
+        state._mention_anti_spam.clear()
+        self.assertFalse(self.send("@nobody hi", msg_id=201))
+        self.assertEqual(urlopen.call_count, 1)
+        self.assertEqual(self.rpc.sent, [])
+
+    @patch("mentions.urllib.request.urlopen")
+    def test_errors_are_not_cached(self, urlopen):
+        urlopen.side_effect = urllib.error.HTTPError("u", 429, "Too Many", {}, None)
+        self.assertFalse(self.send("@doesnm hi"))
+        urlopen.side_effect = None
+        urlopen.return_value = FakeResponse(DOESNM)
+        state._mention_anti_spam.clear()
+        self.assertTrue(self.send("@doesnm hi", msg_id=201))
+
+    @patch("mentions.urllib.request.urlopen")
+    def test_needs_username_bot_in_chat(self, urlopen):
+        del self.rpc.contacts[USERNAMEBOT]
+        # A look-alike display name is not enough
+        self.rpc.contacts[USERNAMEBOT] = contact("Username Bot", "fake@relay.example")
+        self.assertFalse(self.send("@doesnm hi"))
+        urlopen.assert_not_called()
+
+    @patch("mentions.urllib.request.urlopen")
+    def test_members_and_bad_nicks_are_not_looked_up(self, urlopen):
+        urlopen.return_value = FakeResponse(DOESNM)
+        self.assertTrue(self.send("@Gluek hi"))  # a member: normal reply in the group
+        self.assertEqual(self.rpc.sent[0][0], CHAT)
+        state._mention_anti_spam.clear()
+        self.assertFalse(self.send("@all hi", msg_id=201))
+        self.assertFalse(self.send("@ab hi", msg_id=202))
+        self.assertFalse(self.send("@user@relay.example hi", msg_id=203))
+        self.assertFalse(self.send("@Alice hi", msg_id=204))  # yourself
+        urlopen.assert_not_called()
+
+    @patch("mentions.urllib.request.urlopen")
+    def test_lookup_off_without_url(self, urlopen):
+        with patch.object(config, "USERNAME_LOOKUP_URL", ""):
+            self.assertFalse(self.send("@doesnm hi"))
+        urlopen.assert_not_called()
+
+    @patch("mentions.urllib.request.urlopen")
+    def test_lookup_respects_cooldown(self, urlopen):
+        urlopen.return_value = FakeResponse(DOESNM)
+        self.assertTrue(self.send("@doesnm hi"))
+        self.assertFalse(self.send("@doesnm again", msg_id=201))
+        self.assertEqual(len(self.rpc.sent), 1)
 
 
 if __name__ == "__main__":
