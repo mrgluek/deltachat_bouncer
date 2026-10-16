@@ -7,7 +7,8 @@ author's name (override_sender_name, shown as "~Name"), like TG Bridge does.
 
 When nobody in the chat has that nick but Username Bot is a member, the bot
 asks Username Bot's web API for it and tells only the author, in private, the
-short link (https://deltachat.id/nick). It never writes to the mentioned
+invite link (https://i.delta.chat/#..., opens right in the app) and the short
+link (https://deltachat.id/nick). It never writes to the mentioned
 person: that would carry group messages outside the group and let anyone make
 the bot message strangers.
 """
@@ -115,6 +116,7 @@ def resolve_mention(members, nick: str):
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}$")  # Username Bot's own rule
 USERNAME_STOPWORDS = {"all", "here", "everyone", "channel", "admin", "admins"}
 USERNAME_CACHE_SECONDS = 3600
+OFFICIAL_INVITE_PREFIX = "https://i.delta.chat/#"  # Delta Chat apps open these without a browser
 _username_cache: dict[str, tuple[float, dict | None]] = {}
 _username_cache_lock = threading.Lock()
 
@@ -129,7 +131,7 @@ def has_username_bot(members) -> bool:
 
 
 def lookup_username(nick: str) -> dict | None:
-    """Username Bot's public record for nick ({username, type, display_name, url}) or None.
+    """Username Bot's public record for nick ({username, type, display_name, url, invite_link}) or None.
     Found and not-found answers are cached for an hour; errors are not cached."""
     nick = nick.lower()
     if not config.USERNAME_LOOKUP_URL or not USERNAME_RE.match(nick) or nick in USERNAME_STOPWORDS:
@@ -178,7 +180,12 @@ def _format_username_hint(nick: str, record: dict) -> str:
     else:
         what = f"{who} is not in this chat"
         tail = "They won't see your message here: write to them directly, or send them this chat's invite link."
-    return f"🔎 {what}. Found via Username Bot:\n{record['url']}\n\n{tail}"
+    invite_link = record.get("invite_link") or ""
+    if not invite_link.startswith(OFFICIAL_INVITE_PREFIX):
+        # Older Username Bot without invite_link: the short link redirects to the invite
+        return f"🔎 {what}. Found via Username Bot:\n{record['url']}\n\n{tail}"
+    # i.delta.chat opens right in the app; the short link is nicer to share
+    return f"🔎 {what}. Found via Username Bot:\n{invite_link}\n\nShort link: {record['url']}\n\n{tail}"
 
 
 def _send_username_hint(bot, accid, msg, nick: str, members, cooldown_key, now: float) -> bool:

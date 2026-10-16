@@ -206,7 +206,10 @@ class FakeResponse:
         return False
 
 
-DOESNM = '{"username": "doesnm", "type": "contact", "display_name": "doesnm", "url": "https://deltachat.id/doesnm"}'
+DOESNM = (
+    '{"username": "doesnm", "type": "contact", "display_name": "doesnm", "url": "https://deltachat.id/doesnm",'
+    ' "invite_link": "https://i.delta.chat/#1A77AD6C&v=3&i=x&s=y&a=611w4j9vb%40cm.dc09.xyz&n=doesnm"}'
+)
 
 
 class TestUsernameLookup(unittest.TestCase):
@@ -232,9 +235,28 @@ class TestUsernameLookup(unittest.TestCase):
         self.assertEqual(len(self.rpc.sent), 1)
         chat_id, data = self.rpc.sent[0]
         self.assertEqual(chat_id, 5000 + ALICE)
-        self.assertIn("https://deltachat.id/doesnm", data.text)
+        # The i.delta.chat invite comes first (opens in the app), then the short link
+        self.assertIn("\nhttps://i.delta.chat/#1A77AD6C&v=3", data.text)
+        self.assertIn("Short link: https://deltachat.id/doesnm", data.text)
+        self.assertLess(data.text.index("i.delta.chat"), data.text.index("deltachat.id/doesnm"))
         self.assertIn("not in this chat", data.text)
         self.assertIsNone(data.quoted_message_id)
+
+    @patch("mentions.urllib.request.urlopen")
+    def test_short_link_only_without_trusted_invite(self, urlopen):
+        # Older Username Bot (no invite_link) or a link to some other site: only the short link
+        for extra in ('', ', "invite_link": "https://evil.example/#1A77"'):
+            mentions._username_cache.clear()
+            state._mention_anti_spam.clear()
+            self.rpc.sent.clear()
+            urlopen.return_value = FakeResponse(
+                '{"username": "doesnm", "type": "contact", "display_name": "doesnm", "url": "https://deltachat.id/doesnm"' + extra + '}'
+            )
+            self.assertTrue(self.send("@doesnm hi"))
+            text = self.rpc.sent[0][1].text
+            self.assertIn("\nhttps://deltachat.id/doesnm", text)
+            self.assertNotIn("Short link", text)
+            self.assertNotIn("evil", text)
 
     @patch("mentions.urllib.request.urlopen")
     def test_group_username(self, urlopen):
