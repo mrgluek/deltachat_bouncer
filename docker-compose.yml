@@ -49,6 +49,12 @@ services:
       - MEET_MUSIC_VOLUME
       - MEET_MUSIC_DUCK
       - VIRUSTOTAL_API_KEY
+      - IPINFO_TOKEN
+      - DNS_RESOLVERS
+      - NTFY_BOT_ADDRS
+      - MENTION_REPLY
+      - USERNAME_BOT_ADDRS
+      - USERNAME_LOOKUP_URL
       - U2NET_HOME=/app/data/u2net
       - REMBG_HOME=/app/data/u2net
       - ENABLE_REMBG

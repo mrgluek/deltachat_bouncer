@@ -23,6 +23,7 @@ import channels
 import config
 import database
 import dc_helpers
+import mentions
 import web.routes
 
 @config.dc_cli.on(events.NewMessage(is_info=True, is_bot=None, is_outgoing=None))
@@ -246,6 +247,10 @@ def handle_all_messages(bot, accid, event):
         config.logger.error(f"Error ingesting channel post for chat {msg.chat_id}: {e}")
         
     text = (msg.text or "").strip()
+
+    # ── @Nick mention: reply to Nick's last message so they get notified ──
+    if text.startswith("@") and not getattr(msg, "is_info", False):
+        mentions.handle_mention_async(bot, accid, msg)
     
     # ── Away Check ──
     if msg.from_id > 9 and msg.from_id != config.DC_CONTACT_ID_SELF and not text.startswith("/"):

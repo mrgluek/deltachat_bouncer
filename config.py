@@ -41,7 +41,7 @@ logger = logging.getLogger("bouncer_bot")
 if os.environ.get("CALL_DEBUG_LOG", "").strip().lower() not in ("1", "true", "yes", "on"):
     for _webrtc_logger in ("aioice", "aiortc"):
         logging.getLogger(_webrtc_logger).setLevel(logging.WARNING)
-VERSION = "2.35.0"
+VERSION = "2.36.0"
 
 # Ntfy Bot has its own /newgroup. In a group where it is a member, the bouncer
 # leaves plain /newgroup to it so one command does not create two groups.
@@ -167,6 +167,22 @@ FAQ_BOT_CHECK_TTL = 60         # seconds to cache "is a FAQ Bot in this group"
 
 def _env_flag(name: str, default: str) -> bool:
     return os.environ.get(name, default).strip().lower() not in ("0", "false", "no", "off", "")
+
+
+# @mentions: "@Nick text" at the start of a group message is sent again as a
+# reply to Nick's last message, so Nick gets a notification (MENTION_REPLY=0 turns it off)
+MENTION_REPLY_ENABLED = _env_flag("MENTION_REPLY", "1")
+MENTION_COOLDOWN_SECONDS = 10  # per sender per group
+# A nick nobody in the group has is looked up with Username Bot (only in groups
+# where it is a member) and its short link sent privately to the author.
+# Username Bot is recognized by address (full addresses or local parts);
+# an empty USERNAME_LOOKUP_URL turns the lookup off.
+USERNAME_BOT_ADDRS = [
+    a.strip().lower()
+    for a in os.environ.get("USERNAME_BOT_ADDRS", "usernamebot").split(",")
+    if a.strip()
+]
+USERNAME_LOOKUP_URL = os.environ.get("USERNAME_LOOKUP_URL", "https://deltachat.id").strip()
 
 
 # Echo calls: the bot answers Delta Chat calls and echoes the caller's audio

@@ -26,6 +26,7 @@ _chat_relays_anti_spam: dict[int, float] = {}
 _chat_search_anti_spam: dict[int, float] = {}
 _chat_cmping_anti_spam: dict[int, float] = {}
 _chat_slap_anti_spam: dict[int, float] = {}
+_mention_anti_spam: dict[tuple[int, int], float] = {}  # keyed by (chat id, sender id)
 _chat_sticker_anti_spam: dict[int, float] = {}
 _chat_stickernobg_anti_spam: dict[int, float] = {}
 _rembg_global_lock = threading.Lock()
