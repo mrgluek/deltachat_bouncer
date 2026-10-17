@@ -12,6 +12,9 @@ Syntax follows dig - ``/dns <name|IP> [TYPE] [@server|@auth]`` in any order:
 - ``@1.1.1.1`` / ``@dns.google`` asks that resolver; ``@auth`` asks the zone's
   authoritative name server directly, bypassing caches (as cmdeploy does).
 
+``/host <name|IP> [@server|@auth]`` is the short form, like the ``host`` tool:
+A, AAAA and MX of a name (following a CNAME), or PTR of an IP address.
+
 Besides DNS, the report makes one HTTPS request: the MTA-STS policy at
 https://mta-sts.<domain>/.well-known/mta-sts.txt - only to a public address,
 without redirects, at most 64 KB.
@@ -56,8 +59,21 @@ USAGE = (
     "• `/dns <IP>` — Reverse DNS (PTR)\n"
     "• Add `@1.1.1.1` to ask a specific resolver, or `@auth` to ask the domain's "
     "authoritative name server (bypasses caches, e.g. right after a change)\n"
-    f"Types: {', '.join(SUPPORTED_TYPES)}"
+    f"Types: {', '.join(SUPPORTED_TYPES)}\n"
+    "Just addresses and mail servers? `/host <name>`"
 )
+
+HOST_USAGE = (
+    "Usage (like the `host` tool):\n"
+    "• `/host <name>` — Addresses (A, AAAA) and mail servers (MX), e.g. `/host chatmail.uk`\n"
+    "• `/host <IP>` — Reverse DNS (PTR)\n"
+    "• Add `@1.1.1.1` to ask a specific resolver, or `@auth` to ask the domain's "
+    "authoritative name server\n"
+    "For other record types or a full mail check use `/dns`."
+)
+HOST_TYPES = ("A", "AAAA", "MX")
+# host(1) prints these for a failed lookup, e.g. "Host x not found: 3(NXDOMAIN)"
+_HOST_RCODES = {"nxdomain": "3(NXDOMAIN)", "servfail": "2(SERVFAIL)"}
 
 # DNS names here may contain "_" (_dmarc, _mta-sts._tcp ...), unlike host names
 _NAME_RE = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$")
@@ -241,6 +257,55 @@ def _display(name: str) -> str:
         return name.encode("ascii").decode("idna") if "xn--" in name else name
     except UnicodeError:
         return name
+
+
+# ── /host: the short form ──
+
+def _host_problem(name: str, r: Res) -> str:
+    if r.status in _HOST_RCODES:
+        return f"Host {name} not found: {_HOST_RCODES[r.status]}"
+    return f"{name}: {r.problem()}"
+
+
+def host_report(name, res: dns.resolver.Resolver, via: str) -> str:
+    """Lines as host(1) prints them: aliases, addresses and mail servers, or the PTR of an IP."""
+    head = f"🔎 **host {name.compressed if not isinstance(name, str) else _display(name)}** · {via}"
+    if not isinstance(name, str):
+        qname = dns.reversename.from_address(name.compressed).to_text().rstrip(".")
+        r = query(res, qname, "PTR")
+        if r.ok:
+            lines = [f"{qname} domain name pointer {p}" for p in r.records]
+        elif r.status == "nodata":
+            lines = [f"{qname} has no PTR record"]
+        else:
+            lines = [_host_problem(qname, r)]
+        return "\n".join([head] + lines)
+
+    with ThreadPoolExecutor(max_workers=len(HOST_TYPES)) as pool:
+        futs = {t: pool.submit(query, res, name, t) for t in HOST_TYPES}
+        results = {t: f.result() for t, f in futs.items()}
+    if any(r.status == "nxdomain" for r in results.values()):
+        return "\n".join([head, _host_problem(_display(name), results["A"])])
+
+    # A CNAME applies to every type, so any answer shows the chain; host prints it once
+    chain = next((r.chain for r in results.values() if r.chain), [])
+    lines = [f"{_display(src.rstrip('.'))} is an alias for {_display(dst)}" for src, dst in chain]
+    target = _display(chain[-1][1].rstrip(".")) if chain else _display(name)
+    a, aaaa, mx = results["A"], results["AAAA"], results["MX"]
+    lines += [f"{target} has address {x}" for x in a.records]
+    lines += [f"{target} has IPv6 address {x}" for x in aaaa.records]
+    # host sorts mail servers by preference; a null MX ("0 .") means the domain takes no mail
+    for rd in sorted(mx.rdata, key=lambda r: (r.preference, r.exchange.to_text())):
+        exchange = rd.exchange.to_text()
+        if exchange == ".":
+            lines.append(f"{target} accepts no mail (null MX)")
+        else:
+            lines.append(f"{target} mail is handled by {rd.preference} {_display(exchange)}")
+    # Errors other than "no records" are worth showing per type (e.g. AAAA timed out)
+    lines += [f"{target} {t}: {r.problem()}" for t, r in results.items() if r.status not in ("ok", "nodata")]
+    if not any(r.ok for r in results.values()) and len(lines) == len(chain):
+        lines.append(f"{target} has no A, AAAA or MX records")
+    return "\n".join([head] + lines)
 
 
 # ── MTA-STS policy over HTTPS ──
@@ -622,17 +687,33 @@ def _chatmail_section(domain: str, r: dict, mx_hosts, policy) -> list[str]:
 
 # ── Command, queue and cache ──
 
-def run(name, rtype, server) -> str:
+def _pick_resolver(name, server):
+    """(resolver, label, system resolver) for ``@server``, or an error text starting with ❌."""
     sysres = make_resolver()
     if server == "auth" and not isinstance(name, str):
         return "❌ `@auth` works with domain names only."
     resolved = _resolve_server(server, name if isinstance(name, str) else "", sysres)
     if isinstance(resolved, str):
         return f"❌ {resolved}"
-    res, via = resolved
+    return resolved[0], resolved[1], sysres
+
+
+def run(name, rtype, server) -> str:
+    picked = _pick_resolver(name, server)
+    if isinstance(picked, str):
+        return picked
+    res, via, sysres = picked
     if rtype:
         return format_records(name, rtype, res, via)
     return build_report(name, res, via, sysres)
+
+
+def run_host(name, server) -> str:
+    picked = _pick_resolver(name, server)
+    if isinstance(picked, str):
+        return picked
+    res, via, _ = picked
+    return host_report(name, res, via)
 
 
 def _cache_get(key):
@@ -651,11 +732,12 @@ def _cache_put(key, text):
             state._dns_cache.pop(oldest, None)
 
 
-def _worker(bot, accid, chat_id, msg_id, name, rtype, server, key):
+def _worker(bot, accid, chat_id, msg_id, job, key):
+    """Run ``job()`` (returns the reply text) on the pool; /dns and /host share it."""
     try:
         text = _cache_get(key)  # an identical request ahead in the queue may have filled it
         if text is None:
-            text = run(name, rtype, server)
+            text = job()
             if not text.startswith("❌"):
                 _cache_put(key, text)
         dc_helpers._react(bot, accid, msg_id, "❌" if text.startswith("❌") else "☑️")
@@ -672,20 +754,8 @@ def _worker(bot, accid, chat_id, msg_id, name, rtype, server, key):
 _pool = ThreadPoolExecutor(max_workers=config.DNS_WORKERS, thread_name_prefix="dns-report")
 
 
-@config.dc_cli.on(events.NewMessage(command="/dig"))  # alias, for dig users
-@config.dc_cli.on(events.NewMessage(command="/dns"))
-def dns_command(bot, accid, event):
-    msg = event.msg
-    payload = (event.payload or "").strip()
-    if not payload:
-        dc_helpers._send(bot, accid, msg.chat_id, USAGE, reply_to_id=msg.id)
-        return
-    parsed = parse_args(payload)
-    if isinstance(parsed, str):
-        dc_helpers._send(bot, accid, msg.chat_id, f"❌ {parsed}\n\n{USAGE}", reply_to_id=msg.id)
-        return
-    name, rtype, server = parsed
-    key = f"{name}|{rtype}|{server}"
+def _answer(bot, accid, msg, key, job):
+    """Reply from the cache, or queue ``job`` (reacting ⏳) unless the queue is full."""
     cached = _cache_get(key)
     if cached is not None:
         dc_helpers._send(bot, accid, msg.chat_id, cached, reply_to_id=msg.id)
@@ -700,4 +770,41 @@ def dns_command(bot, accid, event):
                          reply_to_id=msg.id)
         return
     dc_helpers._react(bot, accid, msg.id, "⏳")
-    _pool.submit(_worker, bot, accid, msg.chat_id, msg.id, name, rtype, server, key)
+    _pool.submit(_worker, bot, accid, msg.chat_id, msg.id, job, key)
+
+
+@config.dc_cli.on(events.NewMessage(command="/dig"))  # alias, for dig users
+@config.dc_cli.on(events.NewMessage(command="/dns"))
+def dns_command(bot, accid, event):
+    msg = event.msg
+    payload = (event.payload or "").strip()
+    if not payload:
+        dc_helpers._send(bot, accid, msg.chat_id, USAGE, reply_to_id=msg.id)
+        return
+    parsed = parse_args(payload)
+    if isinstance(parsed, str):
+        dc_helpers._send(bot, accid, msg.chat_id, f"❌ {parsed}\n\n{USAGE}", reply_to_id=msg.id)
+        return
+    name, rtype, server = parsed
+    # A lambda, not run itself: run is looked up when the job starts (tests patch it)
+    _answer(bot, accid, msg, f"{name}|{rtype}|{server}", lambda: run(name, rtype, server))
+
+
+@config.dc_cli.on(events.NewMessage(command="/host"))
+def host_command(bot, accid, event):
+    msg = event.msg
+    payload = (event.payload or "").strip()
+    if not payload:
+        dc_helpers._send(bot, accid, msg.chat_id, HOST_USAGE, reply_to_id=msg.id)
+        return
+    parsed = parse_args(payload)
+    if isinstance(parsed, str):
+        parsed = parsed.replace("/dns", "/host")  # parse_args' hints name /dns
+    elif parsed[1] and isinstance(parsed[0], str):  # an IP always comes back as PTR: that one is fine
+        parsed = f"`/host` shows A, AAAA and MX; for {parsed[1]} use `/dns {_display(parsed[0])} {parsed[1]}`."
+    if isinstance(parsed, str):
+        dc_helpers._send(bot, accid, msg.chat_id, f"❌ {parsed}\n\n{HOST_USAGE}", reply_to_id=msg.id)
+        return
+    name, _, server = parsed
+    # "host|" keeps these apart from /dns answers for the same name in the shared cache
+    _answer(bot, accid, msg, f"host|{name}|{server}", lambda: run_host(name, server))

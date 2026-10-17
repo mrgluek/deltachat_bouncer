@@ -650,6 +650,7 @@ def help_command(bot, accid, event):
         f"/virus <url> — Scan URL or replied file/link with VirusTotal.\n"
         f"/ip <IP | prefix | AS | domain> — IP / network / AS / host lookup (or reply to a message containing one).\n"
         f"/dns <domain> [TYPE] [@server|@auth] — DNS report (mail, chatmail checks) or one record type, like dig (also /dig).\n"
+        f"/host <domain | IP> [@server|@auth] — Addresses and mail servers (A, AAAA, MX), or reverse DNS, like host.\n"
         f"/whois <domain | IP | AS> — Registrar, expiry, owner; for IP / AS the holder and abuse contact.\n"
         f"/sticker — Convert replied or attached image to a WebP sticker.\n"
         f"/stickernobg — Convert image to a sticker with background removed.\n\n"

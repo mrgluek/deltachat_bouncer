@@ -348,5 +348,72 @@ class TestDnsCommand(unittest.TestCase):
         pool.submit.assert_not_called()
 
 
+    def test_host_usage_and_type_refused(self):
+        with patch.object(dc_helpers, "_send") as send:
+            dnscheck.host_command(self.bot, 1, self._event(""))
+            self.assertIn("like the `host` tool", send.call_args[0][3])
+            dnscheck.host_command(self.bot, 1, self._event("chatmail.uk TXT"))
+            self.assertIn("`/dns chatmail.uk TXT`", send.call_args[0][3])
+            dnscheck.host_command(self.bot, 1, self._event("not_a host!"))
+            self.assertIn("❌", send.call_args[0][3])
+
+    def test_host_cached_apart_from_dns(self):
+        with patch.object(dc_helpers, "_send") as send, patch.object(dc_helpers, "_react"), \
+                patch.object(dnscheck, "run", return_value="dns text"), \
+                patch.object(dnscheck, "run_host", return_value="host text") as run_host, \
+                patch.object(dnscheck, "_pool") as pool:
+            pool.submit.side_effect = lambda fn, *a: fn(*a)
+            dnscheck.dns_command(self.bot, 1, self._event("chatmail.uk"))
+            dnscheck.host_command(self.bot, 1, self._event("chatmail.uk"))
+            self.assertEqual(send.call_args[0][3], "host text")
+            dnscheck.host_command(self.bot, 1, self._event("chatmail.uk"))
+        self.assertEqual(run_host.call_count, 1)
+        self.assertEqual(state._dns_pending, 0)
+
+
+class TestHostReport(unittest.TestCase):
+    def host(self, zone, name=D):
+        with FakeDNS(zone):
+            return dnscheck.host_report(name, MagicMock(), "bot's resolver")
+
+    def test_addresses_and_mail_sorted(self):
+        text = self.host({(D, "A"): ok("A", "203.0.113.5"),
+                          (D, "AAAA"): ok("AAAA", "2001:db8::5"),
+                          (D, "MX"): ok("MX", f"20 mx2.{D}.", f"10 mx1.{D}.")})
+        self.assertEqual(text.splitlines()[1:], [
+            f"{D} has address 203.0.113.5",
+            f"{D} has IPv6 address 2001:db8::5",
+            f"{D} mail is handled by 10 mx1.{D}.",
+            f"{D} mail is handled by 20 mx2.{D}.",
+        ])
+
+    def test_cname_shown_once(self):
+        chain = [(f"www.{D}.", f"{D}.")]
+        text = self.host({(f"www.{D}", "A"): ok("A", "203.0.113.5", chain=chain),
+                          (f"www.{D}", "MX"): ok("MX", f"10 {D}.", chain=chain)}, name=f"www.{D}")
+        self.assertEqual(text.count("is an alias for"), 1)
+        self.assertIn(f"www.{D} is an alias for {D}.", text)
+        self.assertIn(f"{D} has address 203.0.113.5", text)
+
+    def test_nxdomain(self):
+        text = self.host({(D, t): dnscheck.Res("nxdomain") for t in ("A", "AAAA", "MX")})
+        self.assertIn(f"Host {D} not found: 3(NXDOMAIN)", text)
+
+    def test_no_records_and_errors(self):
+        self.assertIn("has no A, AAAA or MX records", self.host({}))
+        text = self.host({(D, "A"): ok("A", "203.0.113.5"), (D, "AAAA"): dnscheck.Res("timeout")})
+        self.assertIn(f"{D} AAAA: timed out", text)
+        self.assertNotIn("has no", text)
+
+    def test_null_mx(self):
+        self.assertIn("accepts no mail (null MX)", self.host({(D, "MX"): ok("MX", "0 .")}))
+
+    def test_ptr(self):
+        ip = ipaddress.ip_address("203.0.113.5")
+        q = "5.113.0.203.in-addr.arpa"
+        self.assertIn(f"{q} domain name pointer {D}.", self.host({(q, "PTR"): ok("PTR", f"{D}.")}, name=ip))
+        self.assertIn(f"{q} has no PTR record", self.host({}, name=ip))
+
+
 if __name__ == "__main__":
     unittest.main()
