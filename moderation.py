@@ -361,7 +361,7 @@ def _perform_autokick_warnings_for_chat(bot, accid, chat_id: int, days: int, for
                 f"The following member(s) will be automatically removed due to inactivity (threshold: {days}d). "
                 f"To remain in the group, please post a message here:\n\n" + "\n".join(lines)
             )
-            dc_helpers._send(bot, accid, chat_id, group_msg)
+            dc_helpers._send(bot, accid, chat_id, group_msg, priority=dc_helpers.PRIO_LOW)
             database.set_chat_last_autokick_warn_at(chat_id, now)
         except Exception as e:
             config.logger.error(f"Failed to send daily autokick warning broadcast in chat {chat_id}: {e}")

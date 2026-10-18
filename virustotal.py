@@ -292,7 +292,8 @@ def _scan_url_virustotal(bot, accid, chat_id, msg_id, url: str, vt_key: str, max
 
         status_msg_id = None
         if bot and chat_id:
-            status_msg_id = dc_helpers._send(bot, accid, chat_id, interim_text, reply_to_id=msg_id)
+            # wait: the report later replaces this message, so its id is needed
+            status_msg_id = dc_helpers._send(bot, accid, chat_id, interim_text, reply_to_id=msg_id, wait=True)
             if msg_id:
                 dc_helpers._react(bot, accid, msg_id, "⏳")
 
@@ -304,11 +305,7 @@ def _scan_url_virustotal(bot, accid, chat_id, msg_id, url: str, vt_key: str, max
                 if attrs.get("status") == "completed":
                     report_text, reaction = _format_vt_url_report(url, url_id, attrs)
                     if bot and chat_id and status_msg_id:
-                        try:
-                            bot.rpc.send_edit_request(accid, status_msg_id, report_text)
-                        except Exception as e:
-                            config.logger.warning(f"Failed to edit status message {status_msg_id}: {e}")
-                            dc_helpers._send(bot, accid, chat_id, report_text, reply_to_id=msg_id)
+                        dc_helpers._edit_or_send(bot, accid, chat_id, status_msg_id, report_text, reply_to_id=msg_id)
                         if msg_id:
                             dc_helpers._react(bot, accid, msg_id, reaction)
                         return None, None
@@ -321,11 +318,7 @@ def _scan_url_virustotal(bot, accid, chat_id, msg_id, url: str, vt_key: str, max
             f"🌐 [View report on VirusTotal]({gui_link})"
         )
         if bot and chat_id and status_msg_id:
-            try:
-                bot.rpc.send_edit_request(accid, status_msg_id, timeout_text)
-            except Exception as e:
-                config.logger.warning(f"Failed to edit status message {status_msg_id}: {e}")
-                dc_helpers._send(bot, accid, chat_id, timeout_text, reply_to_id=msg_id)
+            dc_helpers._edit_or_send(bot, accid, chat_id, status_msg_id, timeout_text, reply_to_id=msg_id)
             if msg_id:
                 dc_helpers._react(bot, accid, msg_id, "⚪️")
             return None, None
@@ -397,7 +390,8 @@ def _scan_file_virustotal(bot, accid, chat_id, msg_id, file_info: dict, vt_key: 
 
         status_msg_id = None
         if bot and chat_id:
-            status_msg_id = dc_helpers._send(bot, accid, chat_id, interim_text, reply_to_id=msg_id)
+            # wait: the report later replaces this message, so its id is needed
+            status_msg_id = dc_helpers._send(bot, accid, chat_id, interim_text, reply_to_id=msg_id, wait=True)
             if msg_id:
                 dc_helpers._react(bot, accid, msg_id, "⏳")
 
@@ -409,11 +403,7 @@ def _scan_file_virustotal(bot, accid, chat_id, msg_id, file_info: dict, vt_key: 
                 if attrs.get("status") == "completed":
                     report_text, reaction = _format_vt_file_report(file_name, file_size, sha256, attrs)
                     if bot and chat_id and status_msg_id:
-                        try:
-                            bot.rpc.send_edit_request(accid, status_msg_id, report_text)
-                        except Exception as e:
-                            config.logger.warning(f"Failed to edit status message {status_msg_id}: {e}")
-                            dc_helpers._send(bot, accid, chat_id, report_text, reply_to_id=msg_id)
+                        dc_helpers._edit_or_send(bot, accid, chat_id, status_msg_id, report_text, reply_to_id=msg_id)
                         if msg_id:
                             dc_helpers._react(bot, accid, msg_id, reaction)
                         return None, None
@@ -427,11 +417,7 @@ def _scan_file_virustotal(bot, accid, chat_id, msg_id, file_info: dict, vt_key: 
             f"🌐 [View report on VirusTotal]({gui_link})"
         )
         if bot and chat_id and status_msg_id:
-            try:
-                bot.rpc.send_edit_request(accid, status_msg_id, timeout_text)
-            except Exception as e:
-                config.logger.warning(f"Failed to edit status message {status_msg_id}: {e}")
-                dc_helpers._send(bot, accid, chat_id, timeout_text, reply_to_id=msg_id)
+            dc_helpers._edit_or_send(bot, accid, chat_id, status_msg_id, timeout_text, reply_to_id=msg_id)
             if msg_id:
                 dc_helpers._react(bot, accid, msg_id, "⚪️")
             return None, None

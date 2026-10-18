@@ -157,7 +157,7 @@ class TestBouncerBot(unittest.TestCase):
         mock_bot.rpc.send_msg.return_value = 50001
         state.dc_accid = 1
 
-        with patch.object(dc_helpers, '_send', return_value=50001) as mock_send:
+        with patch.object(dc_helpers, '_send_now', return_value=50001) as mock_send:
             # 1. Server 1 fails -> Incident created, _send called
             database.record_cmping_server_down("node1.cc", int(time.time()), "Incoming from node2.cc failed")
             state._cmping_server_status = {"node1.cc": False, "node2.cc": True, "node3.cc": True}
@@ -165,7 +165,7 @@ class TestBouncerBot(unittest.TestCase):
             cmping._sync_cmping_incident_alerts(mock_bot, 1, all_servers)
 
             mock_send.assert_called_once()
-            sent_text = mock_send.call_args[0][3]
+            sent_text = mock_send.call_args[0][3].text
             self.assertIn("🚨 **CMPing Incident #", sent_text)
             self.assertIn("node1.cc", sent_text)
             self.assertIn("Incoming from node2.cc failed", sent_text)
@@ -632,7 +632,7 @@ class TestBouncerBot(unittest.TestCase):
         state._cmping_incident_last_edit_state.clear()
 
         # 1. Initial alert
-        with patch.object(dc_helpers, '_send', return_value=60001):
+        with patch.object(dc_helpers, '_send_now', return_value=60001):
             cmping._sync_cmping_incident_alerts(mock_bot, 1, servers, force_update=False)
 
         inc = database.get_active_cmping_incident()
@@ -669,7 +669,7 @@ class TestBouncerBot(unittest.TestCase):
         t0 = 1000000
 
         # 1. Srv 1 goes down at t0 -> Incident #1 created
-        with patch('time.time', return_value=t0), patch.object(dc_helpers, '_send', return_value=70001):
+        with patch('time.time', return_value=t0), patch.object(dc_helpers, '_send_now', return_value=70001):
             database.record_cmping_server_down("srv1.test.org", t0, "Timeout")
             state._cmping_server_status = {"srv1.test.org": False, "srv2.test.org": True}
             state._cmping_server_errors = {"srv1.test.org": "Timeout"}
@@ -683,7 +683,7 @@ class TestBouncerBot(unittest.TestCase):
 
         # 2. Srv 2 goes down at t0 + 4000s (> 1 hour gap) -> Incident #2 created!
         t1 = t0 + 4000
-        with patch('time.time', return_value=t1), patch.object(dc_helpers, '_send', return_value=70002):
+        with patch('time.time', return_value=t1), patch.object(dc_helpers, '_send_now', return_value=70002):
             database.record_cmping_server_down("srv2.test.org", t1, "Refused")
             state._cmping_server_status["srv2.test.org"] = False
             state._cmping_server_errors["srv2.test.org"] = "Refused"
@@ -780,7 +780,7 @@ class TestBouncerBot(unittest.TestCase):
         t0 = 1000000
 
         # 1. Goes DOWN at t0 -> Incident #1 created with _send
-        with patch('time.time', return_value=t0), patch.object(dc_helpers, '_send', return_value=80001) as mock_send:
+        with patch('time.time', return_value=t0), patch.object(dc_helpers, '_send_now', return_value=80001) as mock_send:
             database.record_cmping_server_down("flap.example.com", t0, "Timeout")
             state._cmping_server_status = {"flap.example.com": False}
             state._cmping_server_errors = {"flap.example.com": "Timeout"}

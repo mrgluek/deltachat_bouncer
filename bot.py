@@ -497,6 +497,7 @@ def setup_custom_command_parser(bot, allowed_prefixes):
 def on_start(bot, args):
     setup_custom_command_parser(bot, ["boun", "stew"])
     state.dc_bot_instance = bot
+    dc_helpers.outbox.start()  # from now on messages are queued and paced (outbox.py) instead of sent inline
     
     # Monkey-patch bot._process_messages and bot._process_message to allow processing of system/info messages
     from deltachat2 import SpecialContactId, Bot, EventType

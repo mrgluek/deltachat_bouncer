@@ -28,6 +28,21 @@ import web.routes
 
 @config.dc_cli.on(events.NewMessage(is_info=True, is_bot=None, is_outgoing=None))
 
+
+def _expire_invite_message(bot, accid, dc_chat_id, invite_msg_id):
+    """Deletes a used single-use invite for everyone, or marks it expired if that fails."""
+    try:
+        bot.rpc.delete_messages_for_all(accid, [invite_msg_id])
+        config.logger.info(f"Deleted invite message {invite_msg_id} for all in private chat {dc_chat_id}")
+    except Exception as del_err:
+        config.logger.warning(f"Failed to delete invite message {invite_msg_id} for all: {del_err}. Attempting to edit instead...")
+        try:
+            bot.rpc.send_edit_request(accid, invite_msg_id, "❌ This single-use invite link has expired.")
+            config.logger.info(f"Edited invite message {invite_msg_id} to mark as expired")
+        except Exception as edit_err:
+            config.logger.error(f"Failed to edit invite message {invite_msg_id}: {edit_err}")
+
+
 def handle_dc_info_message(bot, accid, event):
     msg = event.msg
     dc_chat_id = msg.chat_id
@@ -209,16 +224,9 @@ def handle_dc_info_message(bot, accid, event):
                         config.logger.error(f"Failed to withdraw invite link: {qr_err}")
 
                     if invite_msg_id:
-                        try:
-                            bot.rpc.delete_messages_for_all(accid, [invite_msg_id])
-                            config.logger.info(f"Deleted invite message {invite_msg_id} for all in private chat {dc_chat_id}")
-                        except Exception as del_err:
-                            config.logger.warning(f"Failed to delete invite message {invite_msg_id} for all: {del_err}. Attempting to edit instead...")
-                            try:
-                                bot.rpc.send_edit_request(accid, invite_msg_id, "❌ This single-use invite link has expired.")
-                                config.logger.info(f"Edited invite message {invite_msg_id} to mark as expired")
-                            except Exception as edit_err:
-                                config.logger.error(f"Failed to edit invite message {invite_msg_id}: {edit_err}")
+                        # Deleting for all is a message too: through the outbox, after the more urgent sends
+                        dc_helpers.outbox.submit(lambda: _expire_invite_message(bot, accid, dc_chat_id, invite_msg_id),
+                                                 priority=dc_helpers.PRIO_LOW, label=f"expire invite {invite_msg_id}")
 
                     database.update_catalog_chat_invite_link(dc_chat_id, None, None)
             except Exception as e:
@@ -651,7 +659,8 @@ def handle_all_messages(bot, accid, event):
                                 temp_path = f.name
                             
                             # Send the vCard as a message
-                            bot.rpc.send_msg(accid, msg.chat_id, MsgData(file=temp_path, viewtype="Vcard"))
+                            # wait: the temp file is deleted right after, the core reads it when sending
+                            dc_helpers.queue_msg(bot, accid, msg.chat_id, MsgData(file=temp_path, viewtype="Vcard"), wait=True)
                             config.logger.debug(f"Successfully shared contact {contact_id}")
                         finally:
                             if temp_path and os.path.exists(temp_path):

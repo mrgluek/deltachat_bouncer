@@ -198,7 +198,7 @@ def _send_username_hint(bot, accid, msg, nick: str, members, cooldown_key, now: 
         return False
     try:
         private_chat_id = bot.rpc.create_chat_by_contact_id(accid, msg.from_id)
-        bot.rpc.send_msg(accid, private_chat_id, MsgData(text=_format_username_hint(nick, record)))
+        dc_helpers.queue_msg(bot, accid, private_chat_id, MsgData(text=_format_username_hint(nick, record)))
     except Exception as e:
         config.logger.error(f"Failed to send username hint to {msg.from_id}: {e}")
         return False
@@ -290,7 +290,7 @@ def handle_mention(bot, accid, msg) -> bool:
 
     state._mention_anti_spam[key] = now
     try:
-        bot.rpc.send_msg(accid, msg.chat_id, MsgData(
+        dc_helpers.queue_msg(bot, accid, msg.chat_id, MsgData(
             text=text,
             override_sender_name=sender_name,
             quoted_message_id=target_msg_id,

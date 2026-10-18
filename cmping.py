@@ -422,6 +422,18 @@ def _get_cmping_incident_update_interval(duration_seconds: int) -> int:
         return 3600     # After 24 hours: update once an hour
 
 
+def _queue_cmping_incident_message(bot, accid, inc_id, chat_id, msg_text, store_new_id: bool):
+    """One outbox job per incident and report chat: edits its message, or sends one.
+
+    The message id is read when the job runs, so a first message still waiting in the outbox is
+    merged with later updates and goes out once, with the latest text."""
+    dc_helpers._edit_or_send(
+        bot, accid, chat_id,
+        lambda: database.get_cmping_incident_msg_ids(inc_id).get(chat_id),
+        msg_text, priority=dc_helpers.PRIO_ALERT, key=("cmping_incident", inc_id, chat_id),
+        on_new_id=(lambda new_id: database.set_cmping_incident_msg_id(inc_id, chat_id, new_id)) if store_new_id else None)
+
+
 def _sync_cmping_incident_alerts(bot, accid, all_servers, force_update: bool = False):
     report_chats = database.get_all_cmping_report_chats()
     if not report_chats:
@@ -471,24 +483,9 @@ def _sync_cmping_incident_alerts(bot, accid, all_servers, force_update: bool = F
                 is_resolved=False
             )
 
+            state._cmping_incident_last_edit_state[inc_id] = (now, status_sig)
             for chat_id in report_chats:
-                msg_id = chat_msg_ids.get(chat_id)
-                if msg_id:
-                    try:
-                        bot.rpc.send_edit_request(accid, msg_id, msg_text)
-                        state._cmping_incident_last_edit_state[inc_id] = (now, status_sig)
-                        config.logger.info(f"CMPing monitor: edited incident #{inc_id} message {msg_id} in chat {chat_id}")
-                    except Exception as e:
-                        config.logger.warning(f"CMPing monitor: failed to edit incident message {msg_id} in chat {chat_id} (sending new message): {e}")
-                        new_msg_id = dc_helpers._send(bot, accid, chat_id, msg_text)
-                        if new_msg_id:
-                            database.set_cmping_incident_msg_id(inc_id, chat_id, new_msg_id)
-                            state._cmping_incident_last_edit_state[inc_id] = (now, status_sig)
-                else:
-                    new_msg_id = dc_helpers._send(bot, accid, chat_id, msg_text)
-                    if new_msg_id:
-                        database.set_cmping_incident_msg_id(inc_id, chat_id, new_msg_id)
-                        state._cmping_incident_last_edit_state[inc_id] = (now, status_sig)
+                _queue_cmping_incident_message(bot, accid, inc_id, chat_id, msg_text, store_new_id=True)
 
         else:
             # Resolved incident
@@ -510,15 +507,5 @@ def _sync_cmping_incident_alerts(bot, accid, all_servers, force_update: bool = F
                 resolved_at=now
             )
 
-            chat_msg_ids = database.get_cmping_incident_msg_ids(inc_id)
             for chat_id in report_chats:
-                msg_id = chat_msg_ids.get(chat_id)
-                if msg_id:
-                    try:
-                        bot.rpc.send_edit_request(accid, msg_id, msg_text)
-                        config.logger.info(f"CMPing monitor: resolved incident #{inc_id} by editing message {msg_id} in chat {chat_id}")
-                    except Exception as e:
-                        config.logger.warning(f"CMPing monitor: failed to edit resolved incident message {msg_id} in chat {chat_id}: {e}")
-                        dc_helpers._send(bot, accid, chat_id, msg_text)
-                else:
-                    dc_helpers._send(bot, accid, chat_id, msg_text)
+                _queue_cmping_incident_message(bot, accid, inc_id, chat_id, msg_text, store_new_id=False)

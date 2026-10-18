@@ -140,22 +140,21 @@ def convert_to_sticker_webp(src_path: str, dest_path: str, remove_bg: bool = Fal
 
 def _send_sticker(bot, accid, chat_id, sticker_path, reply_to_id=None):
     """Send a sticker message to a chat, falling back to send_msg with viewtype=Sticker or send_sticker RPC."""
-    sent_msg_id = None
-    try:
-        sent_msg_id = bot.rpc.send_msg(accid, chat_id, MsgData(file=sticker_path, viewtype="Sticker", quoted_message_id=reply_to_id))
-    except Exception as e:
-        config.logger.warning(f"Failed to send sticker via send_msg: {e}. Trying send_sticker RPC...")
-        if hasattr(bot.rpc, "send_sticker"):
-            try:
-                sent_msg_id = bot.rpc.send_sticker(accid, chat_id, sticker_path)
-            except Exception as e2:
-                config.logger.error(f"Failed to send sticker via send_sticker RPC: {e2}")
-                raise
-        else:
+    def job():
+        try:
+            return bot.rpc.send_msg(accid, chat_id, MsgData(file=sticker_path, viewtype="Sticker", quoted_message_id=reply_to_id))
+        except Exception as e:
+            config.logger.warning(f"Failed to send sticker via send_msg: {e}. Trying send_sticker RPC...")
+            if hasattr(bot.rpc, "send_sticker"):
+                try:
+                    return bot.rpc.send_sticker(accid, chat_id, sticker_path)
+                except Exception as e2:
+                    config.logger.error(f"Failed to send sticker via send_sticker RPC: {e2}")
+                    raise
             raise
 
-
-    return sent_msg_id
+    # Through the outbox; waits for it, since the caller deletes the sticker file afterwards
+    return dc_helpers.outbox.submit(job, label=f"sticker to chat {chat_id}").result()
 
 
 def _bg_sticker_worker(bot, accid, chat_id, msg_id, file_info, remove_bg):

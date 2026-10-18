@@ -88,14 +88,15 @@ class MonitorTestBase(unittest.TestCase):
         self.sent = []
         ids = itertools.count(1000)
 
-        def fake_send(bot, accid, chat_id, text, reply_to_id=None):
+        def fake_send(bot, accid, chat_id, msg_data):
             msg_id = next(ids)
-            self.sent.append((chat_id, msg_id, text))
+            self.sent.append((chat_id, msg_id, msg_data.text))
             return msg_id
 
         self.patches = [
             patch("cmcall_monitor.dc_helpers._get_bot_domains", side_effect=lambda b, a: [self.servers[0]]),
-            patch("cmcall_monitor.dc_helpers._send", side_effect=fake_send),
+            # Alert messages are sent from inside the outbox job (_edit_or_send -> _send_now)
+            patch("cmcall_monitor.dc_helpers._send_now", side_effect=fake_send),
         ]
         for p in self.patches:
             p.start()

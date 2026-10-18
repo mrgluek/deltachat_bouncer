@@ -791,11 +791,12 @@ def invite_command(bot, accid, event, skip_cooldown: bool = False):
                 temp_path = f.name
             
             # Send file + text
-            sent_msg_id = bot.rpc.send_msg(accid, msg.chat_id, MsgData(file=temp_path, text=invite_text))
+            # wait: the id is stored for the invite's expiry, and the QR file is deleted below
+            sent_msg_id = dc_helpers.queue_msg(bot, accid, msg.chat_id, MsgData(file=temp_path, text=invite_text), wait=True)
             
         except Exception as qr_err:
             config.logger.warning(f"Could not generate QR image, falling back to text message: {qr_err}")
-            sent_msg_id = dc_helpers._send(bot, accid, msg.chat_id, invite_text)
+            sent_msg_id = dc_helpers._send(bot, accid, msg.chat_id, invite_text, wait=True)
         finally:
             if temp_path and os.path.exists(temp_path):
                 try:

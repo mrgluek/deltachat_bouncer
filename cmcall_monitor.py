@@ -232,18 +232,14 @@ def sync_alerts(bot, accid, servers: list[str], now=None) -> None:
 
 def _publish(bot, accid, event: dict, report_chats: list[int], now: float) -> None:
     text = format_event_message(event, now)
-    msg_ids = database.get_cmcall_event_msg_ids(event["id"])
+    event_id = event["id"]
     for chat_id in report_chats:
-        msg_id = msg_ids.get(chat_id)
-        if msg_id:
-            try:
-                bot.rpc.send_edit_request(accid, msg_id, text)
-                continue
-            except Exception as e:
-                config.logger.warning(f"CMCall monitor: editing alert {msg_id} in chat {chat_id} failed: {e}")
-        new_id = dc_helpers._send(bot, accid, chat_id, text)
-        if new_id:
-            database.set_cmcall_event_msg_id(event["id"], chat_id, new_id)
+        # One outbox job per event and chat; the message id is read when it runs (see cmping)
+        dc_helpers._edit_or_send(
+            bot, accid, chat_id,
+            lambda chat_id=chat_id: database.get_cmcall_event_msg_ids(event_id).get(chat_id),
+            text, priority=dc_helpers.PRIO_ALERT, key=("cmcall_event", event_id, chat_id),
+            on_new_id=lambda new_id, chat_id=chat_id: database.set_cmcall_event_msg_id(event_id, chat_id, new_id))
 
 
 # --------------------------------------------------------------------------

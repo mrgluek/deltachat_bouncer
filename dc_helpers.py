@@ -14,6 +14,7 @@ from deltachat2 import MsgData
 import database
 import state
 from config import logger
+from outbox import outbox, PRIO_ALERT, PRIO_REPLY, PRIO_LOW  # noqa: F401  (priorities for callers)
 
 
 def _get_domain_lock(domain: str) -> threading.Lock:
@@ -271,34 +272,86 @@ def _get_chat_autokick_warn_threshold(autokick_days: int) -> int:
     return max(1, autokick_days - 1)
 
 
-def _send(bot, accid, chat_id, text, reply_to_id=None, file=None, viewtype=None):
+def _send_now(bot, accid, chat_id, msg_data):
+    """send_msg right now (inside an outbox job); errors are logged and give None."""
+    try:
+        return bot.rpc.send_msg(accid, chat_id, msg_data)
+    except Exception as e:
+        if "not a member of the chat" in str(e).lower():
+            logger.warning(f"Cannot send message to chat {chat_id}: bot is not a member of the chat.")
+        else:
+            logger.error(f"Failed to send message to chat {chat_id}: {e}")
+        return None
+
+
+def _result(fut, wait: bool):
+    """The job's result if it ran already (outbox not started, as in tests) or wait is set, else None."""
+    if wait or fut.done():
+        return fut.result()
+    return None
+
+
+def queue_msg(bot, accid, chat_id, msg_data, priority=PRIO_REPLY, wait=False, label=None):
+    """Sends a prepared MsgData through the paced outbox (see outbox.py).
+
+    wait=True blocks until it was sent and returns the msg_id - for a message that is edited
+    later, or whose file is deleted right after (the core reads the file when it sends)."""
+    fut = outbox.submit(lambda: _send_now(bot, accid, chat_id, msg_data), priority=priority,
+                        label=label or f"message to chat {chat_id}")
+    return _result(fut, wait)
+
+
+def _send(bot, accid, chat_id, text, reply_to_id=None, file=None, viewtype=None, priority=PRIO_REPLY, wait=False):
+    """Queues a text (optionally with a file) in the paced outbox; default priority: a reply.
+
+    Returns the msg_id only with wait=True or when sent right away (tests), else None."""
     msg_data = MsgData(text=text)
     if reply_to_id:
         msg_data.quoted_message_id = reply_to_id
     if file:
         msg_data.file = file
         msg_data.viewtype = viewtype or "File"
-
-    try:
-        msg_id = bot.rpc.send_msg(accid, chat_id, msg_data)
+    return queue_msg(bot, accid, chat_id, msg_data, priority=priority, wait=wait)
 
 
-        return msg_id
-    except Exception as e:
-        error_str = str(e).lower()
-        if "not a member of the chat" in error_str:
-            logger.warning(f"Cannot send message to chat {chat_id}: bot is not a member of the chat.")
-            return None
-        logger.error(f"Failed to send message to chat {chat_id}: {e}")
-        return None
+def _edit_or_send(bot, accid, chat_id, msg_id, text, priority=PRIO_REPLY, key=None, reply_to_id=None,
+                  on_new_id=None, wait=False):
+    """Queues an edit of msg_id, or a new message if there is none or the edit fails.
+
+    msg_id may be a callable returning the current id: it is read when the job runs, so a first
+    message still waiting is merged with later updates (same key) and goes out once, as a new
+    message with the latest text. on_new_id(new_id) stores a new message's id. key defaults to
+    the message (a newer edit of it replaces a queued one)."""
+    def job():
+        current = msg_id() if callable(msg_id) else msg_id
+        if current:
+            try:
+                bot.rpc.send_edit_request(accid, current, text)
+                return current
+            except Exception as e:
+                logger.warning(f"Editing message {current} in chat {chat_id} failed (sending a new one): {e}")
+        msg_data = MsgData(text=text)
+        if reply_to_id:
+            msg_data.quoted_message_id = reply_to_id
+        new_id = _send_now(bot, accid, chat_id, msg_data)
+        if new_id and on_new_id:
+            on_new_id(new_id)
+        return new_id
+
+    if key is None and msg_id and not callable(msg_id):
+        key = ("edit", msg_id)
+    fut = outbox.submit(job, priority=priority, key=key, label=f"edit/message in chat {chat_id}")
+    return _result(fut, wait)
 
 
-def _react(bot, accid, msg_id, reaction):
-    """Add a reaction to a message."""
-    try:
-        bot.rpc.send_reaction(accid, msg_id, [reaction] if reaction else [])
-    except Exception as e:
-        logger.warning(f"Failed to send reaction {reaction}: {e}")
+def _react(bot, accid, msg_id, reaction, priority=PRIO_REPLY):
+    """Queues a reaction; keyed by message, so a ⏳ still waiting is replaced by the final one."""
+    def job():
+        try:
+            bot.rpc.send_reaction(accid, msg_id, [reaction] if reaction else [])
+        except Exception as e:
+            logger.warning(f"Failed to send reaction {reaction}: {e}")
+    outbox.submit(job, priority=priority, key=("reaction", msg_id), label=f"reaction {reaction} on {msg_id}")
 
 
 def _queue_delayed_command(bot, accid, msg, command_key: str, remaining_sec: float, handler_fn, *args, **kwargs) -> bool:
