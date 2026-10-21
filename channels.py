@@ -240,6 +240,20 @@ def _backfill_existing_catalog_channels(bot, accid):
         config.logger.warning(f"Error in _backfill_existing_catalog_channels: {e}")
 
 
+def short_description(text: str, limit: int) -> str:
+    """One-line summary of a description for the catalog lists.
+
+    Chat descriptions are often several lines (rules, links); the lists show only
+    the first non-empty line, cut at a word boundary. The full text stays stored.
+    """
+    first = next((line for line in (text or "").splitlines() if line.strip()), "")
+    first = " ".join(first.split())
+    if len(first) <= limit:
+        return first
+    cut = first[:limit].rsplit(" ", 1)[0] if " " in first[:limit] else first[:limit]
+    return cut.rstrip(" ,.;:-—") + "…"
+
+
 @config.dc_cli.on(events.NewMessage(command="/chats"))
 def chats_command(bot, accid, event):
     msg = event.msg
@@ -251,9 +265,7 @@ def chats_command(bot, accid, event):
     lines = []
     for ch in catalog_chats:
         private_str = "🔐 " if ch['is_private'] else ""
-        desc = ch['description'] or ""
-        if len(desc) > 100:
-            desc = desc[:100] + "..."
+        desc = short_description(ch['description'], 100)
         desc_str = f" {desc}" if desc else ""
         lines.append(f"/chat{ch['id']} {private_str}**{ch['name']}**{desc_str} 👥 {ch['member_count']}")
 
@@ -292,10 +304,8 @@ def dchannels_command(bot, accid, event):
         else:
             entry_parts = [f"/dchannel{ch['id']} 🔒 **{ch['name']}** [Unlisted]"]
 
-        desc = (ch.get('description') or "").strip()
+        desc = short_description(ch.get('description'), 200)
         if desc:
-            if len(desc) > 200:
-                desc = desc[:200] + "..."
             entry_parts.append(desc)
         token = ch.get('token')
         if base_url and token and database.channel_web_visible(ch):

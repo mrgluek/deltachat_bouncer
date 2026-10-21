@@ -420,5 +420,40 @@ class TestReports(CatalogReviewTestBase):
         self.assertEqual(database.get_catalog_reports("channel", self.cid)[0]["reason"], "phishing")
 
 
+
+class TestShortDescription(unittest.TestCase):
+    def test_first_line_only(self):
+        self.assertEqual(channels.short_description("Мяу! 🐱\n\n🔗 https://deltachat.id/ru-cats", 100), "Мяу! 🐱")
+
+    def test_skips_leading_blank_lines_and_collapses_spaces(self):
+        self.assertEqual(channels.short_description("\n  \n  Hello   world \nmore", 100), "Hello world")
+
+    def test_long_line_is_cut_at_word(self):
+        self.assertEqual(channels.short_description("one two three four", 12), "one two…")
+
+    def test_long_word_is_cut_hard(self):
+        self.assertEqual(channels.short_description("x" * 20, 5), "xxxxx…")
+
+    def test_empty(self):
+        self.assertEqual(channels.short_description(None, 100), "")
+
+    def test_chats_list_uses_first_line(self):
+        database.close_db()
+        database.DB_PATH = TEST_DB
+        database.init_db()
+        try:
+            database.add_catalog_chat(1, "Delta Cats", "Мяу! 🐱\n\n🔗 https://deltachat.id/ru-cats 👥 7", 3)
+            sent = []
+            with patch("dc_helpers._send", side_effect=lambda b, a, c, text, *x, **k: sent.append(text)):
+                channels.chats_command(MagicMock(), 1, SimpleNamespace(msg=_msg("/chats")))
+            self.assertIn("**Delta Cats** Мяу! 🐱 👥 3", sent[-1])
+            self.assertNotIn("deltachat.id", sent[-1])
+        finally:
+            database.close_db()
+            for path in (TEST_DB, TEST_DB + "-wal", TEST_DB + "-shm"):
+                if os.path.exists(path):
+                    os.remove(path)
+
+
 if __name__ == "__main__":
     unittest.main()
