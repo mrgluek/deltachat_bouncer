@@ -83,7 +83,7 @@ def _admin_chat_id(bot, accid):
     if not admin_email:
         return None
     try:
-        contact_id = bot.rpc.lookup_contact_id_by_addr(accid, admin_email)
+        contact_id = dc_helpers.admin_key_contact_id(bot, accid)
         if not contact_id:
             return None
         return bot.rpc.create_chat_by_contact_id(accid, contact_id)

@@ -56,6 +56,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import database
 import bot  # noqa: F401  (imports every module the way the bot does)
 import catalog_review
+import dc_helpers
 import channels
 import config
 import handlers
@@ -457,3 +458,49 @@ class TestShortDescription(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AdminKeyContactTest(unittest.TestCase):
+    """Admin notices must go to the admin's key contact: the address-only contact cannot be written to."""
+    FP = "DFF2CAB1FEB7182F997C0A01466AA64DE33D8A39"
+
+    def setUp(self):
+        database.close_db()
+        database.DB_PATH = TEST_DB
+        database.init_db()
+        database.set_config("admin_dc_email", "admin@example.org")
+        database.set_admin_fingerprint(self.FP)
+        self.bot = MagicMock()
+        contacts = {
+            10: {"address": "admin@example.org", "is_key_contact": False, "last_seen": 0},
+            11: {"address": "admin@example.org", "is_key_contact": True, "last_seen": 900},   # other device
+            12: {"address": "admin@example.org", "is_key_contact": True, "last_seen": 100},   # the admin's key
+        }
+        self.bot.rpc.get_contact_ids.return_value = [10, 11, 12]
+        self.bot.rpc.get_contact.side_effect = lambda acc, cid: contacts[cid]
+        self.bot.rpc.lookup_contact_id_by_addr.return_value = 10
+        fps = {11: "AAAA" * 10, 12: self.FP}
+        self.fp_patch = patch("dc_helpers._get_contact_fingerprint", side_effect=lambda b, a, cid, c=None: fps.get(cid))
+        self.fp_patch.start()
+
+    def tearDown(self):
+        self.fp_patch.stop()
+        database.close_db()
+        for f in (TEST_DB, TEST_DB + "-wal", TEST_DB + "-shm"):
+            if os.path.exists(f):
+                os.remove(f)
+
+    def test_prefers_contact_with_admin_fingerprint(self):
+        self.assertEqual(dc_helpers.admin_key_contact_id(self.bot, 1), 12)
+
+    def test_unknown_fingerprint_uses_latest_key_contact(self):
+        database.set_admin_fingerprint("")
+        self.assertEqual(dc_helpers.admin_key_contact_id(self.bot, 1), 11)
+
+    def test_no_key_contacts_falls_back_to_lookup(self):
+        self.bot.rpc.get_contact_ids.return_value = []
+        self.assertEqual(dc_helpers.admin_key_contact_id(self.bot, 1), 10)
+
+    def test_admin_chat_uses_key_contact(self):
+        self.bot.rpc.create_chat_by_contact_id.side_effect = lambda acc, cid: 1000 + cid
+        self.assertEqual(catalog_review._admin_chat_id(self.bot, 1), 1012)
