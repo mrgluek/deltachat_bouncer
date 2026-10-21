@@ -41,7 +41,7 @@ logger = logging.getLogger("bouncer_bot")
 if os.environ.get("CALL_DEBUG_LOG", "").strip().lower() not in ("1", "true", "yes", "on"):
     for _webrtc_logger in ("aioice", "aiortc"):
         logging.getLogger(_webrtc_logger).setLevel(logging.WARNING)
-VERSION = "2.38.0"
+VERSION = "2.39.0"
 
 # Ntfy Bot has its own /newgroup. In a group where it is a member, the bouncer
 # leaves plain /newgroup to it so one command does not create two groups.
@@ -183,6 +183,32 @@ USERNAME_BOT_ADDRS = [
     if a.strip()
 ]
 USERNAME_LOOKUP_URL = os.environ.get("USERNAME_LOOKUP_URL", "https://deltachat.id").strip()
+
+
+# Catalog submissions by regular users (/chatadd, /dchanneladd). The admin can
+# switch them off at runtime with /catalogsubmit off (stored in the database,
+# wins over CATALOG_SUBMISSIONS). Contact age is how long the bot has known the
+# sender: chatmail accounts are free and disposable, so age is the one thing a
+# spammer cannot fake cheaply.
+CATALOG_SUBMISSIONS_ENABLED = _env_flag("CATALOG_SUBMISSIONS", "1")
+CATALOG_MIN_AGE_DAYS = float(os.environ.get("CATALOG_MIN_AGE_DAYS", "3"))
+# Older submitters are listed at once (no red flags required); 0 = always review
+CATALOG_AUTO_APPROVE_DAYS = float(os.environ.get("CATALOG_AUTO_APPROVE_DAYS", "30"))
+CATALOG_MAX_PENDING_PER_USER = int(os.environ.get("CATALOG_MAX_PENDING_PER_USER", "2"))
+CATALOG_MAX_PER_WEEK = int(os.environ.get("CATALOG_MAX_PER_WEEK", "5"))
+CATALOG_MAX_PENDING_TOTAL = int(os.environ.get("CATALOG_MAX_PENDING_TOTAL", "50"))
+# Distinct reporters (each at least CATALOG_MIN_AGE_DAYS old) that hide a listed entry until review
+CATALOG_REPORT_THRESHOLD = int(os.environ.get("CATALOG_REPORT_THRESHOLD", "3"))
+# A match never rejects by itself: it only stops auto-approval and is shown to the admin
+CATALOG_STOPWORDS = [
+    w.strip().lower()
+    for w in os.environ.get(
+        "CATALOG_STOPWORDS",
+        "airdrop,giveaway,usdt,signals,pump,casino,betting,forex,onlyfans,escort,18+,porn,"
+        "earn money,заработ,казино,ставки,раздача,крипт",
+    ).split(",")
+    if w.strip()
+]
 
 
 # Echo calls: the bot answers Delta Chat calls and echoes the caller's audio

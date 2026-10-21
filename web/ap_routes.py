@@ -31,7 +31,7 @@ def _get_ap_backfill_semaphore() -> asyncio.Semaphore:
 async def handle_ap_actor(request):
     """GET /c/{token} with Accept: application/activity+json -> Actor JSON."""
     token = request.match_info.get('token')
-    channel = database.get_catalog_channel_by_token(token)
+    channel = database.get_web_channel_by_token(token)
     if not channel or channel.get('is_deleted'):
         return web.Response(
             status=404,
@@ -107,7 +107,7 @@ async def handle_ap_inbox(request):
 
     act_type = activity.get("type")
     if token:
-        channel = database.get_catalog_channel_by_token(token)
+        channel = database.get_web_channel_by_token(token)
         if not channel or channel.get('is_deleted'):
             return web.Response(status=404, text="Channel not found")
     elif act_type not in ("Delete",):
@@ -263,7 +263,7 @@ async def handle_ap_inbox(request):
 async def handle_ap_outbox(request):
     """GET /c/{token}/outbox -> OrderedCollection or OrderedCollectionPage."""
     token = request.match_info.get('token')
-    channel = database.get_catalog_channel_by_token(token)
+    channel = database.get_web_channel_by_token(token)
     if not channel or channel.get('is_deleted'):
         return web.Response(status=404, text="Channel not found")
 
@@ -311,7 +311,7 @@ async def handle_ap_outbox(request):
 async def handle_ap_followers(request):
     """GET /c/{token}/followers -> OrderedCollection (count only)."""
     token = request.match_info.get('token')
-    channel = database.get_catalog_channel_by_token(token)
+    channel = database.get_web_channel_by_token(token)
     if not channel or channel.get('is_deleted'):
         return web.Response(status=404, text="Channel not found")
 
@@ -332,7 +332,7 @@ async def handle_ap_followers(request):
 async def handle_ap_following(request):
     """GET /c/{token}/following -> OrderedCollection (empty, count 0)."""
     token = request.match_info.get('token')
-    channel = database.get_catalog_channel_by_token(token)
+    channel = database.get_web_channel_by_token(token)
     if not channel or channel.get('is_deleted'):
         return web.Response(status=404, text="Channel not found")
 
@@ -358,7 +358,7 @@ async def handle_ap_post(request):
     except (ValueError, TypeError):
         return web.Response(status=400, text="Invalid message ID")
 
-    channel = database.get_catalog_channel_by_token(token)
+    channel = database.get_web_channel_by_token(token)
     if not channel or channel.get('is_deleted'):
         return web.Response(status=404, text="Channel not found")
 
@@ -392,7 +392,7 @@ async def handle_webfinger(request):
     user_host = resource[5:]
     username = user_host.split("@")[0]
 
-    channel = database.get_catalog_channel_by_token(username)
+    channel = database.get_web_channel_by_token(username)
     if not channel or channel.get("is_deleted"):
         return web.Response(status=404, text="User not found")
 

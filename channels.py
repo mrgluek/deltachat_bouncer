@@ -1,7 +1,8 @@
 """Chat/channel catalog: post ingestion into the web-preview cache
 (with ActivityPub delivery queuing), catalog backfill, and the
 /chats, /dchannels, /chatadd, /chatremove, /private, /dchanneladd,
-/dchannelremove command handlers."""
+/dchannelremove command handlers. Submissions by non-admins go through
+catalog_review (pending review, auto-approval, reports)."""
 import filecmp
 import os
 import re
@@ -12,6 +13,7 @@ import time
 from deltachat2 import events
 
 import activitypub
+import catalog_review
 import config
 import database
 import dc_helpers
@@ -130,7 +132,7 @@ def _ingest_channel_post(bot, accid, msg, catalog_channel: dict, token: str):
             # ── ActivityPub: queue post delivery to Fediverse followers ──
             try:
                 followers_count = database.get_ap_followers_count(token)
-                if followers_count > 0:
+                if followers_count > 0 and database.channel_web_visible(database.get_catalog_channel_by_chat_id(chat_id)):
                     base_url = (database.get_config("base_url") or os.getenv("BASE_URL") or "").strip().rstrip('/')
                     if base_url:
                         post_data = {
@@ -241,7 +243,7 @@ def _backfill_existing_catalog_channels(bot, accid):
 @config.dc_cli.on(events.NewMessage(command="/chats"))
 def chats_command(bot, accid, event):
     msg = event.msg
-    catalog_chats = database.get_all_catalog_chats()
+    catalog_chats = database.get_all_catalog_chats(approved_only=True)
     if not catalog_chats:
         dc_helpers._send(bot, accid, msg.chat_id, "ℹ️ The chat catalog is empty.")
         return
@@ -285,6 +287,8 @@ def dchannels_command(bot, accid, event):
         is_pub = bool(ch.get('is_public', 1))
         if is_pub:
             entry_parts = [f"/dchannel{ch['id']} **{ch['name']}**"]
+        elif ch.get('status') == 'pending':
+            entry_parts = [f"/dchannel{ch['id']} ⏳ **{ch['name']}** [Pending review]"]
         else:
             entry_parts = [f"/dchannel{ch['id']} 🔒 **{ch['name']}** [Unlisted]"]
 
@@ -294,10 +298,12 @@ def dchannels_command(bot, accid, event):
                 desc = desc[:200] + "..."
             entry_parts.append(desc)
         token = ch.get('token')
-        if base_url and token:
+        if base_url and token and database.channel_web_visible(ch):
             entry_parts.append(f"🌐 Preview: {base_url.rstrip('/')}/c/{token}")
 
-        if is_admin_dm and not is_pub:
+        if is_admin_dm and ch.get('status') == 'pending':
+            entry_parts.append(f"Review: /dchannelapprove{ch['id']}  /dchannelreject{ch['id']}")
+        elif is_admin_dm and not is_pub:
             entry_parts.append(f"Publish: /dchannelpub{ch['id']}on")
 
         entries.append("\n".join(entry_parts))
@@ -308,7 +314,8 @@ def dchannels_command(bot, accid, event):
 @config.dc_cli.on(events.NewMessage(command="/chatadd"))
 def chatadd_command(bot, accid, event):
     msg = event.msg
-    if not dc_helpers._is_dc_admin(bot, accid, msg.from_id):
+    is_admin = dc_helpers._is_dc_admin(bot, accid, msg.from_id)
+    if not is_admin and not catalog_review.submissions_enabled():
         dc_helpers._send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use this command.")
         return
 
@@ -320,7 +327,8 @@ def chatadd_command(bot, accid, event):
         return
 
     GROUP_TYPES = {"Group", "Mailinglist", "OutBroadcast", "InBroadcast"}
-    if str(chat_type) not in GROUP_TYPES:
+    # Users submit groups they are in; channels go through /dchanneladd <link>
+    if str(chat_type) not in (GROUP_TYPES if is_admin else {"Group"}):
         dc_helpers._send(bot, accid, msg.chat_id, "❌ Only group chats can be added to the catalog.")
         return
 
@@ -341,23 +349,38 @@ def chatadd_command(bot, accid, event):
     except Exception:
         member_count = 0
 
+    if not is_admin:
+        catalog_review.submit_chat(bot, accid, msg, chat_name, description, member_count)
+        return
+
     database.add_catalog_chat(msg.chat_id, chat_name, description, member_count)
     dc_helpers._send(bot, accid, msg.chat_id, f"✅ Chat **{chat_name}** has been added to the catalog.")
 
 @config.dc_cli.on(events.NewMessage(command="/chatremove"))
 def chatremove_command(bot, accid, event):
     msg = event.msg
-    if not dc_helpers._is_dc_admin(bot, accid, msg.from_id):
+    catalog_chat = database.get_catalog_chat_by_chat_id(msg.chat_id)
+    is_admin = dc_helpers._is_dc_admin(bot, accid, msg.from_id)
+    # Any member may take a user-submitted group out of the catalog: the command is
+    # sent inside the group, and removing is the safe direction.
+    if not is_admin and not (catalog_chat and catalog_chat.get('submitted_by')):
         dc_helpers._send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use this command.")
         return
 
     database.remove_catalog_chat(msg.chat_id)
+    if catalog_chat and catalog_chat.get('submitted_by'):
+        database.decide_catalog_submission(catalog_review.KIND_CHAT, catalog_chat['id'], "withdrawn")
+        if not is_admin:
+            catalog_review._notify_admin(
+                bot, accid, f"ℹ️ Chat **{catalog_chat['name']}** (#{catalog_chat['id']}) was removed from the catalog by a member.")
     dc_helpers._send(bot, accid, msg.chat_id, "✅ Chat has been removed from the catalog.")
 
 @config.dc_cli.on(events.NewMessage(command="/private"))
 def private_command(bot, accid, event):
     msg = event.msg
-    if not dc_helpers._is_dc_admin(bot, accid, msg.from_id):
+    catalog_chat = database.get_catalog_chat_by_chat_id(msg.chat_id)
+    # Members decide for groups they submitted themselves (sent inside the group)
+    if not dc_helpers._is_dc_admin(bot, accid, msg.from_id) and not (catalog_chat and catalog_chat.get('submitted_by')):
         dc_helpers._send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use this command.")
         return
 
@@ -366,7 +389,6 @@ def private_command(bot, accid, event):
         dc_helpers._send(bot, accid, msg.chat_id, "Usage: /private on or /private off")
         return
 
-    catalog_chat = database.get_catalog_chat_by_chat_id(msg.chat_id)
     if not catalog_chat:
         dc_helpers._send(bot, accid, msg.chat_id, "❌ Please add this chat to the catalog first using /chatadd.")
         return
@@ -521,7 +543,8 @@ def bg_channel_join_worker(bot, accid, admin_chat_id, url, chat_name, qr_info=No
 @config.dc_cli.on(events.NewMessage(command="/dchanneladd"))
 def dchanneladd_command(bot, accid, event):
     msg = event.msg
-    if not dc_helpers._is_dc_admin(bot, accid, msg.from_id):
+    is_admin = dc_helpers._is_dc_admin(bot, accid, msg.from_id)
+    if not is_admin and not catalog_review.submissions_enabled():
         dc_helpers._send(bot, accid, msg.chat_id, "❌ Only the bot administrator can use this command.")
         return
 
@@ -533,7 +556,10 @@ def dchanneladd_command(bot, accid, event):
     existing_channels = database.get_all_catalog_channels()
     for ch in existing_channels:
         if ch.get('invite_link') == url:
-            dc_helpers._send(bot, accid, msg.chat_id, f"ℹ️ This channel is already in the catalog (ID: {ch['id']}).")
+            if is_admin:
+                dc_helpers._send(bot, accid, msg.chat_id, f"ℹ️ This channel is already in the catalog (ID: {ch['id']}).")
+            else:
+                dc_helpers._send(bot, accid, msg.chat_id, "ℹ️ This channel is already in the catalog or waiting for review.")
             return
 
     try:
@@ -554,6 +580,10 @@ def dchanneladd_command(bot, accid, event):
             chat_name = qr_info.get("grpname")
     except Exception as e:
         dc_helpers._send(bot, accid, msg.chat_id, f"❌ Failed to parse invite link: {e}")
+        return
+
+    if not is_admin:
+        catalog_review.submit_channel(bot, accid, msg, url, qr_info, chat_name)
         return
 
     dc_helpers._send(bot, accid, msg.chat_id, f"⏳ Attempting to join channel **{chat_name or 'Channel'}** in the background... This may take up to 30 seconds.")

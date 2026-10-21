@@ -379,7 +379,7 @@ async def handle_channel_preview(request):
             return web.Response(status=304, headers={"ETag": etag, "Cache-Control": "public, max-age=60"})
         return web.Response(text=html_content, content_type="text/html", headers={"ETag": etag, "Cache-Control": "public, max-age=60"})
 
-    channel = database.get_catalog_channel_by_token(token)
+    channel = database.get_web_channel_by_token(token)
     if not channel:
         return web.Response(text=tpl_errors.get_404_html(ingress_path=ingress_path), status=404, content_type="text/html")
 
@@ -402,7 +402,7 @@ async def handle_channel_preview(request):
 @security.rate_limited("qr", max_requests=60, window_seconds=60)
 async def handle_channel_qr_png(request):
     token = request.match_info.get('token')
-    channel = database.get_catalog_channel_by_token(token)
+    channel = database.get_web_channel_by_token(token)
     if not channel or not channel.get('invite_link'):
         return web.Response(status=404)
 
@@ -428,7 +428,7 @@ async def handle_channel_qr_png(request):
 @security.rate_limited("qr", max_requests=60, window_seconds=60)
 async def handle_channel_qr_svg(request):
     token = request.match_info.get('token')
-    channel = database.get_catalog_channel_by_token(token)
+    channel = database.get_web_channel_by_token(token)
     if not channel or not channel.get('invite_link'):
         return web.Response(status=404)
 
@@ -454,7 +454,7 @@ async def handle_channel_qr_svg(request):
 @security.rate_limited("assets", max_requests=120, window_seconds=60)
 async def handle_channel_avatar(request):
     token = request.match_info.get('token')
-    channel = database.get_catalog_channel_by_token(token)
+    channel = database.get_web_channel_by_token(token)
     if not channel:
         return web.Response(status=404)
 
@@ -534,7 +534,7 @@ async def handle_channel_rss(request):
             return web.Response(status=304, headers={"ETag": etag, "Cache-Control": "public, max-age=120"})
         return web.Response(text=rss_xml, content_type="application/rss+xml", charset="utf-8", headers={"ETag": etag, "Cache-Control": "public, max-age=120"})
 
-    channel = database.get_catalog_channel_by_token(token)
+    channel = database.get_web_channel_by_token(token)
     if not channel or channel.get('is_deleted'):
         return web.Response(status=404, text="Channel not found")
 
@@ -567,7 +567,7 @@ async def handle_media_file(request):
     msg_id = request.match_info.get('msg_id')
     filename = request.match_info.get('filename')
 
-    channel = database.get_catalog_channel_by_token(token)
+    channel = database.get_web_channel_by_token(token)
     if not channel:
         return web.Response(status=404, text="Channel not found")
 

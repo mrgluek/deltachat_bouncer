@@ -327,6 +327,38 @@ def _scan_url_virustotal(bot, accid, chat_id, msg_id, url: str, vt_key: str, max
     return f"❌ VirusTotal API error: {err or f'Status {status}'}", "❌"
 
 
+def url_verdict(url: str, vt_key: str, max_attempts: int = 4) -> tuple[int, int, int] | None:
+    """Quiet URL check for background jobs (catalog review): (malicious, suspicious, total)
+    or None when VirusTotal gave no answer. Unknown URLs are submitted and polled briefly;
+    every request waits for the shared 15 s rate limit, so this can take a minute."""
+    url_id = base64.urlsafe_b64encode(url.encode("utf-8")).decode("ascii").rstrip("=")
+
+    def _counts(attrs):
+        stats = attrs.get("last_analysis_stats") or attrs.get("stats") or {}
+        mal = int(stats.get("malicious", 0))
+        sus = int(stats.get("suspicious", 0))
+        total = mal + sus + int(stats.get("harmless", 0)) + int(stats.get("undetected", 0))
+        return mal, sus, total
+
+    resp_data, status, _ = _vt_api_request("GET", f"/urls/{url_id}", vt_key)
+    if status == 200 and resp_data:
+        return _counts(resp_data.get("data", {}).get("attributes", {}))
+    if status != 404:
+        return None
+
+    post_data, p_status, _ = _vt_api_request("POST", "/urls", vt_key, data={"url": url})
+    analysis_id = (post_data or {}).get("data", {}).get("id") if p_status == 200 else None
+    if not analysis_id:
+        return None
+    for _ in range(max_attempts):
+        a_data, a_status, _ = _vt_api_request("GET", f"/analyses/{analysis_id}", vt_key)
+        if a_status == 200 and a_data:
+            attrs = a_data.get("data", {}).get("attributes", {})
+            if attrs.get("status") == "completed":
+                return _counts(attrs)
+    return None
+
+
 def _scan_file_virustotal(bot, accid, chat_id, msg_id, file_info: dict, vt_key: str, max_attempts: int = 12) -> tuple[str | None, str | None]:
     """Scan or lookup a file on VirusTotal. Returns (report_text, reaction_emoji) or (None, None) if handled in-place."""
     file_path = file_info["path"]

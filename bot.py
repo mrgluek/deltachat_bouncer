@@ -19,6 +19,7 @@ import qrcode
 
 import activitypub
 import calls
+import catalog_review  # noqa: F401  (registers /catalogqueue, /catalogsubmit, /catalogban, /catalogunban)
 import channels
 import cmcall_monitor
 import cmping

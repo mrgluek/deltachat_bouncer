@@ -19,6 +19,7 @@ import time
 
 from deltachat2 import events, MsgData, SystemMessageType
 
+import catalog_review
 import channels
 import config
 import database
@@ -333,6 +334,11 @@ def handle_all_messages(bot, accid, event):
             except Exception as e:
                 config.logger.error(f"Error checking contact {contact_id} in away check: {e}")
     
+    # Catalog review and reports: /chatapprove<ID>, /dchannelreport<ID>, /dchannelweb<ID>on, ...
+    # Checked first: they start with /chat and /dchannel like the commands below.
+    if text.startswith(("/chat", "/dchannel")) and catalog_review.handle_dynamic_command(bot, accid, msg, text):
+        return
+
     # Handle /chatdesc<ID> command
     if text.startswith("/chatdesc"):
         m = re.match(r'^/chatdesc(\d+)(?:\s+(.*))?$', text, re.IGNORECASE)
@@ -362,7 +368,8 @@ def handle_all_messages(bot, accid, event):
             
             # Lookup catalog chat
             catalog_chat = database.get_catalog_chat_by_id(catalog_id)
-            if not catalog_chat:
+            # A chat waiting for review hands out no invites
+            if not catalog_chat or (catalog_chat.get('status') or 'approved') != 'approved':
                 dc_helpers._send(bot, accid, msg.chat_id, "❌ Chat with this number was not found in the catalog.")
                 return
 
@@ -389,7 +396,9 @@ def handle_all_messages(bot, accid, event):
                     elif qrdata.startswith("dcqr://"):
                         invite_link = "https://i.delta.chat/#" + qrdata[7:]
                         
-                    dc_helpers._send(bot, accid, msg.chat_id, f"🔗 Invite link to chat **{catalog_chat['name']}**:\n{invite_link}")
+                    dc_helpers._send(bot, accid, msg.chat_id,
+                                     f"🔗 Invite link to chat **{catalog_chat['name']}**:\n{invite_link}\n\n"
+                                     f"🚩 Spam or scam? /chatreport{catalog_id} <reason>")
                 except Exception as e:
                     config.logger.error(f"Failed to generate invite: {e}")
                     dc_helpers._send(bot, accid, msg.chat_id, "❌ Failed to generate invite link.")
@@ -509,7 +518,12 @@ def handle_all_messages(bot, accid, event):
             base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
             preview_url = f"{base_url.rstrip('/')}/c/{token}" if base_url else f"/c/{token}"
 
-            header_str = f"📢 **{channel['name']}**" if is_pub else f"📢 **{channel['name']}** 🔒 [Unlisted]"
+            if is_pub:
+                header_str = f"📢 **{channel['name']}**"
+            elif channel.get('status') == 'pending':
+                header_str = f"📢 **{channel['name']}** ⏳ [Pending review]"
+            else:
+                header_str = f"📢 **{channel['name']}** 🔒 [Unlisted]"
             response_lines = [header_str]
             if channel.get('description'):
                 response_lines.append(f"{channel['description']}\n")
@@ -523,9 +537,16 @@ def handle_all_messages(bot, accid, event):
                 else:
                     join_link = invite_link
                 response_lines.append(f"🔗 Invite link: {join_link}")
-            response_lines.append(f"🌐 Web preview: {preview_url}")
-            if not is_pub and is_admin:
+            if database.channel_web_visible(channel):
+                response_lines.append(f"🌐 Web preview: {preview_url}")
+            elif is_admin:
+                response_lines.append(f"🌐 Web mirroring is off: /dchannelweb{catalog_id}on")
+            if is_admin and channel.get('status') == 'pending':
+                response_lines.append(f"Review: /dchannelapprove{catalog_id}  /dchannelreject{catalog_id} [reason]")
+            elif not is_pub and is_admin:
                 response_lines.append(f"Publish: /dchannelpub{catalog_id}on")
+            if is_pub:
+                response_lines.append(f"🚩 Spam or scam? /dchannelreport{catalog_id} <reason>")
 
             dc_helpers._send(bot, accid, msg.chat_id, "\n".join(response_lines))
             return

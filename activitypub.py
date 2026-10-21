@@ -569,7 +569,7 @@ async def _delivery_loop():
 async def _deliver_post(token: str, post_data: dict, base_url: str):
     """Deliver a Create(Note) to all follower inboxes for a channel."""
     base_url = (base_url or "").strip().rstrip('/')
-    channel = database.get_catalog_channel_by_token(token)
+    channel = database.get_web_channel_by_token(token)
     if not channel:
         return
     
@@ -621,7 +621,7 @@ async def deliver_to_inbox(inbox_url: str, body: bytes, private_key_pem: str, ke
 
 async def deliver_backfill_posts(token: str, target_inbox: str, base_url: str, limit: int = 10):
     """Deliver recent channel posts to a new follower's inbox in chronological order."""
-    channel = database.get_catalog_channel_by_token(token)
+    channel = database.get_web_channel_by_token(token)
     if not channel or channel.get('is_deleted'):
         return
 

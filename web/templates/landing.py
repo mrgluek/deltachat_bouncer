@@ -21,7 +21,7 @@ def get_landing_page_html(ingress_path: str = "") -> str:
     bg_url = f"{base_path}/background.jpg"
     bg_light_url = f"{base_path}/background-light.jpg"
     home_url = f"{base_path}/" if base_path else "/"
-    channels = database.get_all_catalog_channels(public_only=True)
+    channels = database.get_all_catalog_channels(public_only=True, web_only=True)
 
     base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""
     instance_domain = ""

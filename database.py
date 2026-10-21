@@ -343,6 +343,14 @@ def init_db():
             cursor.execute("ALTER TABLE catalog_chats ADD COLUMN welcome_enabled INTEGER DEFAULT 0")
         if "welcome_text" not in columns:
             cursor.execute("ALTER TABLE catalog_chats ADD COLUMN welcome_text TEXT")
+        # User submissions: 'pending' rows are hidden from /chats until reviewed.
+        # Existing rows (all added by the admin) default to 'approved'.
+        if "status" not in columns:
+            cursor.execute("ALTER TABLE catalog_chats ADD COLUMN status TEXT DEFAULT 'approved'")
+        if "submitted_by" not in columns:
+            cursor.execute("ALTER TABLE catalog_chats ADD COLUMN submitted_by INTEGER")
+        if "submitted_at" not in columns:
+            cursor.execute("ALTER TABLE catalog_chats ADD COLUMN submitted_at REAL")
 
         # Catalog channels table
         cursor.execute('''
@@ -370,6 +378,17 @@ def init_db():
             cursor.execute("ALTER TABLE catalog_channels ADD COLUMN deleted_at REAL")
         if "is_public" not in channel_cols:
             cursor.execute("ALTER TABLE catalog_channels ADD COLUMN is_public INTEGER DEFAULT 1")
+        if "status" not in channel_cols:
+            cursor.execute("ALTER TABLE catalog_channels ADD COLUMN status TEXT DEFAULT 'approved'")
+        if "submitted_by" not in channel_cols:
+            cursor.execute("ALTER TABLE catalog_channels ADD COLUMN submitted_by INTEGER")
+        if "submitted_at" not in channel_cols:
+            cursor.execute("ALTER TABLE catalog_channels ADD COLUMN submitted_at REAL")
+        # 0 = listed in /dchannels only, without web preview, RSS and ActivityPub.
+        # Used for channels submitted by someone who is not their owner: the invite
+        # link is public anyway, mirroring the posts to the web is not.
+        if "web_enabled" not in channel_cols:
+            cursor.execute("ALTER TABLE catalog_channels ADD COLUMN web_enabled INTEGER DEFAULT 1")
 
         # Backfill tokens for any channels without one
         cursor.execute("SELECT id FROM catalog_channels WHERE token IS NULL")
@@ -662,6 +681,48 @@ def init_db():
                 created_at REAL,
                 updated_at REAL,
                 PRIMARY KEY (chat_id, tag)
+            )
+        ''')
+
+        # Catalog submissions log: rate limits and history (rows stay after a
+        # rejection, the catalog entry itself is removed)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS catalog_submissions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT,
+                catalog_id INTEGER,
+                chat_id INTEGER,
+                submitter_id INTEGER,
+                submitter_addr TEXT,
+                name TEXT,
+                status TEXT DEFAULT 'pending',
+                reason TEXT,
+                created_at REAL,
+                decided_at REAL
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_catalog_submissions_submitter ON catalog_submissions(submitter_id, created_at)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_catalog_submissions_item ON catalog_submissions(kind, catalog_id)')
+
+        # Reports against listed catalog entries, one per reporter and entry
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS catalog_reports (
+                kind TEXT,
+                catalog_id INTEGER,
+                reporter_id INTEGER,
+                reason TEXT,
+                created_at REAL,
+                PRIMARY KEY (kind, catalog_id, reporter_id)
+            )
+        ''')
+
+        # Contacts banned from submitting (by address: contact ids are per account)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS catalog_banned_submitters (
+                addr TEXT PRIMARY KEY,
+                contact_id INTEGER,
+                reason TEXT,
+                created_at REAL
             )
         ''')
 
@@ -985,11 +1046,14 @@ def remove_catalog_chat(chat_id: int):
         cursor.execute("DELETE FROM catalog_chats WHERE chat_id = ?", (chat_id,))
 
 
-def get_all_catalog_chats(limit: int = 500) -> list[dict]:
+def get_all_catalog_chats(limit: int = 500, approved_only: bool = False) -> list[dict]:
     with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM catalog_chats ORDER BY id ASC LIMIT ?", (limit,))
+        if approved_only:
+            cursor.execute("SELECT * FROM catalog_chats WHERE COALESCE(status, 'approved') = 'approved' ORDER BY id ASC LIMIT ?", (limit,))
+        else:
+            cursor.execute("SELECT * FROM catalog_chats ORDER BY id ASC LIMIT ?", (limit,))
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
 
@@ -1117,6 +1181,11 @@ def add_catalog_channel(chat_id: int, name: str, description: str, member_count:
                 -- a live one keeps whatever the admin set. Right-hand side sees the old row.
                 is_public=CASE WHEN catalog_channels.is_deleted = 1 THEN excluded.is_public
                                ELSE COALESCE(catalog_channels.is_public, excluded.is_public) END,
+                -- A re-added channel starts over as an admin entry; the user
+                -- submission path marks it pending again right after this insert.
+                status=CASE WHEN catalog_channels.is_deleted = 1 THEN 'approved' ELSE catalog_channels.status END,
+                web_enabled=CASE WHEN catalog_channels.is_deleted = 1 THEN 1 ELSE catalog_channels.web_enabled END,
+                submitted_by=CASE WHEN catalog_channels.is_deleted = 1 THEN NULL ELSE catalog_channels.submitted_by END,
                 is_deleted=0,
                 deleted_at=NULL
         ''', (chat_id, name, description, member_count, invite_link, token, 1 if is_public else 0))
@@ -1183,20 +1252,25 @@ def hard_remove_catalog_channel(chat_id: int) -> bool:
         return cursor.rowcount > 0
 
 
-def get_all_catalog_channels(include_deleted: bool = False, public_only: bool = False, limit: int = 500) -> list[dict]:
+def get_all_catalog_channels(include_deleted: bool = False, public_only: bool = False, limit: int = 500,
+                             web_only: bool = False) -> list[dict]:
+    """public_only: listed in /dchannels (is_public = 1, which a pending submission never is).
+    web_only: also mirrored to the web (landing page), see channel_web_visible()."""
+    where = []
+    if not include_deleted:
+        where.append("is_deleted = 0")
+    if public_only:
+        where.append("is_public = 1")
+    if web_only:
+        where.append("COALESCE(web_enabled, 1) = 1")
+    sql = "SELECT * FROM catalog_channels"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id ASC LIMIT ?"
     with _reader_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        if include_deleted:
-            if public_only:
-                cursor.execute("SELECT * FROM catalog_channels WHERE is_public = 1 ORDER BY id ASC LIMIT ?", (limit,))
-            else:
-                cursor.execute("SELECT * FROM catalog_channels ORDER BY id ASC LIMIT ?", (limit,))
-        else:
-            if public_only:
-                cursor.execute("SELECT * FROM catalog_channels WHERE is_deleted = 0 AND is_public = 1 ORDER BY id ASC LIMIT ?", (limit,))
-            else:
-                cursor.execute("SELECT * FROM catalog_channels WHERE is_deleted = 0 ORDER BY id ASC LIMIT ?", (limit,))
+        cursor.execute(sql, (limit,))
         rows = cursor.fetchall()
         return [dict(r) for r in rows]
 
@@ -1232,6 +1306,200 @@ def get_catalog_channel_by_token(token: str) -> dict | None:
         cursor.execute("SELECT * FROM catalog_channels WHERE token = ?", (token,))
         row = cursor.fetchone()
         return dict(row) if row else None
+
+
+def channel_web_visible(channel: dict | None) -> bool:
+    """Whether the web preview, RSS and ActivityPub may show this channel.
+
+    A channel listed without web mirroring (web_enabled = 0) is hidden, except while
+    it waits for review: the admin checks it through the secret preview link.
+    """
+    if not channel:
+        return False
+    if channel.get("web_enabled", 1) in (None, 1):
+        return True
+    return channel.get("status") == "pending"
+
+
+def get_web_channel_by_token(token: str) -> dict | None:
+    """get_catalog_channel_by_token() for the web and ActivityPub layer: None for
+    channels that must not be mirrored (they look like unknown tokens)."""
+    channel = get_catalog_channel_by_token(token)
+    return channel if channel_web_visible(channel) else None
+
+
+# ── Catalog submissions by users ──
+
+def add_catalog_chat_submission(chat_id: int, name: str, description: str, member_count: int,
+                                submitter_id: int) -> int:
+    """Insert a user-submitted group as pending. Join requests need the members'
+    approval (is_private = 1) until the group switches that off with /private off."""
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO catalog_chats (chat_id, name, description, member_count, is_private,
+                                       status, submitted_by, submitted_at)
+            VALUES (?, ?, ?, ?, 1, 'pending', ?, ?)
+        ''', (chat_id, name, description, member_count, submitter_id, time.time()))
+        return cursor.lastrowid
+
+
+def set_catalog_chat_status(catalog_id: int, status: str) -> bool:
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE catalog_chats SET status = ? WHERE id = ?", (status, catalog_id))
+        return cursor.rowcount > 0
+
+
+def set_catalog_channel_submission(chat_id: int, submitter_id: int, web_enabled: bool):
+    """Mark a freshly added channel as a pending user submission."""
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE catalog_channels SET status = 'pending', is_public = 0, submitted_by = ?, "
+            "submitted_at = ?, web_enabled = ? WHERE chat_id = ?",
+            (submitter_id, time.time(), 1 if web_enabled else 0, chat_id),
+        )
+
+
+def set_catalog_channel_status(catalog_id: int, status: str) -> bool:
+    """approved -> listed (is_public = 1); pending -> hidden until review."""
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE catalog_channels SET status = ?, is_public = ? WHERE id = ?",
+            (status, 1 if status == "approved" else 0, catalog_id),
+        )
+        return cursor.rowcount > 0
+
+
+def set_catalog_channel_web(catalog_id: int, web_enabled: bool) -> bool:
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE catalog_channels SET web_enabled = ? WHERE id = ?", (1 if web_enabled else 0, catalog_id))
+        return cursor.rowcount > 0
+
+
+def get_pending_catalog_items() -> list[dict]:
+    """Everything waiting for review, chats and channels, oldest first."""
+    with _reader_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 'chat' AS kind, id, name, submitted_by, submitted_at FROM catalog_chats WHERE status = 'pending' "
+            "UNION ALL "
+            "SELECT 'channel' AS kind, id, name, submitted_by, submitted_at FROM catalog_channels "
+            "WHERE status = 'pending' AND is_deleted = 0 "
+            "ORDER BY submitted_at ASC"
+        )
+        return [dict(r) for r in cursor.fetchall()]
+
+
+def log_catalog_submission(kind: str, catalog_id: int, chat_id: int, submitter_id: int,
+                           submitter_addr: str, name: str, status: str = "pending") -> int:
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO catalog_submissions (kind, catalog_id, chat_id, submitter_id, submitter_addr, name, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (kind, catalog_id, chat_id, submitter_id, (submitter_addr or "").lower(), name, status, time.time()))
+        return cursor.lastrowid
+
+
+def get_latest_catalog_submission(kind: str, catalog_id: int) -> dict | None:
+    with _reader_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM catalog_submissions WHERE kind = ? AND catalog_id = ? ORDER BY id DESC LIMIT 1",
+            (kind, catalog_id),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def decide_catalog_submission(kind: str, catalog_id: int, status: str, reason: str = None):
+    """Close the open submission of an entry (approved / auto / rejected)."""
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE catalog_submissions SET status = ?, reason = ?, decided_at = ? "
+            "WHERE kind = ? AND catalog_id = ? AND status = 'pending'",
+            (status, reason, time.time(), kind, catalog_id),
+        )
+
+
+def count_catalog_submissions(submitter_id: int = None, since: float = None, pending_only: bool = False) -> int:
+    where, args = [], []
+    if submitter_id is not None:
+        where.append("submitter_id = ?")
+        args.append(submitter_id)
+    if since is not None:
+        where.append("created_at >= ?")
+        args.append(since)
+    if pending_only:
+        where.append("status = 'pending'")
+    sql = "SELECT COUNT(*) FROM catalog_submissions"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql, args)
+        return cursor.fetchone()[0]
+
+
+def add_catalog_report(kind: str, catalog_id: int, reporter_id: int, reason: str) -> bool:
+    """False if this reporter already reported the entry."""
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR IGNORE INTO catalog_reports (kind, catalog_id, reporter_id, reason, created_at) VALUES (?, ?, ?, ?, ?)",
+            (kind, catalog_id, reporter_id, reason, time.time()),
+        )
+        return cursor.rowcount > 0
+
+
+def get_catalog_reports(kind: str, catalog_id: int) -> list[dict]:
+    with _reader_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM catalog_reports WHERE kind = ? AND catalog_id = ? ORDER BY created_at ASC",
+            (kind, catalog_id),
+        )
+        return [dict(r) for r in cursor.fetchall()]
+
+
+def clear_catalog_reports(kind: str, catalog_id: int):
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM catalog_reports WHERE kind = ? AND catalog_id = ?", (kind, catalog_id))
+
+
+def ban_catalog_submitter(addr: str, contact_id: int = None, reason: str = None):
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO catalog_banned_submitters (addr, contact_id, reason, created_at) VALUES (?, ?, ?, ?)",
+            ((addr or "").lower().strip(), contact_id, reason, time.time()),
+        )
+
+
+def unban_catalog_submitter(addr: str) -> bool:
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM catalog_banned_submitters WHERE addr = ?", ((addr or "").lower().strip(),))
+        return cursor.rowcount > 0
+
+
+def is_catalog_submitter_banned(addr: str = None, contact_id: int = None) -> bool:
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM catalog_banned_submitters WHERE addr = ? OR (contact_id IS NOT NULL AND contact_id = ?)",
+            ((addr or "").lower().strip(), contact_id if contact_id is not None else -1),
+        )
+        return cursor.fetchone() is not None
 
 
 def save_channel_post(chat_id: int, msg_id: int, from_name: str = "", text: str = "",

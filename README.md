@@ -91,6 +91,10 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/chat<ID> [message]` — Request an invite link to the group (Private chat only).
 - `/dchannels` — Show the catalog of registered Delta Chat channels with invite links and web preview URLs.
 - `/dchannel<ID>` — Request the invite link and web preview URL for a channel.
+- `/chatadd [description]` — Submit the current group to the chat catalog (see [Catalog Submissions](#catalog-submissions)).
+- `/dchanneladd <link>` — Submit a channel (or group) invite link to the channel catalog.
+- `/chatreport<ID> [reason]` / `/dchannelreport<ID> [reason]` — Report a listed chat or channel as spam or scam.
+- `/chatremove`, `/private <on/off>` — In a group that a member submitted: take it out of the catalog, or let everyone join without approval.
 - `/cmping <server1> ...` — Ping mail relays to/from specified target servers (15s cooldown, domain-validated).
 - `/cmcall <server1> [server2]` — Test a Delta Chat call from server1 to server2 (or within one server): signaling, TURN, audio echo and RTP statistics (60s cooldown, one test at a time).
 - `/callstats` — Your recent echo calls to this bot; admins also get 24h/7d totals and the last 10 calls.
@@ -116,15 +120,22 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/initadmin` — Claim administrative ownership (private chat only).
 - `/autokick [on/off/days/ignore/unignore]` — Configure auto-kick with warnings (default: 90 days, e.g. `/autokick 30`) or manage cryptographic fingerprint ignore list (`/autokick ignore <email/nick>`, `/autokick unignore <fp/email>`) (Admin only).
 - `/kick <user_id>` — Remove a member from the current group by contact ID, search query, or message reply (Admin only).
-- `/chatadd [description]` — Add the current group chat to the catalog (Admin only). Falls back to group description if not provided.
-- `/chatremove` — Remove the current group chat from the catalog (Admin only).
+- `/chatadd [description]` — Add the current group chat to the catalog (Admin: listed at once, any chat type). Falls back to group description if not provided.
+- `/chatremove` — Remove the current group chat from the catalog (Admin; any member for a group submitted by a member).
 - `/chatdesc<ID> <text>` — Update description of cataloged group chat (Admin only).
-- `/dchanneladd <URL>` — Join and add a channel to the catalog as unlisted by default (Admin only). If the channel owner's device has not answered the join request yet, the bot says so, keeps watching for 30 minutes and reports when the join completes; the recent posts that a join delivers are then cached for the web preview.
+- `/dchanneladd <URL>` — Join and add a channel to the catalog as unlisted by default (Admin; users submit for review). If the channel owner's device has not answered the join request yet, the bot says so, keeps watching for 30 minutes and reports when the join completes; the recent posts that a join delivers are then cached for the web preview.
 - `/dchannelremove [ID]` — Remove a channel from the catalog (Admin only). If the channel author removes the bot from the channel, it is also automatically removed from the catalog.
 - `/dchanneldesc<ID> <text>` — Update description of cataloged channel (Admin only).
 - `/dchannelpub<ID>on` / `/dchannelpub<ID>off` — Toggle channel public catalog visibility (Admin only). Unlisted channels are hidden from the public catalog and landing page, but maintain active web preview URLs and RSS feeds.
 - `/url [base_url]` — Show or set the base web URL used for public channel previews and RSS feeds (Admin only).
-- `/private <on/off>` — Toggle cataloged chat privacy status (Admin only).
+- `/private <on/off>` — Toggle cataloged chat privacy status (Admin; any member for a group submitted by a member).
+- `/catalogqueue` — Chat and channel submissions waiting for review (Admin only).
+- `/chatapprove<ID>` / `/dchannelapprove<ID>` — Approve a submission, or keep a reported entry listed (clears its reports) (Admin only).
+- `/chatreject<ID> [reason]` / `/dchannelreject<ID> [reason]` — Reject a submission: a chat leaves the catalog, the bot leaves a channel and deletes its cached posts and media. The reason is sent to the group / submitter (Admin only).
+- `/chatban<ID> [reason]` / `/dchannelban<ID> [reason]` — Reject and ban the submitter from further submissions (Admin only).
+- `/dchannelweb<ID>on` / `/dchannelweb<ID>off` — Web preview, RSS and Fediverse mirroring for a channel (Admin only).
+- `/catalogsubmit [on/off]` — Switch catalog submissions by users (shows the limits) (Admin only).
+- `/catalogban <addr>` / `/catalogunban <addr>` — Ban or unban a submitter (Admin only).
 - `/welcome [on/off/on <text>]` — Configure welcome messages for new members (Admin only).
 - `/transports` — Show mail relays: relay used for sending, send queue, incoming status and storage (Admin only).
 - `/addtransport` — Add a backup mail relay (Admin only, private 1-on-1 chat only for credential security).
@@ -154,6 +165,18 @@ In group chats where multiple bots are present, you can address this bot specifi
 - `/stats@boun` or `/stats@stew`
 
 A plain `/help` sent in a group chat is answered in a private 1:1 chat with the sender, so several bots don't flood the group with help texts. Use `/help@boun` to show the help in the group itself.
+
+## Catalog Submissions
+
+Any user can submit a group (`/chatadd` inside it) or a channel (`/dchanneladd <invite link>`) to the catalog. The admin path is unchanged; submissions by users are checked like this:
+
+- **Who may submit:** contacts the bot has known for at least `CATALOG_MIN_AGE_DAYS` (3) days. Chatmail accounts are free and disposable, so contact age is the main thing a spammer cannot fake. At most `CATALOG_MAX_PENDING_PER_USER` (2) submissions waiting and `CATALOG_MAX_PER_WEEK` (5) per week per user, `CATALOG_MAX_PENDING_TOTAL` (50) in the whole queue. Banned submitters are refused.
+- **Red flags:** stop words (`CATALOG_STOPWORDS`) in the name, description or (for channels) the recent posts, and links that VirusTotal reports as malicious or suspicious (up to 3 links, when `VIRUSTOTAL_API_KEY` is set). A flag never rejects by itself; it is shown to the admin.
+- **Auto-approval:** a submitter known for `CATALOG_AUTO_APPROVE_DAYS` (30) days with no red flags is listed at once; the admin still gets the card with a one-command removal. A channel whose join has not finished yet is always reviewed (there is nothing to check). Everything else waits for the admin, who gets a card with the submitter (age, chats), owner check, flags, review preview link and the `/…approve`, `/…reject`, `/…ban` commands. `/catalogqueue` lists what waits.
+- **Groups** submitted by a member are private by default: join requests from the catalog go to the members (`/approve<ID>` in the group). Any member can switch that with `/private off` or take the group out with `/chatremove`. A pending group hands out no invites.
+- **Channels:** the bot joins right away so that the admin can review the posts. If the link was made by the submitter (the invite link carries the owner's key), the channel gets the web preview, RSS and Fediverse as usual. A channel submitted by someone else is listed in `/dchannels` with its invite link only: the link is public anyway, mirroring the posts to the web is not. The admin can turn mirroring on with `/dchannelweb<ID>on`. A rejected channel is left and its cache deleted.
+- **Reports:** `/chatreport<ID>` / `/dchannelreport<ID>` from contacts known for the minimum age, one per contact and entry. After `CATALOG_REPORT_THRESHOLD` (3) reports the entry is hidden (not deleted, so a few accounts cannot remove someone's channel) and back in the review queue.
+- **Emergency switch:** `/catalogsubmit off` returns to admin-only (`CATALOG_SUBMISSIONS=0` in `.env` does the same at start).
 
 ## Echo Call Settings
 
