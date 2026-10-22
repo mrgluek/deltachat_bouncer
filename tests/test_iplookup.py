@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import unittest
@@ -209,6 +210,104 @@ class TestInternetDB(unittest.TestCase):
             text = iplookup.lookup("ip", ipaddress.ip_address("185.220.101.1"))
         self.assertIn("Shodan InternetDB did not answer", text)
         self.assertIn("AS60729 Example", text)  # the rest of the report is still there
+
+
+class TestCensys(unittest.TestCase):
+    # Trimmed from a real v3 answer for 79.143.31.43 (Shodan InternetDB: 404)
+    CENSYS = {"result": {"resource": {"ip": "185.220.101.1", "services": [
+        {"port": 22, "protocol": "SSH", "transport_protocol": "tcp",
+         "software": [{"type": ["REMOTE_ACCESS"]}, {"vendor": "openbsd", "product": "openssh"}]},
+        {"port": 443, "protocol": "HTTP", "transport_protocol": "tcp",
+         "software": [{"vendor": "f5", "product": "nginx"}],
+         "endpoints": [{"path": "/", "http": {"html_title": "301 Moved Permanently"}}]},
+        {"port": 8083, "protocol": "HTTP", "transport_protocol": "tcp",
+         "software": [{"vendor": "f5", "product": "nginx"}],
+         "endpoints": [{"path": "/", "http": {"status_code": 302}},
+                       {"path": "/login/", "http": {"html_title": "LOGIN - example.org - Hestia Control Panel"}}]},
+        {"port": 1194, "protocol": "OPENVPN", "transport_protocol": "udp"},
+    ]}}}
+
+    def setUp(self):
+        self.db = {}
+        self.calls = []
+        patches = [
+            patch.object(iplookup.database, "get_config", side_effect=lambda k: self.db.get(k)),
+            patch.object(iplookup.database, "set_config", side_effect=lambda k, v: self.db.__setitem__(k, v)),
+            patch.dict(os.environ, {"CENSYS_API_TOKEN": "test-token"}),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        state._censys_cache.clear()
+
+    def _get(self, shodan, censys):
+        def get(url, timeout=20, headers=None):
+            if "censys.io" in url:
+                self.calls.append(headers)
+                return censys
+            if "internetdb.shodan.io" in url:
+                return shodan
+            if "ipinfo.io" in url:
+                return {"ip": "185.220.101.1", "country": "RU", "org": "AS50340 Selectel"}, 200
+            return fake_get(url)
+        return get
+
+    def _lookup(self, shodan, censys):
+        with patch.object(iplookup, "_http_get_json", side_effect=self._get(shodan, censys)):
+            return iplookup.lookup("ip", ipaddress.ip_address("185.220.101.1"))
+
+    def test_fallback_when_shodan_has_nothing(self):
+        text = self._lookup((None, 404), (self.CENSYS, 200))
+        self.assertIn("Open ports (Censys): 22 SSH, 443 HTTPS, 8083", text)
+        self.assertNotIn("1194", text)  # UDP is not a TCP port name
+        self.assertIn("📄 8083: LOGIN - example.org - Hestia Control Panel", text)
+        self.assertNotIn("Moved Permanently", text)  # stock status pages are left out
+        self.assertIn("Software: nginx, openssh", text)
+        self.assertIn("https://platform.censys.io/hosts/185.220.101.1", text)
+        self.assertNotIn("shodan.io/host", text)
+        self.assertEqual(self.calls[0]["Authorization"], "Bearer test-token")
+        self.assertEqual(iplookup.censys_credits_used(), 1)
+
+    def test_not_called_when_shodan_has_ports(self):
+        text = self._lookup((TestInternetDB.SHODAN, 200), (self.CENSYS, 200))
+        self.assertEqual(self.calls, [])
+        self.assertIn("Open ports: 80 HTTP", text)
+
+    def test_not_called_without_token(self):
+        with patch.dict(os.environ, {"CENSYS_API_TOKEN": ""}):
+            text = self._lookup((None, 404), (self.CENSYS, 200))
+        self.assertEqual(self.calls, [])
+        self.assertIn("Open ports: none seen by Shodan", text)
+
+    def test_censys_sees_nothing_too(self):
+        text = self._lookup((None, 404), (None, 404))
+        self.assertIn("Open ports: none seen by Shodan or Censys", text)
+        self.assertEqual(iplookup.censys_credits_used(), 1)  # a 404 is charged too
+
+    def test_cached_for_a_day(self):
+        self._lookup((None, 404), (self.CENSYS, 200))
+        self._lookup((None, 404), (self.CENSYS, 200))
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(iplookup.censys_credits_used(), 1)
+
+    def test_budget_is_a_rolling_30_days(self):
+        now = time.time()
+        old = [now - 31 * 86400] * 50  # outside the window: no longer counted
+        recent = [now - 3600] * config.CENSYS_MONTHLY_LIMIT
+        self.db["censys_credit_times"] = json.dumps(old + recent)
+        text = self._lookup((None, 404), (self.CENSYS, 200))
+        self.assertEqual(self.calls, [])
+        self.assertIn("none seen by Shodan", text)
+        self.db["censys_credit_times"] = json.dumps(old + recent[1:])
+        self._lookup((None, 404), (self.CENSYS, 200))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_out_of_credits_pauses(self):
+        self._lookup((None, 404), (None, 402))
+        state._censys_cache.clear()
+        self._lookup((None, 404), (self.CENSYS, 200))
+        self.assertEqual(len(self.calls), 1)  # paused after the 402
+        self.assertEqual(iplookup.censys_credits_used(), 0)
 
 
 class TestHostLookup(unittest.TestCase):

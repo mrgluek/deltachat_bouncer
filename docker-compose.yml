@@ -50,6 +50,8 @@ services:
       - MEET_MUSIC_DUCK
       - VIRUSTOTAL_API_KEY
       - IPINFO_TOKEN
+      - CENSYS_API_TOKEN
+      - CENSYS_MONTHLY_LIMIT
       - DNS_RESOLVERS
       - NTFY_BOT_ADDRS
       - MENTION_REPLY

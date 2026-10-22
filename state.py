@@ -71,6 +71,7 @@ _ip_lookup_queue_lock = threading.Lock()
 _ip_lookup_cache: dict[str, tuple[float, str]] = {}
 _ip_lookup_pending = 0
 _ip_lookup_last_time = 0.0
+_censys_cache: dict[str, tuple[float, dict | None]] = {}  # ip -> (time, host record)
 
 # /dns: cache (key -> (time, text)) and the number of queued + running reports
 _dns_lock = threading.Lock()

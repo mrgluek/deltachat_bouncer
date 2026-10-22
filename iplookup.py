@@ -8,6 +8,12 @@ Data sources:
   (CPE), tags (tor / vpn / proxy / cloud / self-signed ...) and known CVEs of
   an IP. Free, no key; a snapshot of Shodan's periodic scans, so it can be
   weeks old and miss ports, and IPv6 is rarely scanned.
+- Censys (api.platform.censys.io), only when CENSYS_API_TOKEN is set and
+  Shodan has nothing for the IP. Shodan's scanners are blocked by many
+  networks (InternetDB has no record for hosts with ports 80/443 open for
+  years); Censys scans from elsewhere and also sees page titles. A free
+  account has 100 credits a month (1 per lookup), so it is a fallback with a
+  budget (CENSYS_MONTHLY_LIMIT in any 30 days), counted in the database.
 - RIPEstat (stat.ripe.net) for the announced prefix of an IP, for prefixes
   and for AS numbers. Free, no key, and global - it uses BGP data from all
   regions, not only the RIPE region. ipinfo's own ASN and IP-range APIs are
@@ -33,12 +39,14 @@ import urllib.request
 from deltachat2 import events
 
 import config
+import database
 import dc_helpers
 import state
 
 IPINFO_URL = "https://ipinfo.io"
 RIPESTAT_URL = "https://stat.ripe.net/data"
 INTERNETDB_URL = "https://internetdb.shodan.io"
+CENSYS_URL = "https://api.platform.censys.io/v3/global/asset/host"
 MAX_PORTS_SHOWN = 20
 MAX_VULNS_SHOWN = 5
 
@@ -187,11 +195,12 @@ def resolve(host: str) -> list:
     return sorted(out, key=lambda a: a.version)  # stable: resolver order within a family
 
 
-def _http_get_json(url: str, timeout: int = 20) -> tuple[dict | None, int]:
+def _http_get_json(url: str, timeout: int = 20, headers: dict | None = None) -> tuple[dict | None, int]:
     """GET a JSON document. Returns (data, http_status); data is None on failure."""
     req = urllib.request.Request(url, headers={
         "User-Agent": f"BouncerBot/{config.VERSION}",
         "Accept": "application/json",
+        **(headers or {}),
     })
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -247,6 +256,116 @@ def _internetdb(ip: str) -> dict | None:
     return data if isinstance(data, dict) and "ports" in data else None
 
 
+def _censys_token() -> str:
+    return os.environ.get("CENSYS_API_TOKEN", "").strip().strip("'\"")
+
+
+# Censys resets credits 30 days after sign-up, not on the 1st: the bot keeps
+# the time of each lookup and allows CENSYS_MONTHLY_LIMIT in any 30 days.
+CENSYS_WINDOW_SECONDS = 30 * 86400
+_CENSYS_TIMES_KEY = "censys_credit_times"  # JSON list of unix times, in the config table
+_CENSYS_PAUSE_KEY = "censys_paused_until"
+
+
+def _censys_times() -> list[float]:
+    try:
+        times = json.loads(database.get_config(_CENSYS_TIMES_KEY) or "[]")
+        cutoff = time.time() - CENSYS_WINDOW_SECONDS
+        return [float(t) for t in times if float(t) > cutoff]
+    except Exception:  # bad value or DB trouble: a lookup must not fail on the counter
+        return []
+
+
+def censys_credits_used() -> int:
+    """Censys lookups in the last 30 days."""
+    return len(_censys_times())
+
+
+def _censys_save(key: str, value: str):
+    try:
+        database.set_config(key, value)
+    except Exception as e:
+        config.logger.warning(f"/ip: could not save {key}: {e}")
+
+
+def _censys_paused() -> bool:
+    try:
+        return time.time() < float(database.get_config(_CENSYS_PAUSE_KEY) or 0)
+    except Exception:
+        return False
+
+
+def _censys(ip: str) -> dict | None:
+    """Censys host record (the "resource" object), or None when there is no
+    token, the monthly budget is spent, or Censys did not answer.
+
+    Called from the /ip worker only, which runs one lookup at a time - a free
+    account allows a single concurrent API action.
+    """
+    token = _censys_token()
+    if not token:
+        return None
+    with state._ip_lookup_lock:
+        hit = state._censys_cache.get(ip)
+    if hit and time.time() - hit[0] < config.CENSYS_CACHE_SECONDS:
+        return hit[1]
+    times = _censys_times()
+    if len(times) >= config.CENSYS_MONTHLY_LIMIT or _censys_paused():
+        config.logger.info(f"/ip: Censys skipped ({len(times)}/{config.CENSYS_MONTHLY_LIMIT} credits in 30 days)")
+        return None
+    data, status = _http_get_json(f"{CENSYS_URL}/{ip}", timeout=30, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.censys.api.v3.host.v1+json",
+    })
+    if status in (200, 404):  # a lookup is charged even when Censys knows nothing
+        times.append(time.time())
+        _censys_save(_CENSYS_TIMES_KEY, json.dumps([round(t) for t in times]))
+    if status in (401, 402, 403):
+        # Bad token, out of credits or no API access: rest a day instead of
+        # asking on every /ip (credits used in the web UI count too)
+        config.logger.warning(f"/ip: Censys answered HTTP {status}, pausing it for a day")
+        _censys_save(_CENSYS_PAUSE_KEY, str(round(time.time() + 86400)))
+        return None
+    if status == 404:
+        record = {}
+    else:
+        record = ((data or {}).get("result") or {}).get("resource")
+        if not isinstance(record, dict):
+            if status:
+                config.logger.info(f"/ip: Censys answered HTTP {status}")
+            return None
+    config.logger.info(f"/ip: Censys lookup for {ip} ({len(times)}/{config.CENSYS_MONTHLY_LIMIT} credits in 30 days)")
+    with state._ip_lookup_lock:
+        state._censys_cache[ip] = (time.time(), record)
+        if len(state._censys_cache) > 500:  # drop the oldest
+            oldest = min(state._censys_cache, key=lambda k: state._censys_cache[k][0])
+            state._censys_cache.pop(oldest, None)
+    return record
+
+
+def _censys_as_internetdb(rec: dict) -> dict:
+    """Censys host record -> the InternetDB shape (ports, cpes), so both
+    sources share the port / software / hint lines. Adds "titles": page titles
+    per port (a control panel login page says a lot about a host)."""
+    ports, cpes, titles = set(), set(), {}
+    for svc in rec.get("services") or []:
+        port = svc.get("port")
+        if not isinstance(port, int) or svc.get("transport_protocol", "tcp") != "tcp":
+            continue  # PORT_NAMES are TCP services
+        ports.add(port)
+        for sw in svc.get("software") or []:
+            if isinstance(sw, dict) and sw.get("product"):
+                # Same form as InternetDB's CPEs, so _cpe_product() formats both
+                cpes.add(f"cpe:/a:{sw.get('vendor') or '-'}:{sw['product']}:{sw.get('version') or ''}")
+        for ep in svc.get("endpoints") or []:
+            title = ((ep or {}).get("http") or {}).get("html_title")
+            title = " ".join(str(title or "").split())
+            # "301 Moved Permanently", "404 Not Found": server stock pages, no information
+            if title and port not in titles and not re.match(r"\d{3}\b", title):
+                titles[port] = title[:80]
+    return {"ports": sorted(ports), "cpes": sorted(cpes), "titles": titles, "source": "Censys"}
+
+
 def _cpe_product(cpe: str) -> str:
     """'cpe:/a:f5:nginx:1.18.0' -> 'nginx 1.18.0'."""
     parts = cpe.split(":")
@@ -255,16 +374,22 @@ def _cpe_product(cpe: str) -> str:
     return " ".join(p.replace("_", " ") for p in parts[3:5] if p)
 
 
-def _internetdb_lines(sdb: dict | None, ipv6: bool = False) -> list[str]:
+def _internetdb_lines(sdb: dict | None, ipv6: bool = False, censys_tried: bool = False) -> list[str]:
+    source = (sdb or {}).get("source")
     if sdb is None:
-        return ["🔌 Open ports: Shodan InternetDB did not answer"]
+        return ["🔌 Open ports: Shodan InternetDB did not answer"
+                + (" and Censys had nothing" if censys_tried else "")]
     ports = sorted(sdb.get("ports") or [])
     if not ports:
         # Shodan scans the whole IPv4 space but only IPv6 addresses it learns of
-        return ["🔌 Open ports: none seen by Shodan" + (" (IPv6 is rarely scanned)" if ipv6 else "")]
+        return ["🔌 Open ports: none seen by " + ("Shodan or Censys" if censys_tried else "Shodan")
+                + (" (IPv6 is rarely scanned)" if ipv6 else "")]
     shown = [f"{p} {PORT_NAMES[p]}" if p in PORT_NAMES else str(p) for p in ports[:MAX_PORTS_SHOWN]]
     more = f" and {len(ports) - MAX_PORTS_SHOWN} more" if len(ports) > MAX_PORTS_SHOWN else ""
-    lines = [f"🔌 Open ports: {', '.join(shown)}{more}"]
+    lines = [f"🔌 Open ports{f' ({source})' if source else ''}: {', '.join(shown)}{more}"]
+    titles = sdb.get("titles") or {}
+    for p in sorted(titles)[:3]:
+        lines.append(f"📄 {p}: {titles[p]}")
 
     software = sorted({_cpe_product(c) for c in sdb.get("cpes") or []})
     if software:
@@ -315,6 +440,14 @@ def _format_ip(ip, host: str | None = None, others: list | None = None) -> str:
     info = _ipinfo_ip(ip_s) or {}
     net = _ripestat("network-info", ip_s) or {}
     sdb = _internetdb(ip_s)
+    # Censys only fills the gap: its free credits are few, Shodan's data is free
+    censys_tried = False
+    if not (sdb or {}).get("ports") and _censys_token():
+        rec = _censys(ip_s)
+        censys_tried = rec is not None
+        if rec and rec.get("services"):
+            # Keep Shodan's host names: the Censys record has no such field we use
+            sdb = {**_censys_as_internetdb(rec), "hostnames": (sdb or {}).get("hostnames") or []}
     prefix = net.get("prefix") or ""
     asns = net.get("asns") or []
 
@@ -372,7 +505,7 @@ def _format_ip(ip, host: str | None = None, others: list | None = None) -> str:
             flags.append(privacy["service"])
         lines.append(f"🕵️ Privacy: {', '.join(flags)}" if flags else "🕵️ Privacy: no VPN / proxy / Tor / hosting")
 
-    lines += _internetdb_lines(sdb, ipv6=ip.version == 6)
+    lines += _internetdb_lines(sdb, ipv6=ip.version == 6, censys_tried=censys_tried)
 
     if host:
         cdn = next((CDN_ASNS[int(a)] for a in asns if str(a).isdigit() and int(a) in CDN_ASNS), None)
@@ -386,7 +519,10 @@ def _format_ip(ip, host: str | None = None, others: list | None = None) -> str:
     lines.append(f"💡 `/whois {ip_s}` — holder and abuse contact")
     lines.append(f"🔎 {IPINFO_URL}/{ip_s}")
     if sdb and sdb.get("ports"):
-        lines.append(f"🔎 https://www.shodan.io/host/{ip_s}")
+        if sdb.get("source") == "Censys":
+            lines.append(f"🔎 https://platform.censys.io/hosts/{ip_s}")
+        else:
+            lines.append(f"🔎 https://www.shodan.io/host/{ip_s}")
     if prefix and asns:
         lines.append(f"🔎 {IPINFO_URL}/AS{asns[0]}/{prefix}")
     return "\n".join(lines)

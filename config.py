@@ -41,7 +41,7 @@ logger = logging.getLogger("bouncer_bot")
 if os.environ.get("CALL_DEBUG_LOG", "").strip().lower() not in ("1", "true", "yes", "on"):
     for _webrtc_logger in ("aioice", "aiortc"):
         logging.getLogger(_webrtc_logger).setLevel(logging.WARNING)
-VERSION = "2.39.4"
+VERSION = "2.40.0"
 
 # Ntfy Bot has its own /newgroup. In a group where it is a member, the bouncer
 # leaves plain /newgroup to it so one command does not create two groups.
@@ -132,6 +132,10 @@ VIRUSTOTAL_RATE_LIMIT_SECONDS = 15.0
 IP_LOOKUP_INTERVAL_SECONDS = 15.0
 IP_LOOKUP_CACHE_SECONDS = 3600   # same IP / prefix / AS is answered from cache for an hour
 IP_LOOKUP_MAX_QUEUE = 5          # more waiting lookups are refused instead of queued
+# Censys host lookups (CENSYS_API_TOKEN): a free account has 100 credits per 30 days,
+# 1 credit per lookup, shared with the web UI - the bot makes at most this many in 30 days.
+CENSYS_MONTHLY_LIMIT = int(os.environ.get("CENSYS_MONTHLY_LIMIT", "90") or 90)
+CENSYS_CACHE_SECONDS = 86400     # a host's Censys record is reused for a day
 
 # /dns reports: a few at a time, the rest wait in a queue
 DNS_WORKERS = 3
