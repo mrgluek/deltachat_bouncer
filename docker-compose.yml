@@ -52,6 +52,7 @@ services:
       - IPINFO_TOKEN
       - CENSYS_API_TOKEN
       - CENSYS_MONTHLY_LIMIT
+      - CERTSPOTTER_API_KEY
       - DNS_RESOLVERS
       - NTFY_BOT_ADDRS
       - MENTION_REPLY

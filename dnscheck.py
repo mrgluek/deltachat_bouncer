@@ -15,9 +15,10 @@ Syntax follows dig - ``/dns <name|IP> [TYPE] [@server|@auth]`` in any order:
 ``/host <name|IP> [@server|@auth]`` is the short form, like the ``host`` tool:
 A, AAAA and MX of a name (following a CNAME), or PTR of an IP address.
 
-Besides DNS, the report makes one HTTPS request: the MTA-STS policy at
+Besides DNS, the report makes two HTTPS requests: the MTA-STS policy at
 https://mta-sts.<domain>/.well-known/mta-sts.txt - only to a public address,
-without redirects, at most 64 KB.
+without redirects, at most 64 KB - and the domain's certificates from CT logs
+(Cert Spotter, see certs.py).
 
 Reports run on a small pool (DNS_WORKERS at a time); the rest wait in the
 queue. Results are cached for DNS_CACHE_SECONDS.
@@ -38,6 +39,7 @@ import dns.resolver
 import dns.reversename
 from deltachat2 import events
 
+import certs
 import config
 import dc_helpers
 import state
@@ -453,6 +455,12 @@ def build_report(domain: str, res: dns.resolver.Resolver, via: str, sysres) -> s
         return (f"🌐 **{_display(domain)}** · {via}\n"
                 "❌ No A, AAAA, MX or TXT records - the name does not exist or is unused.")
 
+    # Only now, for a name that exists: Cert Spotter queries are few per hour.
+    # Runs while the rest of the report is built (PTR, SPF, MTA-STS take a while).
+    ct_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dns-ct")
+    ct_fut = ct_pool.submit(certs.lookup, domain)
+    ct_pool.shutdown(wait=False)
+
     lines = [f"🌐 DNS report: **{_display(domain)}** · {via}", ""]
 
     # Addresses
@@ -478,7 +486,17 @@ def build_report(domain: str, res: dns.resolver.Resolver, via: str, sysres) -> s
     lines.append(_caa_line(r["CAA"]))
 
     mail, chatmail = _mail_section(domain, r, sysres)
+    try:
+        ct = ct_fut.result(timeout=30)
+    except Exception as e:
+        ct = {"error": f"CT lookup failed: {e}"}
+    lines += certs.report_lines(domain, ct, _caa_groups(r["CAA"]))
     lines += mail
+    if chatmail:
+        covered = certs.chatmail_covered(domain, ct)
+        if covered is not None:
+            chatmail.insert(len(chatmail) - 1, f"{'✅' if covered else '⚠️'} Let's Encrypt certificate for "
+                               f"{domain}, mta-sts and www" + ("" if covered else ": none valid in CT logs"))
     lines += chatmail
 
     lines += ["", f"💡 `/dns {_display(domain)} <TYPE>` for raw records, `@auth` to bypass caches"]
@@ -488,17 +506,22 @@ def build_report(domain: str, res: dns.resolver.Resolver, via: str, sysres) -> s
     return "\n".join(lines)
 
 
+def _caa_groups(caa: Res) -> dict[str, list[str]]:
+    """{'issue': ['letsencrypt.org', ...], 'issuewild': [...]}; ";" means nobody."""
+    groups: dict[str, list[str]] = {}
+    for rd in caa.rdata if caa.ok else []:
+        tag = rd.tag.decode(errors="replace").lower()
+        value = rd.value.decode(errors="replace").split(";")[0].strip() or ";"
+        if value not in groups.setdefault(tag, []):
+            groups[tag].append(value)
+    return groups
+
+
 def _caa_line(caa: Res) -> str:
     """'CAA issue: letsencrypt.org, pki.goog · issuewild: …' - issuers grouped by tag."""
     if not caa.ok:
         return "ℹ️ CAA: none (any certificate authority may issue)"
-    groups: dict[str, list[str]] = {}
-    for rd in caa.rdata:
-        tag = rd.tag.decode(errors="replace")
-        value = rd.value.decode(errors="replace").split(";")[0].strip() or ";"  # ";" = nobody
-        if value not in groups.setdefault(tag, []):
-            groups[tag].append(value)
-    return "CAA " + " · ".join(f"{t}: {', '.join(v)}" for t, v in groups.items())
+    return "CAA " + " · ".join(f"{t}: {', '.join(v)}" for t, v in _caa_groups(caa).items())
 
 
 def _zone_info(domain: str, sysres) -> tuple[str | None, list[str], bool]:

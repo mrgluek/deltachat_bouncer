@@ -122,8 +122,12 @@ def chatmail_zone(**overrides):
 class FakeDNS:
     """Patches dnscheck.query / zone lookup / MTA-STS fetch with a dict of answers."""
 
-    def __init__(self, zone, policy=None, policy_err=None):
+    def __init__(self, zone, policy=None, policy_err=None, ct=None):
         self.zone = zone
+        # CT answer: by default the Let's Encrypt certificate cmdeploy gets for a relay
+        self.ct = ct if ct is not None else {"subdomains": True, "more": False, "certs": [{
+            "dns_names": [D, f"mta-sts.{D}", f"www.{D}"], "issuer": {"friendly_name": "Let's Encrypt"},
+            "not_before": "2026-10-01T00:00:00Z", "not_after": "2099-01-01T00:00:00Z"}]}
         self.policy = policy if policy is not None else {"version": "STSv1", "mode": "enforce", "mx": [D]}
         self.policy_err = policy_err
 
@@ -136,6 +140,7 @@ class FakeDNS:
             patch.object(dnscheck.dns.resolver, "zone_for_name", return_value=dns.name.from_text("example")),
             patch.object(dnscheck, "fetch_mta_sts_policy",
                          return_value=(None, self.policy_err) if self.policy_err else (self.policy, None)),
+            patch.object(dnscheck.certs, "lookup", return_value=self.ct),
         ]
         for p in self.patches:
             p.start()
@@ -239,6 +244,16 @@ class TestReport(unittest.TestCase):
         self.assertIn("✅ Required: 7/7", text)
         self.assertIn("✅ Recommended: 5/5", text)
         self.assertIn("All entries are in place", text)
+        self.assertIn(f"✅ Let's Encrypt certificate for {D}, mta-sts and www", text)
+        self.assertIn(f"✅ {D} is covered until 2099-01-01", text)
+
+    def test_relay_without_certificate(self):
+        text = report(chatmail_zone(), ct={"subdomains": True, "more": False, "certs": []})
+        self.assertIn("⚠️ Let's Encrypt certificate for", text)
+        self.assertIn("No valid certificate in CT logs", text)
+        text = report(chatmail_zone(), ct={"error": "Cert Spotter did not answer"})
+        self.assertIn("ℹ️ Cert Spotter did not answer", text)
+        self.assertNotIn("Let's Encrypt certificate for", text)  # unknown: no verdict
 
     def test_chatmail_missing_entries(self):
         zone = chatmail_zone()
