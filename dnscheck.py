@@ -596,8 +596,16 @@ def _mail_section(domain: str, r: dict, sysres) -> tuple[list[str], list[str]]:
     # DKIM
     dkim = []
     for sel in DKIM_SELECTORS:
-        rec = next((t for t in r[f"DKIM:{sel}"].records if "p=" in t), None)
-        if rec:
+        recs = r[f"DKIM:{sel}"].records
+        rec = next((t for t in recs if "p=" in t), None)
+        # A long key pasted as several TXT records instead of one record with several
+        # strings: records of a set have no order and receivers never join them
+        if (len(recs) > 1 and not any("v=dkim1" in t.lower() and "p=" in t for t in recs)
+                and any("v=dkim1" in t.lower() or "p=" in t for t in recs)):
+            dkim.append(sel)
+            lines.append(f"❌ DKIM `{sel}`: split into {len(recs)} separate TXT records - it must be one "
+                         "record (a long key is split into strings inside one record)")
+        elif rec:
             icon, info = _dkim_key_info(rec)
             dkim.append(sel)
             lines.append(f"{icon} DKIM `{sel}`: {info}")

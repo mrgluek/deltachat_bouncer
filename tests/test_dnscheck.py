@@ -314,6 +314,17 @@ class TestReport(unittest.TestCase):
         self.assertIn("NXDOMAIN", report({(D, "A"): dnscheck.Res("nxdomain")}))
         self.assertIn("No A, AAAA, MX or TXT records", report({}))
 
+    def test_dkim_split_into_records(self):
+        zone = chatmail_zone()
+        zone[(f"dkim._domainkey.{D}", "TXT")] = ok(
+            "TXT", '"v=DKIM1; h=sha256; k=rsa; "', f'"{KEY[200:]}"', f'"p={KEY[:200]}"')
+        text = report(zone)
+        self.assertIn("❌ DKIM `dkim`: split into 3 separate TXT records - it must be one record", text)
+        self.assertIn("✅ DKIM `opendkim`: RSA 2048 bit", text)  # a correct record next to it
+        # Several unrelated TXT records with one valid key: not a split key
+        zone[(f"dkim._domainkey.{D}", "TXT")] = ok("TXT", '"some note"', txt(f"v=DKIM1;k=rsa;p={KEY}"))
+        self.assertIn("✅ DKIM `dkim`: RSA 2048 bit", report(zone))
+
     def test_dkim_key_sizes(self):
         self.assertEqual(dnscheck._dkim_key_info(f"v=DKIM1;k=rsa;p={KEY}"), ("✅", "RSA 2048 bit"))
         self.assertEqual(dnscheck._dkim_key_info("v=DKIM1;p=")[0], "⚠️")
