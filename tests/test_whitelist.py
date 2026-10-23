@@ -1,6 +1,8 @@
 """Russian mobile internet whitelist (whitelist.py): parsing, lookups, report lines, refresh."""
 import os
 import sys
+import threading
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -58,7 +60,7 @@ xn--e1afmkfd.xn--p1ai
 
 class Base(unittest.TestCase):
     def setUp(self):
-        for d in (whitelist._data, whitelist._loaded_at, whitelist._next_try):
+        for d in (whitelist._data, whitelist._loaded_at, whitelist._next_try, whitelist._loading):
             d.clear()
         self.db = {}
         self.mock_fetch = MagicMock(side_effect=lambda url: DOMAINS if url.endswith("domains.txt") else LIST)
@@ -172,6 +174,11 @@ class TestSwitches(Base):
         self.assertEqual(self.db, {})
 
 
+def _join_downloads():
+    for thread in list(whitelist._loading.values()):
+        thread.join(5)
+
+
 class TestLoading(Base):
 
     def test_downloaded_once_then_refreshed(self):
@@ -180,6 +187,7 @@ class TestLoading(Base):
         self.assertEqual(self.mock_fetch.call_count, 1)
         whitelist._loaded_at["ip"] -= whitelist.REFRESH_SECONDS + 1
         whitelist.ip_line("8.8.8.8")
+        _join_downloads()
         self.assertEqual(self.mock_fetch.call_count, 2)
 
     def test_failed_download_keeps_old_list_and_waits(self):
@@ -187,13 +195,70 @@ class TestLoading(Base):
         whitelist._loaded_at["ip"] -= whitelist.REFRESH_SECONDS + 1
         self.mock_fetch.side_effect = lambda url: None
         self.assertIn("✅", whitelist.ip_line("2.63.1.1"))  # stale copy still answers
+        _join_downloads()
         whitelist.ip_line("2.63.1.1")
+        _join_downloads()
         self.assertEqual(self.mock_fetch.call_count, 2)  # no new try before RETRY_SECONDS
+
+    def test_slow_first_download_does_not_hold_the_lookup(self):
+        release = threading.Event()
+        self.mock_fetch.side_effect = lambda url: LIST if release.wait(5) else None
+        with patch.object(whitelist, "WAIT_SECONDS", 0.1):
+            started = time.monotonic()
+            self.assertIn("list unavailable", whitelist.ip_line("2.63.1.1"))
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertIn("list unavailable", whitelist.ip_line("2.63.1.1"))  # still loading
+        release.set()
+        _join_downloads()
+        self.assertEqual(self.mock_fetch.call_count, 1)  # one download, not one per lookup
+        self.assertIn("✅ in 2.63.0.0/17", whitelist.ip_line("2.63.1.1"))
+
+    def test_stale_copy_answers_while_refreshing(self):
+        whitelist.ip_line("2.63.1.1")
+        whitelist._loaded_at["ip"] -= whitelist.REFRESH_SECONDS + 1
+        release = threading.Event()
+        self.mock_fetch.side_effect = lambda url: LIST if release.wait(5) else None
+        started = time.monotonic()
+        self.assertIn("✅", whitelist.ip_line("2.63.1.1"))
+        self.assertLess(time.monotonic() - started, 2)
+        release.set()
+        _join_downloads()
 
     def test_unavailable(self):
         self.mock_fetch.side_effect = lambda url: None
         self.assertIn("list unavailable", whitelist.ip_line("2.63.1.1"))
         self.assertIn("list unavailable", whitelist.addresses_line(["2.63.1.1"]))
+
+
+class _Trickle:
+    """A response that sends a byte at a time and never ends."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, n=-1):
+        time.sleep(0.01)
+        return b"1"
+
+
+class TestFetch(unittest.TestCase):
+    def test_trickling_download_is_stopped(self):
+        with patch.object(whitelist.urllib.request, "urlopen", return_value=_Trickle()), \
+             patch.object(whitelist, "DOWNLOAD_SECONDS", 0.2), \
+             patch.object(whitelist.config.logger, "warning") as warning:
+            started = time.monotonic()
+            self.assertIsNone(whitelist._fetch("https://example.org/list.txt"))
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertIn("not finished in", warning.call_args.args[0])
+
+    def test_whole_body(self):
+        resp = MagicMock()
+        resp.__enter__.return_value.read.side_effect = [b"2.63.0.0/17\n", b"5.8.0.0/24\n", b""]
+        with patch.object(whitelist.urllib.request, "urlopen", return_value=resp):
+            self.assertEqual(whitelist._fetch("https://example.org/list.txt"), "2.63.0.0/17\n5.8.0.0/24\n")
 
 
 if __name__ == "__main__":
