@@ -30,9 +30,9 @@ except ImportError:
     _aiohttp = None
 
 import database
+from config import VERSION  # the bot's version in outgoing User-Agent headers
 
 logger = logging.getLogger("bouncer_bot.activitypub")
-VERSION = "2.14.2"
 
 # ==============================================================================
 # 1. RSA Key Management

@@ -63,6 +63,17 @@ import config
 import dc_helpers
 import state
 import dnscheck
+import whitelist
+
+_no_whitelist = patch.object(whitelist, "enabled", return_value=False)
+
+
+def setUpModule():
+    _no_whitelist.start()  # no download of the RU whitelist; test_whitelist.py covers it
+
+
+def tearDownModule():
+    _no_whitelist.stop()
 
 
 
@@ -246,6 +257,24 @@ class TestReport(unittest.TestCase):
         self.assertIn("All entries are in place", text)
         self.assertIn(f"✅ Let's Encrypt certificate for {D}, mta-sts and www", text)
         self.assertIn(f"✅ {D} is covered until 2099-01-01", text)
+
+    def test_ru_whitelist_line(self):
+        zone = chatmail_zone()
+        zone[(D, "MX")] = ok("MX", f"10 {D}.", f"20 mx2.{D}.")
+        zone[(f"mx2.{D}", "A")] = ok("A", "198.51.100.7")
+        data = {"ip": whitelist.parse("203.0.113.0/24\n"),
+                "domain": whitelist.parse_domains(f"mta-sts.{D}\nwww.other.example\n")}
+        with patch.object(whitelist, "enabled", return_value=True), \
+                patch.object(whitelist, "_get", side_effect=data.get):
+            text = report(zone)
+        # In the Addresses section, with the MX addresses not already listed there
+        line = "📶 RU mobile whitelist: 203.0.113.5 ✅ (in 203.0.113.0/24), 198.51.100.7 ❌"
+        self.assertIn(line, text)
+        self.assertLess(text.index(line), text.index("🗂 **Zone**"))
+        domains = f"📶 RU mobile whitelist (domains): ⚠️ {D} is not listed, only 1 of its subdomains: mta-sts.{D}"
+        self.assertIn(domains, text)
+        self.assertLess(text.index(domains), text.index("🗂 **Zone**"))
+        self.assertNotIn("RU mobile whitelist", report(chatmail_zone()))  # turned off
 
     def test_relay_without_certificate(self):
         text = report(chatmail_zone(), ct={"subdomains": True, "more": False, "certs": []})

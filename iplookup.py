@@ -18,6 +18,9 @@ Data sources:
   and for AS numbers. Free, no key, and global - it uses BGP data from all
   regions, not only the RIPE region. ipinfo's own ASN and IP-range APIs are
   paid plans only, so they are not used.
+- The Russian mobile internet whitelist (whitelist.py): whether an IPv4
+  address, block or AS's prefixes stay reachable when Russian operators
+  restrict mobile internet.
 
 All lookups share one global queue with at least IP_LOOKUP_INTERVAL_SECONDS
 between them (both services rate-limit per client IP, and the bot's IP is one
@@ -42,6 +45,7 @@ import config
 import database
 import dc_helpers
 import state
+import whitelist
 
 IPINFO_URL = "https://ipinfo.io"
 RIPESTAT_URL = "https://stat.ripe.net/data"
@@ -496,6 +500,9 @@ def _format_ip(ip, host: str | None = None, others: list | None = None) -> str:
         lines.append(f"🧱 Prefix: {prefix}" + (f" (announced by {origin})" if origin else ""))
     else:
         lines.append("🧱 Prefix: not announced in BGP")
+    wl = whitelist.ip_line(ip)
+    if wl:
+        lines.append(wl)
 
     # Paid plans only: privacy / connection type
     privacy = info.get("privacy")
@@ -559,6 +566,9 @@ def _format_net(net) -> str:
     block = data.get("block") or {}
     if block.get("resource"):
         lines.append(f"🗂 Registry block: {block['resource']} — {block.get('desc') or ''}".rstrip(" —"))
+    wl = whitelist.net_line(net)
+    if wl:
+        lines.append(wl)
 
     lines.append("")
     if asns:
@@ -599,6 +609,9 @@ def _format_asn(asn: int) -> str:
             lines.append(f"  … and {len(prefixes) - MAX_PREFIXES_SHOWN} more")
     elif overview.get("announced") is False or pfx:
         lines.append("📡 Announces no prefixes")
+    wl = whitelist.prefixes_line(prefixes)
+    if wl:
+        lines.append(wl)
 
     lines.append("")
     lines.append(f"🔎 {IPINFO_URL}/AS{asn}")

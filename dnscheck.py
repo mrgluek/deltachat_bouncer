@@ -18,7 +18,9 @@ A, AAAA and MX of a name (following a CNAME), or PTR of an IP address.
 Besides DNS, the report makes two HTTPS requests: the MTA-STS policy at
 https://mta-sts.<domain>/.well-known/mta-sts.txt - only to a public address,
 without redirects, at most 64 KB - and the domain's certificates from CT logs
-(Cert Spotter, see certs.py).
+(Cert Spotter, see certs.py). The IPv4 addresses of the domain and its MX hosts
+and the domain name itself are checked against the Russian mobile internet
+whitelists (whitelist.py).
 
 Reports run on a small pool (DNS_WORKERS at a time); the rest wait in the
 queue. Results are cached for DNS_CACHE_SECONDS.
@@ -43,6 +45,7 @@ import certs
 import config
 import dc_helpers
 import state
+import whitelist
 
 SUPPORTED_TYPES = ("A", "AAAA", "CNAME", "MX", "NS", "TXT", "SOA", "CAA", "SRV", "PTR",
                    "DS", "DNSKEY", "TLSA", "HTTPS", "SVCB")
@@ -477,6 +480,7 @@ def build_report(domain: str, res: dns.resolver.Resolver, via: str, sysres) -> s
             lines.append(f"ℹ️ {t}: none")
         else:
             lines.append(f"❌ {t}: {r[t].problem()}")
+    wl_at = len(lines)  # the whitelist lines go here once the MX addresses are known
 
     # Zone
     lines += ["", "🗂 **Zone**"]
@@ -486,6 +490,9 @@ def build_report(domain: str, res: dns.resolver.Resolver, via: str, sysres) -> s
     lines.append(_caa_line(r["CAA"]))
 
     mail, chatmail = _mail_section(domain, r, sysres)
+    # Addresses first, then MX addresses that differ: a relay is reached through both
+    wl = [whitelist.addresses_line(addrs + r.get("mx_ips", [])), whitelist.domain_line(domain)]
+    lines[wl_at:wl_at] = [line for line in wl if line]
     try:
         ct = ct_fut.result(timeout=30)
     except Exception as e:
