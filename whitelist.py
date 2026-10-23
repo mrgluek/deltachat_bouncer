@@ -2,16 +2,20 @@
 
 When Russian operators "restrict" mobile internet, only whitelisted resources
 stay reachable; a chatmail relay on a listed address keeps working for its
-users. Data source: the community lists of
-https://github.com/hxehex/russia-mobile-internet-whitelist, collected by hand
-from reports - operators, regions and even cell towers differ, so being listed
-is a good sign, not a guarantee. Two checks, each with its own list:
+users. The lists are community-maintained, collected from reports -
+operators, regions and even cell towers differ, so being listed is a good
+sign, not a guarantee. Two checks, each with its own list:
 
-- "ip": cidrwhitelist.txt, IPv4 subnets in CIDR notation (its ipwhitelist.txt
-  is a subset of them) - /ip for addresses, blocks and AS numbers, /dns for the
-  addresses of the domain and its MX hosts.
-- "domain": whitelist.txt, exact host names (the SNI the filters let through)
-  - /dns for the domain itself and its listed subdomains.
+- "ip": ru-mobile-whitelist-ip.txt of https://github.com/ancored/ru-mobile-whitelist,
+  rebuilt daily from several public lists (hxehex, roscomvpn, d010b, overskye,
+  escapingworm ...) minus the subnets reported as dropped from the whitelists;
+  IPv4 subnets in CIDR notation (its IPv6 lines are skipped) - /ip for
+  addresses, blocks and AS numbers, /dns for the addresses of the domain and
+  its MX hosts.
+- "domain": whitelist.txt of https://github.com/hxehex/russia-mobile-internet-whitelist,
+  exact host names (the SNI the filters let through) - /dns for the domain
+  itself and its listed subdomains. The ancored SNI list is not used: it
+  folds hosts into parent domains (domain_suffix), which loses the exact names.
 
 Each list is downloaded on first use and refreshed every REFRESH_SECONDS; when
 a download fails the old copy is kept and the next try waits RETRY_SECONDS.
@@ -34,12 +38,14 @@ import database
 import dc_helpers
 import state
 
-SOURCE_PAGE = "https://github.com/hxehex/russia-mobile-internet-whitelist"
-_RAW = "https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main"
+SOURCE_PAGES = ("https://github.com/ancored/ru-mobile-whitelist (IP subnets)",
+                "https://github.com/hxehex/russia-mobile-internet-whitelist (domains)")
+_RAW_IP = "https://raw.githubusercontent.com/ancored/ru-mobile-whitelist/release"
+_RAW_DOMAINS = "https://raw.githubusercontent.com/hxehex/russia-mobile-internet-whitelist/main"
 # kind -> (env variable, default URL, what the admin calls it)
 LISTS = {
-    "ip": ("RU_WHITELIST_URL", f"{_RAW}/cidrwhitelist.txt", "IP subnets"),
-    "domain": ("RU_WHITELIST_DOMAINS_URL", f"{_RAW}/whitelist.txt", "domains"),
+    "ip": ("RU_WHITELIST_URL", f"{_RAW_IP}/ru-mobile-whitelist-ip.txt", "IP subnets"),
+    "domain": ("RU_WHITELIST_DOMAINS_URL", f"{_RAW_DOMAINS}/whitelist.txt", "domains"),
 }
 REFRESH_SECONDS = 6 * 3600
 RETRY_SECONDS = 600
@@ -355,7 +361,8 @@ def command_reply(payload: str) -> str:
         _clear_report_caches()
     lines = ["📶 **RU mobile whitelist checks** (/ip, /dns)"]
     lines += [_status_line(k) for k in LISTS]
-    lines += [f"Source: {SOURCE_PAGE}", usage]
+    lines += [f"Source: {page}" for page in SOURCE_PAGES]
+    lines.append(usage)
     return "\n".join(lines)
 
 
