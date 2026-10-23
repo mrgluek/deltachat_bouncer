@@ -693,6 +693,7 @@ def help_command(bot, accid, event):
         help_text += "/dchannelweb<ID>on / off — Web preview, RSS and Fediverse for a channel\n"
         help_text += "/catalogsubmit [on/off] — Catalog submissions by users\n"
         help_text += "/catalogban <addr> / /catalogunban <addr> — Ban or unban a submitter\n"
+        help_text += "/ruwhitelist [ip|domains] [on|off] — RU mobile whitelist checks in /ip and /dns\n"
         help_text += "/url [base_url] — Set/view base web URL for channel previews\n"
         help_text += "/cmpingadd <server> — Add server to connectivity monitoring\n"
         help_text += "/cmpingdel <server> — Remove server from monitoring\n"

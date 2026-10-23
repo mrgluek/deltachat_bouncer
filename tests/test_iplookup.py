@@ -66,7 +66,7 @@ import state
 import iplookup
 import whitelist
 
-_no_whitelist = patch.object(whitelist, "_url", return_value="")
+_no_whitelist = patch.object(whitelist, "enabled", return_value=False)
 
 
 def setUpModule():
@@ -184,8 +184,8 @@ class TestFormatting(unittest.TestCase):
     @patch.object(iplookup, "_http_get_json", side_effect=fake_get)
     def test_ru_whitelist_lines(self, _):
         data = whitelist.parse("84.65.0.0/17\n")
-        with patch.object(whitelist, "_url", return_value="https://example.org/list.txt"), \
-                patch.object(whitelist, "_get", return_value=data):
+        with patch.object(whitelist, "enabled", return_value=True), \
+                patch.object(whitelist, "_get", side_effect=lambda kind: data):
             ip = iplookup.lookup("ip", ipaddress.ip_address("84.65.49.143"))
             net = iplookup.lookup("net", ipaddress.ip_network("84.65.0.0/16"))
             asn = iplookup.lookup("asn", 5378)
