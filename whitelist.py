@@ -17,8 +17,12 @@ sign, not a guarantee. Two checks, each with its own list:
   itself and its listed subdomains. The ancored SNI list is not used: it
   folds hosts into parent domains (domain_suffix), which loses the exact names.
 
-Each list is downloaded on first use and refreshed every REFRESH_SECONDS; when
-a download fails the old copy is kept and the next try waits RETRY_SECONDS.
+Each list is downloaded in the background on first use and refreshed every
+REFRESH_SECONDS. A lookup waits at most WAIT_SECONDS for the first copy (then
+says "list unavailable") and is answered from the old copy while a refresh
+runs; a download is stopped after DOWNLOAD_SECONDS (a throttled connection can
+trickle bytes forever without hitting the socket timeout). When a download
+fails the old copy is kept and the next try waits RETRY_SECONDS.
 The admin turns each check on or off with /ruwhitelist (stored in the
 database). Without that, RU_WHITELIST_URL / RU_WHITELIST_DOMAINS_URL in .env
 decide: unset means on with the default list, another URL means a list in the
@@ -49,17 +53,20 @@ LISTS = {
 }
 REFRESH_SECONDS = 6 * 3600
 RETRY_SECONDS = 600
+WAIT_SECONDS = 15
+DOWNLOAD_SECONDS = 120
 MAX_BYTES = 16 * 1024 * 1024
 MAX_SHOWN = 5
 
 LABEL = "📶 RU mobile whitelist"
 
-_fetch_lock = threading.Lock()   # one download at a time; others wait for its result
+_lock = threading.Lock()   # guards the dicts below
 # kind -> parsed list: "ip" {"nets": {prefixlen: {network int}}, "starts", "ends", "count"},
 # "domain" {"names": set, "count"}
 _data: dict[str, dict] = {}
 _loaded_at: dict[str, float] = {}
 _next_try: dict[str, float] = {}
+_loading: dict[str, threading.Thread] = {}   # kind -> its running download
 
 
 def _env(kind: str) -> str:
@@ -90,12 +97,21 @@ def enabled(kind: str) -> bool:
 
 def _fetch(url: str) -> str | None:
     req = urllib.request.Request(url, headers={"User-Agent": f"BouncerBot/{config.VERSION}"})
+    deadline = time.monotonic() + DOWNLOAD_SECONDS
+    body = bytearray()
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
-            return resp.read(MAX_BYTES).decode("utf-8", errors="replace")
+            while len(body) < MAX_BYTES:
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f"not finished in {DOWNLOAD_SECONDS} s ({len(body)} bytes)")
+                chunk = resp.read(min(65536, MAX_BYTES - len(body)))
+                if not chunk:
+                    break
+                body += chunk
     except Exception as e:
         config.logger.warning(f"RU whitelist: download of {url} failed: {e}")
         return None
+    return body.decode("utf-8", errors="replace")
 
 
 def parse(text: str) -> dict:
@@ -143,25 +159,42 @@ def parse_domains(text: str) -> dict:
     return {"names": names, "count": len(names)}
 
 
+def _load(kind: str):
+    """Download and parse one list (in its own thread)."""
+    started = time.time()
+    url = _url(kind)
+    config.logger.info(f"RU whitelist: downloading {url}")
+    text = _fetch(url)
+    new = (parse if kind == "ip" else parse_domains)(text) if text else None
+    with _lock:
+        if new and new["count"]:
+            _data[kind], _loaded_at[kind] = new, started
+        else:
+            _next_try[kind] = time.time() + RETRY_SECONDS
+        _loading.pop(kind, None)
+    if new and new["count"]:
+        config.logger.info(f"RU whitelist: loaded {new['count']} {LISTS[kind][2]} in {time.time() - started:.1f} s")
+
+
 def _get(kind: str) -> dict | None:
-    """The current list, downloading it when missing or stale; None if unavailable."""
-    now = time.time()
-    data = _data.get(kind)
-    if data is not None and now - _loaded_at.get(kind, 0) < REFRESH_SECONDS:
-        return data
-    with _fetch_lock:
+    """The current list, starting a download when missing or stale; None if unavailable.
+
+    Waits up to WAIT_SECONDS only when there is no copy yet; a stale copy
+    answers right away while the refresh runs.
+    """
+    with _lock:
         now = time.time()
         data = _data.get(kind)
-        if (data is not None and now - _loaded_at.get(kind, 0) < REFRESH_SECONDS) or now < _next_try.get(kind, 0):
-            return data  # fresh after waiting on the lock, or a failed try was recent
-        text = _fetch(_url(kind))
-        new = (parse if kind == "ip" else parse_domains)(text) if text else None
-        if new and new["count"]:
-            _data[kind], _loaded_at[kind] = new, now
-            config.logger.info(f"RU whitelist: loaded {new['count']} {LISTS[kind][2]}")
-            return new
-        _next_try[kind] = now + RETRY_SECONDS
-        return data
+        if data is not None and now - _loaded_at.get(kind, 0) < REFRESH_SECONDS:
+            return data
+        thread = _loading.get(kind)
+        if thread is None and now >= _next_try.get(kind, 0):
+            thread = threading.Thread(target=_load, args=(kind,), name=f"ru-whitelist-{kind}", daemon=True)
+            _loading[kind] = thread
+            thread.start()
+    if data is None and thread is not None:
+        thread.join(WAIT_SECONDS)
+    return _data.get(kind)
 
 
 def _subnet_of(data: dict, addr: int, max_len: int = 32) -> str | None:
