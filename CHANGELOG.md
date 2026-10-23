@@ -12,6 +12,9 @@ All notable changes to this project will be documented in this file.
 - **`/ruwhitelist [ip|domains] [on|off]`** (admin): switches the IP check, the domain check or both, stored in the database; without arguments it shows the state and how many entries are loaded. Switching drops cached `/ip` and `/dns` answers. Until the admin sets it, `RU_WHITELIST_URL` / `RU_WHITELIST_DOMAINS_URL` in `.env` decide: unset means on with the default list, another URL a list in the same format, an empty value off.
 - Each list is downloaded on first use and refreshed every 6 hours; a failed download keeps the old copy and is retried after 10 minutes.
 
+### Fixed
+- ActivityPub requests (Fediverse deliveries, follows, actor fetches) sent `User-Agent: BouncerBot/2.14.2`: `activitypub.py` kept its own stale version number. It now uses the bot's version from `config.py`, like everything else.
+
 ## [2.41.1] - 2026-10-22
 
 ### Fixed
