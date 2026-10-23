@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.42.0] - 2026-10-23
+
+### Added
+- **`/ip` and `/dns` check the Russian mobile internet whitelist** (new `whitelist.py`). When Russian operators restrict mobile internet, only whitelisted addresses stay reachable, so it matters whether a relay's address is listed. Data: the community list [hxehex/russia-mobile-internet-whitelist](https://github.com/hxehex/russia-mobile-internet-whitelist) (`cidrwhitelist.txt`, IPv4 subnets; its `ipwhitelist.txt` lies entirely inside them).
+  - `/ip <address>`: `📶 RU mobile whitelist: ✅ in 2.63.0.0/17` or `❌ not listed` (IPv6: not checked, the list is IPv4 only).
+  - `/ip <block>`: listed as a whole, partly (how many addresses, which subnets) or not at all; `/ip AS<n>`: how many of the announced IPv4 prefixes are listed in whole or part.
+  - `/dns <domain>`: one line in the Addresses section for the IPv4 addresses of the domain and of its MX hosts.
+- The list is downloaded on first use and refreshed every 6 hours; a failed download keeps the old copy and is retried after 10 minutes. `RU_WHITELIST_URL` in `.env` points to another list in the same format; an empty value turns the check off.
+
 ## [2.41.1] - 2026-10-22
 
 ### Fixed

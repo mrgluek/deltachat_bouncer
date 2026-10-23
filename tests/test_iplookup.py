@@ -64,6 +64,17 @@ import config
 import dc_helpers
 import state
 import iplookup
+import whitelist
+
+_no_whitelist = patch.object(whitelist, "_url", return_value="")
+
+
+def setUpModule():
+    _no_whitelist.start()  # no download of the RU whitelist; test_whitelist.py covers it
+
+
+def tearDownModule():
+    _no_whitelist.stop()
 
 
 
@@ -169,6 +180,20 @@ class TestFormatting(unittest.TestCase):
         self.assertIn("Part of announced prefix 84.64.0.0/13", text)
         self.assertIn("AS5378 Vodafone Limited", text)
         self.assertIn("84.0.0.0/8", text)
+
+    @patch.object(iplookup, "_http_get_json", side_effect=fake_get)
+    def test_ru_whitelist_lines(self, _):
+        data = whitelist.parse("84.65.0.0/17\n")
+        with patch.object(whitelist, "_url", return_value="https://example.org/list.txt"), \
+                patch.object(whitelist, "_get", return_value=data):
+            ip = iplookup.lookup("ip", ipaddress.ip_address("84.65.49.143"))
+            net = iplookup.lookup("net", ipaddress.ip_network("84.65.0.0/16"))
+            asn = iplookup.lookup("asn", 5378)
+        self.assertIn("📶 RU mobile whitelist: ✅ in 84.65.0.0/17", ip)
+        self.assertIn("📶 RU mobile whitelist: ⚠️ partly listed, 32768 of 65536 addresses (50%)", net)
+        self.assertIn("📶 RU mobile whitelist: ✅ 1 of 2 IPv4 prefixes listed in whole or part: 84.64.0.0/13", asn)
+        # Turned off (as in the other tests): no line at all
+        self.assertNotIn("RU mobile whitelist", iplookup.lookup("ip", ipaddress.ip_address("84.65.49.143")))
 
 
 class TestInternetDB(unittest.TestCase):
