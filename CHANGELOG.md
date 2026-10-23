@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.42.1] - 2026-10-23
+
+### Changed
+- **RU mobile whitelist: fresher IP subnets.** The IP check now uses `ru-mobile-whitelist-ip.txt` of [ancored/ru-mobile-whitelist](https://github.com/ancored/ru-mobile-whitelist) instead of hxehex's `cidrwhitelist.txt`, whose subnets had not changed since May 2026. The ancored list is rebuilt daily from several public lists (hxehex, roscomvpn, d010b, overskye, escapingworm) and drops the subnets reported as removed from the whitelists. The domain check keeps hxehex's `whitelist.txt`: the ancored SNI list folds hosts into parent domains, so `/dns` could no longer tell a listed host from a listed subdomain. `/ruwhitelist` names both sources. `RU_WHITELIST_URL` in `.env` still overrides the default.
+
 ## [2.42.0] - 2026-10-23
 
 ### Added
