@@ -74,6 +74,9 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 4. **Claim Admin Ownership:**
    Send `/initadmin` to the bot in a private message to become the administrator.
 
+5. **Updates:**
+   Run `./update.sh` (e.g. from cron) to deploy the newest release: the highest `vX.Y.Z` tag, from GitHub or, when GitHub is unreachable, from the Forgejo mirror; `-f` rebuilds the container without changes. Commits on `master` that are not released yet are not deployed. In `.env.local`, `UPDATE_REF=v2.42.0` stays on that release (to roll back; remove it to follow new releases again), `UPDATE_REF=master` follows the branch, and `MONITOR_URL` pings a healthcheck on start, success and failure. Pushing a `vX.Y.Z` tag publishes the GitHub release with that version's `CHANGELOG.md` section.
+
 ## Commands
 
 - `/bounce [username]` — Show user activity, or check inactive members in current group (Shows warning candidates and observation progress if `/autokick` is on, otherwise 21 days; displays role badges and age indicators).

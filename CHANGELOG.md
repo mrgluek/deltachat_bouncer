@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.43.0] - 2026-10-23
+
+### Changed
+- **The server runs releases, not the tip of `master`.** `update.sh` deploys the newest `vX.Y.Z` tag, so a merge into `master` reaches the server only once it is released; several PRs can go out together. `UPDATE_REF` in `.env.local` pins a release (`UPDATE_REF=v2.42.0` - a rollback; empty again = newest) or follows a branch as before (`UPDATE_REF=master`). A release tag moved on GitHub or Forgejo makes the update fail instead of deploying the changed code. Errors that stopped the script with a message (both remotes unreachable, an unknown `UPDATE_REF`) now also ping the healthcheck's `/fail`, not only failed commands. The script now runs as one function, so the `git reset` that rewrites `update.sh` cannot confuse the running copy.
+- **Releases are published by a tag** (new `.github/workflows/release.yml`): pushing `vX.Y.Z` checks that `config.py` has that version, creates the GitHub release with the version's section of this file as its notes (an existing release is left alone), then sends the ntfy notification and the `bot-updated` dispatch to `hass-addons-deltachat` (now with `"version"` in the payload). Both used to go out on every push to `master` (`bouncer-changelog.yml`, removed), so Home Assistant users got unreleased code.
+- Releasing: merge, then `git tag -a vX.Y.Z -m "..." <commit> && git push origin vX.Y.Z`.
+- **Upgrading:** tag `v2.43.0` right after merging this. Until then the new `update.sh` would deploy `v2.42.1`, which still has the old script that follows `master` - and the server would switch back and forth on every run.
+
 ## [2.42.1] - 2026-10-23
 
 ### Changed
