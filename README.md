@@ -55,12 +55,17 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
    cd deltachat_bouncer
    ```
 
-2. **Initialize Account:**
-   Run the initialization command once to set up the bot's email and password:
+2. **Configure Account and Admin (Optional):**
+   Skip this step and the bot creates its own account at first start: the Delta Chat core (2.62+) picks the fastest chatmail relay from its built-in list and later adds further relays in the background. The new address is logged (`Account created: …`).
+
+   To choose the account yourself, initialize it once with an email and password, or with `DCACCOUNT:server.tld` for an account on a specific chatmail relay:
 
    ```bash
    docker compose run --rm bot python bot.py init bot-email@example.com your_password
+   docker compose run --rm bot python bot.py init DCACCOUNT:server.tld
    ```
+
+   The admin can be set on the server (see [Set Administrator](#set-administrator)) or later in the bot chat with `/initadmin` (step 4).
 
 3. **Start the Bot:**
 
