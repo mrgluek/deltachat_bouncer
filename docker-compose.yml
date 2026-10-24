@@ -4,6 +4,14 @@ services:
     container_name: deltachat_bouncer
     init: true
     restart: always
+    # Docker's default soft limit is 1024 open files. Each cmping/cmcall
+    # deltachat-rpc-server keeps every profile's database open, and a run out
+    # of descriptors fails every DNS lookup (EMFILE), reported by core as
+    # "Could not find DNS resolutions" (issue #7).
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     logging:
       driver: json-file
       options:

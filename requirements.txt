@@ -6,7 +6,7 @@ qrcode>=7.4.2,<8.0.0
 pillow>=10.4.0
 cmping @ git+https://github.com/mrgluek/cmping.git@e66d14f77a190b1cc22655b0a47f74b9f46361d8
 aiortc>=1.9.0
-cmcall @ git+https://github.com/mrgluek/cmcall.git@407e794ce6c76fd186abfcfb5394a13687c41cc9
+cmcall @ git+https://github.com/mrgluek/cmcall.git@88d41edd92c16d180d447ad6b8235c567f2d46fe
 cryptography>=42.0.0,<45.0.0
 rembg[cpu]>=2.0.50
 dnspython>=2.6.0
