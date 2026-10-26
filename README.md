@@ -286,7 +286,7 @@ Although we recommend using `/addtransport` in chat, you can also add a backup r
 
 To keep server disk usage to an absolute minimum, the bot is configured to:
 
-1. **Disable Auto-Downloads:** Disables downloading any attachments/media files automatically (`download_limit` is set to `1` byte). Attachments are only downloaded on demand (e.g. `/sticker`, `/virus`, or `/save` of a message with a file; FAQ files are copied to `./data/faq/` and are not affected by the cleanup below).
+1. **Disable Auto-Downloads:** Disables automatic downloads of attachments/media files over 64 KB (`download_limit` is set to 65536 bytes; at 1 byte the core also deferred every plain text message, which delayed replies). Attachments are only downloaded on demand (e.g. `/sticker`, `/virus`, or `/save` of a message with a file; FAQ files are copied to `./data/faq/` and are not affected by the cleanup below).
 2. **Auto-Delete Old Messages:** Automatically deletes messages older than 36 hours (`delete_device_after` set to `36 hours` / 1.5 days) to prevent the main SQLite database (`dc.db`) from growing while preserving a buffer for `/top` 24-hour activity stats.
 
 ### Safe Disk Space Cleanup

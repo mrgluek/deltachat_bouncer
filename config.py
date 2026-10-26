@@ -41,7 +41,10 @@ logger = logging.getLogger("bouncer_bot")
 if os.environ.get("CALL_DEBUG_LOG", "").strip().lower() not in ("1", "true", "yes", "on"):
     for _webrtc_logger in ("aioice", "aiortc"):
         logging.getLogger(_webrtc_logger).setLevel(logging.WARNING)
-VERSION = "2.44.0"
+VERSION = "2.44.1"
+# Attachments over 64 KB are not downloaded automatically. Not 1 byte: the core then also defers
+# every plain text message (commands, links) to a one-by-one "download later", which delays replies.
+DOWNLOAD_LIMIT = 65536
 
 # Ntfy Bot has its own /newgroup. In a group where it is a member, the bouncer
 # leaves plain /newgroup to it so one command does not create two groups.

@@ -397,11 +397,11 @@ def on_init(bot, args):
         except Exception as e:
             bot.logger.warning(f"Could not set avatar: {e}")
             
-        # Optimize storage (disable auto-download of attachments, auto-delete messages after 36 hours to buffer /top 24h stats)
+        # Optimize storage (no auto-download of attachments over 64 KB, auto-delete messages after 36 hours to buffer /top 24h stats)
         try:
-            bot.rpc.set_config(state.dc_accid, "download_limit", "1")
+            bot.rpc.set_config(state.dc_accid, "download_limit", str(config.DOWNLOAD_LIMIT))
             bot.rpc.set_config(state.dc_accid, "delete_device_after", "129600") # 36 hours (1.5 days) to buffer /top 24h stats
-            bot.logger.info("Configured auto-download limit (1 byte) and message deletion (36 hours) in on_init.")
+            bot.logger.info("Configured auto-download limit (64 KB) and message deletion (36 hours) in on_init.")
         except Exception as e:
             bot.logger.warning(f"Could not configure storage optimization in on_init: {e}")
 
@@ -623,9 +623,9 @@ def on_start(bot, args):
     
     # Ensure storage optimization settings are active
     try:
-        bot.rpc.set_config(accid, "download_limit", "1")
+        bot.rpc.set_config(accid, "download_limit", str(config.DOWNLOAD_LIMIT))
         bot.rpc.set_config(accid, "delete_device_after", "129600") # 36 hours (1.5 days) to buffer /top 24h stats
-        config.logger.info("Successfully set auto-download limit to 1 byte and delete_device_after to 36 hours to optimize storage.")
+        config.logger.info("Successfully set auto-download limit to 64 KB and delete_device_after to 36 hours to optimize storage.")
     except Exception as e:
         config.logger.error(f"Failed to set storage optimization settings in on_start: {e}")
     
