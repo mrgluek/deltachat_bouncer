@@ -12,6 +12,7 @@ import time
 from deltachat2 import MsgData
 
 import database
+import dc_fingerprint
 import state
 from config import logger
 from outbox import outbox, PRIO_ALERT, PRIO_REPLY, PRIO_LOW  # noqa: F401  (priorities for callers)
@@ -110,74 +111,8 @@ def _get_contact_age_indicator(contact_id: int, is_multi_chat: bool = False) -> 
 # ── Admin helpers ──
 
 def _get_contact_fingerprint(bot, accid, contact_id, contact=None):
-    self_fps = set()
-    try:
-        bot_addrs = []
-        # Get primary address
-        bot_addr = bot.rpc.get_config(accid, "addr")
-        if bot_addr:
-            bot_addrs.append(bot_addr.lower().strip())
-
-        # Get all transport aliases (crucial if chat was started via secondary relay)
-        try:
-            transports = bot.rpc.list_transports(accid)
-            for t in transports:
-                t_addr = t.get('addr', '') if isinstance(t, dict) else getattr(t, 'addr', '')
-                if t_addr:
-                    bot_addrs.append(t_addr.lower().strip())
-        except Exception:
-            pass
-
-        if bot_addrs:
-            for args in [(accid, contact_id), (contact_id,)]:
-                try:
-                    enc_info_self = bot.rpc.get_contact_encryption_info(*args)
-                    if enc_info_self:
-                        blocks = re.split(r'\n\s*\n', enc_info_self.strip())
-                        for block in blocks:
-                            if any(a in block.lower() for a in bot_addrs):
-                                matches = re.findall(r'[0-9a-fA-F]{32,64}', "".join(block.split()).replace(':', ''))
-                                self_fps.update(m.upper() for m in matches)
-                        break
-                except Exception:
-                    continue
-
-        if self_fps:
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"Detected bot's own fingerprints from enc_info: {[f[-8:] for f in self_fps]}")
-    except Exception as e:
-        logger.error(f"Error detecting self-fingerprint: {e}")
-
-    # Filter fingerprints from contact object
-    if contact:
-        get_val = getattr(contact, 'get', lambda k: getattr(contact, k, None))
-        for attr in ['fingerprint', 'key_fingerprint', 'public_key']:
-            val = get_val(attr)
-            if val:
-                matches = re.findall(r'[0-9a-fA-F]{32,64}', str(val).replace(' ', '').replace(':', ''))
-                valid_matches = [m.upper() for m in matches if m.upper() not in self_fps]
-                if valid_matches:
-                    return ",".join(valid_matches)
-    try:
-        fp = bot.rpc.get_contact_config(accid, contact_id, "fp")
-        if fp and fp.upper().replace(' ', '') not in self_fps:
-            return fp.upper().replace(' ', '')
-    except Exception:
-        pass
-
-    for args in [(accid, contact_id), (contact_id,)]:
-        try:
-            enc_info = bot.rpc.get_contact_encryption_info(*args)
-            if enc_info:
-                cleaned = "".join(enc_info.split()).replace(':', '')
-                matches = re.findall(r'[0-9a-fA-F]{32,64}', cleaned)
-                # Filter out bot's own fingerprints
-                valid_matches = [m.upper() for m in matches if m.upper() not in self_fps]
-                if valid_matches:
-                    return ",".join(valid_matches)
-        except Exception:
-            continue
-    return None
+    """The contact's key fingerprint, or None; see dc_fingerprint. `contact` is unused, kept for callers."""
+    return dc_fingerprint.get_contact_fingerprint(bot.rpc, accid, contact_id)
 
 
 def admin_key_contact_id(bot, accid):
