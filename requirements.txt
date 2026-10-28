@@ -1,12 +1,14 @@
 deltabot-cli==8.1.2
 deltachat2[full]<1.0.0
-deltachat-rpc-server==2.65.0
+deltachat-rpc-server==2.66.0
+# cmping/cmcall use the client; keep it on the server's version
+deltachat-rpc-client==2.66.0
 aiohttp>=3.10.5,<4.0.0
 qrcode>=7.4.2,<8.0.0
 pillow>=10.4.0
-cmping @ git+https://github.com/mrgluek/cmping.git@e66d14f77a190b1cc22655b0a47f74b9f46361d8
+cmping @ git+https://github.com/mrgluek/cmping.git@312d28c357b96e3e192a7037840cf4acf8287d05
 aiortc>=1.9.0
-cmcall @ git+https://github.com/mrgluek/cmcall.git@88d41edd92c16d180d447ad6b8235c567f2d46fe
+cmcall @ git+https://github.com/mrgluek/cmcall.git@10a2a72cfb6866920b4ffca58645297c52f6cf89
 cryptography>=42.0.0,<45.0.0
 rembg[cpu]>=2.0.50
 dnspython>=2.6.0

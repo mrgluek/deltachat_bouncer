@@ -14,6 +14,7 @@ from deltachat2 import events, MsgData
 
 import config
 import database
+import dc_fingerprint
 import dc_helpers
 import moderation
 import state
@@ -383,7 +384,7 @@ def search_command(bot, accid, event, skip_cooldown: bool = False):
 
     self_addr = ""
     try:
-        self_addr = (bot.rpc.get_config(accid, "configured_addr") or bot.rpc.get_config(accid, "addr") or "").lower().strip()
+        self_addr = dc_fingerprint.get_self_addr(bot.rpc, accid).lower()
     except Exception:
         pass
 

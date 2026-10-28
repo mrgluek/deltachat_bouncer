@@ -27,6 +27,7 @@ import cmping_commands
 import commands
 import config
 import database
+import dc_fingerprint
 import dc_helpers
 import faq  # noqa: F401  (registers /faq, /save, /remove and topic answers)
 import handlers
@@ -329,7 +330,7 @@ def ensure_configured_account(bot, args) -> None:
     try:
         bot.rpc.set_config(accid, "bot", "1")
         bot.rpc.init_transports(accid, None)
-        addr = bot.rpc.get_config(accid, "configured_addr")
+        addr = dc_fingerprint.get_self_addr(bot.rpc, accid)
         bot.logger.info(f"Account created: {addr}")
     except Exception as e:
         # serve then exits with "no configured accounts" and the container restart retries

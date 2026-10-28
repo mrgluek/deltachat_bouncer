@@ -76,7 +76,7 @@ def _get_bot_domains(bot, accid) -> list[str]:
     # Fallback to configured active address domain
     if not bot_domains:
         try:
-            addr = bot.rpc.get_config(accid, "configured_addr") or bot.rpc.get_config(accid, "addr")
+            addr = dc_fingerprint.get_self_addr(bot.rpc, accid)
             if addr:
                 domain = addr.split('@')[-1] if '@' in addr else addr
                 domain = domain.strip().lower()
