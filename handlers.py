@@ -27,8 +27,6 @@ import dc_helpers
 import mentions
 import web.routes
 
-@config.dc_cli.on(events.NewMessage(is_info=True, is_bot=None, is_outgoing=None))
-
 
 def _expire_invite_message(bot, accid, dc_chat_id, invite_msg_id):
     """Deletes a used single-use invite for everyone, or marks it expired if that fails."""
@@ -44,6 +42,9 @@ def _expire_invite_message(bot, accid, dc_chat_id, invite_msg_id):
             config.logger.error(f"Failed to edit invite message {invite_msg_id}: {edit_err}")
 
 
+# The decorator must sit right on this function: from v2.38.0 to v2.44.2 a helper inserted above
+# took it, every info message raised a TypeError and this handler never ran
+@config.dc_cli.on(events.NewMessage(is_info=True, is_bot=None, is_outgoing=None))
 def handle_dc_info_message(bot, accid, event):
     msg = event.msg
     dc_chat_id = msg.chat_id
