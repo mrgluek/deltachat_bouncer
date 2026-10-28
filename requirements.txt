@@ -6,7 +6,7 @@ deltachat-rpc-client==2.66.0
 aiohttp>=3.10.5,<4.0.0
 qrcode>=7.4.2,<8.0.0
 pillow>=10.4.0
-cmping @ git+https://github.com/mrgluek/cmping.git@fcf0e55980a3329b03dce2b67a62175f4d8285af
+cmping @ git+https://github.com/mrgluek/cmping.git@34c753def54ebe1a1ff9405288dbca0071e5a728
 aiortc>=1.9.0
 cmcall @ git+https://github.com/mrgluek/cmcall.git@10a2a72cfb6866920b4ffca58645297c52f6cf89
 cryptography>=42.0.0,<45.0.0

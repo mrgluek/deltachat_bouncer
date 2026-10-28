@@ -108,10 +108,63 @@ class TestBouncerBot(unittest.TestCase):
         self.assertEqual(cmping._format_duration(86400), "1d")
         self.assertEqual(cmping._format_duration(90000), "1d 1h")
 
-    def test_cmping_cmd_waits_half_the_run_for_profiles(self):
+    def test_cmping_cmd_keeps_cmping_limits_below_the_run_timeout(self):
         self.assertEqual(cmping.cmping_cmd("/bin/cmping", 3, "a.example", "b.example", timeout=60),
-                         ["/bin/cmping", "-c", "3", "-w", "30", "a.example", "b.example"])
-        self.assertEqual(cmping.cmping_cmd("/bin/cmping", "5", "a.example", "b.example", timeout=90)[3:5], ["-w", "45"])
+                         ["/bin/cmping", "-c", "3", "-w", "30", "--grace", "10", "--json", "a.example", "b.example"])
+        # --both pings twice: a third of the time for the profiles
+        self.assertEqual(cmping.cmping_cmd("/bin/cmping", 3, "a.example", "b.example", timeout=90, both=True),
+                         ["/bin/cmping", "-c", "3", "-w", "30", "--grace", "15", "--json", "--both",
+                          "a.example", "b.example"])
+
+    def _cmping_json(self, directions=None, error=None):
+        return json.dumps({"ok": error is None, "error": error, "directions": directions or []})
+
+    def _direction(self, received=3, avg=900.0):
+        delivery = {"min": avg - 100, "avg": avg, "max": avg + 100, "mdev": 50.0} if received else None
+        return {"sent": 3, "received": received, "expected": 3, "delivery_ms": delivery}
+
+    def test_run_cmping_both_directions(self):
+        out = self._cmping_json([self._direction(avg=900.0), self._direction(avg=1100.0)])
+        with patch("cmping._run_cmping_subprocess", return_value=(out, "", 0)) as run:
+            (fwd, back), setup_error = cmping.run_cmping("/bin/cmping", "a.example", "b.example", 3, 90, both=True)
+        self.assertIn("--both", run.call_args[0][0])
+        self.assertFalse(setup_error)
+        self.assertEqual((fwd["success"], fwd["avg"], back["avg"]), (True, 900.0, 1100.0))
+
+    def test_run_cmping_setup_error_is_about_the_relay(self):
+        err = "Timeout or error waiting for profiles to be online: x@b.example not online after 30s"
+        with patch("cmping._run_cmping_subprocess", return_value=(self._cmping_json(error=err), "", 1)):
+            (fwd, back), setup_error = cmping.run_cmping("/bin/cmping", "a.example", "b.example", 3, 90, both=True)
+        self.assertTrue(setup_error)
+        self.assertEqual((fwd["success"], fwd["error"], back["error"]), (False, err, err))
+
+    def test_run_cmping_loss(self):
+        out = self._cmping_json([self._direction(received=1)])
+        with patch("cmping._run_cmping_subprocess", return_value=(out, "", 1)):
+            (res,), setup_error = cmping.run_cmping("/bin/cmping", "a.example", "b.example", 3, 60)
+        self.assertFalse(setup_error)
+        self.assertEqual(res, {"success": False, "error": "2 of 3 pings lost"})
+
+    def test_run_cmping_falls_back_to_text_and_timeout(self):
+        text = "rtt min/avg/max/mdev = 1.000/2.000/3.000/0.500 ms\n"
+        with patch("cmping._run_cmping_subprocess", return_value=(text, "", 0)):
+            (res,), _ = cmping.run_cmping("/bin/cmping", "a.example", "b.example", 1, 60)
+        self.assertEqual((res["success"], res["avg"]), (True, 2.0))
+        with patch("cmping._run_cmping_subprocess",
+                   side_effect=__import__("subprocess").TimeoutExpired("cmping", 60)):
+            results, _ = cmping.run_cmping("/bin/cmping", "a.example", "b.example", 1, 60, both=True)
+        self.assertEqual(results, [{"success": False, "error": "Timeout expired (60s)"}] * 2)
+
+    def test_two_server_cmping_report_uses_one_run(self):
+        out = self._cmping_json([self._direction(avg=900.0), self._direction(avg=1100.0)])
+        with patch("cmping._run_cmping_subprocess", return_value=(out, "", 0)) as run, \
+                patch("shutil.which", return_value="/usr/bin/cmping"), \
+                patch("dc_helpers._react"), patch("dc_helpers._send") as send:
+            cmping_commands._bg_cmping_worker_inner(MagicMock(), 1, 100, 200, [], ["a.example", "b.example"])
+        run.assert_called_once()
+        report = send.call_args[0][3]
+        self.assertIn("1️⃣→2️⃣ 900.0 ms", report)
+        self.assertIn("1️⃣←2️⃣ 1100.0 ms", report)
 
     def test_profile_timeout_names_the_relay(self):
         # cmping exits 1 with this line when a profile does not come online in time

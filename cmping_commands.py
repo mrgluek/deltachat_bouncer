@@ -6,7 +6,6 @@ Execution primitives and incident formatting live in cmping.py."""
 import concurrent.futures
 import os
 import shutil
-import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -58,41 +57,16 @@ def _bg_cmping_worker_inner(bot, accid, chat_id, msg_id, bot_domains, specified_
             ]
             return any(kw in err_lower for kw in keywords)
 
-        # Ping s1 -> s2
-        forward_res = None
-        forward_general = False
+        # One cmping run pings s1 -> s2 and back (--both) with the same profiles
         try:
-            cmd = cmping.cmping_cmd(cmping_path, 3, s1, s2, timeout=60)
-            config.logger.info(f"Running: {' '.join(cmd)}")
-            stdout, stderr, rc = cmping._run_cmping_subprocess(cmd, timeout=60)
-            res = cmping._parse_single_cmping(stdout, stderr, rc)
-            if res.get("success"):
-                forward_res = res
-            else:
-                forward_res = res
-                forward_general = is_general_error_two(res.get("error", ""))
-        except subprocess.TimeoutExpired:
-            forward_res = {"success": False, "error": "Timeout expired (60s)"}
-            forward_general = False
+            config.logger.info(f"Running cmping {s1} <-> {s2}")
+            (forward_res, backward_res), setup_error = cmping.run_cmping(
+                cmping_path, s1, s2, 3, timeout=90, both=True)
+            forward_general = setup_error or (
+                not forward_res.get("success") and is_general_error_two(forward_res.get("error", "")))
         except Exception as e:
-            forward_res = {"success": False, "error": str(e)}
+            forward_res = backward_res = {"success": False, "error": str(e)}
             forward_general = is_general_error_two(str(e))
-
-        # Ping s2 -> s1
-        backward_res = None
-        try:
-            cmd = cmping.cmping_cmd(cmping_path, 3, s2, s1, timeout=60)
-            config.logger.info(f"Running: {' '.join(cmd)}")
-            stdout, stderr, rc = cmping._run_cmping_subprocess(cmd, timeout=60)
-            res = cmping._parse_single_cmping(stdout, stderr, rc)
-            if res.get("success"):
-                backward_res = res
-            else:
-                backward_res = res
-        except subprocess.TimeoutExpired:
-            backward_res = {"success": False, "error": "Timeout expired (60s)"}
-        except Exception as e:
-            backward_res = {"success": False, "error": str(e)}
 
         report_body_lines = []
         all_failed = True
@@ -175,43 +149,20 @@ def _bg_cmping_worker_inner(bot, accid, chat_id, msg_id, bot_domains, specified_
         for lock in locks:
             lock.acquire()
         try:
-            forward_res = None
-            forward_general = False
+            # One cmping run pings h1 -> h2 and back (--both) with the same profiles
             try:
-                cmd = cmping.cmping_cmd(cmping_path, 3, h1, h2, timeout=60)
-                config.logger.info(f"Running: {' '.join(cmd)}")
-                stdout, stderr, rc = cmping._run_cmping_subprocess(cmd, timeout=60)
-                res = cmping._parse_single_cmping(stdout, stderr, rc)
-                if res.get("success"):
-                    forward_res = res
-                else:
-                    forward_res = res
-                    forward_general = is_general_error(res.get("error", ""))
-            except subprocess.TimeoutExpired:
-                forward_res = {"success": False, "error": "Timeout expired (60s)"}
-                forward_general = False
+                config.logger.info(f"Running cmping {h1} <-> {h2}")
+                (forward_res, backward_res), setup_error = cmping.run_cmping(
+                    cmping_path, h1, h2, 3, timeout=90, both=True)
+                forward_general = setup_error or (
+                    not forward_res.get("success") and is_general_error(forward_res.get("error", "")))
             except Exception as e:
-                forward_res = {"success": False, "error": str(e)}
+                forward_res = backward_res = {"success": False, "error": str(e)}
                 forward_general = is_general_error(str(e))
-                
-            if forward_res and not forward_res.get("success") and forward_general:
+
+            if not forward_res.get("success") and forward_general:
                 return (h1, h2, forward_res, forward_general, None)
-                
-            backward_res = None
-            try:
-                cmd = cmping.cmping_cmd(cmping_path, 3, h2, h1, timeout=60)
-                config.logger.info(f"Running: {' '.join(cmd)}")
-                stdout, stderr, rc = cmping._run_cmping_subprocess(cmd, timeout=60)
-                res = cmping._parse_single_cmping(stdout, stderr, rc)
-                if res.get("success"):
-                    backward_res = res
-                else:
-                    backward_res = res
-            except subprocess.TimeoutExpired:
-                backward_res = {"success": False, "error": "Timeout expired (60s)"}
-            except Exception as e:
-                backward_res = {"success": False, "error": str(e)}
-                
+
             return (h1, h2, forward_res, forward_general, backward_res)
         finally:
             for lock in reversed(locks):

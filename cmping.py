@@ -2,6 +2,7 @@
 parsing, the background monitor loop/cycle, and incident detection +
 alert-message formatting/syncing. The Telegram-facing /cmping* commands
 live in cmping_commands.py, which calls into this module."""
+import json
 import os
 import re
 import shutil
@@ -78,14 +79,56 @@ def _parse_single_cmping(stdout, stderr, returncode):
         "error": err_msg
     }
 
-def cmping_cmd(cmping_path, count, src, dst, timeout=60):
+def cmping_cmd(cmping_path, count, src, dst, timeout=60, both=False):
     """cmping command line for a run that _run_cmping_subprocess() kills after `timeout` seconds.
 
-    Half the time goes to waiting for the profiles to come online (cmping -w): a profile that
-    does not come online then fails as "<address> not online after Ns", naming the relay,
-    instead of the whole run being killed with a bare "Timeout expired". The other half is
-    left for setting up the profiles (configure alone may take 20 s) and the pings."""
-    return [cmping_path, "-c", str(count), "-w", str(timeout // 2), src, dst]
+    cmping's own limits stay below `timeout`, so a run ends with a JSON result instead of
+    being killed with a bare "Timeout expired":
+    - -w: half the time (a third with --both, which pings twice) for the profiles to come
+      online; a profile that does not fails as "<address> not online after Ns".
+    - --grace: a sixth (at least 10 s) for missing pings after the last one is sent; they
+      then count as lost.
+    The rest is left for setting up the profiles (configure alone may take 20 s) and the pings."""
+    cmd = [cmping_path, "-c", str(count), "-w", str(timeout // (3 if both else 2)),
+           "--grace", str(max(10, timeout // 6)), "--json"]
+    if both:
+        cmd.append("--both")
+    return cmd + [src, dst]
+
+
+def _direction_result(direction):
+    """One direction of cmping --json in the format of _parse_single_cmping()."""
+    delivery = direction.get("delivery_ms")
+    if direction.get("received") == direction.get("expected") and delivery:
+        return {"success": True, "min": delivery["min"], "avg": delivery["avg"],
+                "max": delivery["max"], "mdev": delivery["mdev"]}
+    lost = (direction.get("expected") or 0) - (direction.get("received") or 0)
+    return {"success": False, "error": f"{lost} of {direction.get('expected')} pings lost"}
+
+
+def run_cmping(cmping_path, src, dst, count, timeout=60, both=False):
+    """Run cmping --json from `src` to `dst` (and back with `both`).
+
+    Returns (results, setup_error): one _parse_single_cmping()-style dict per direction
+    (two with `both`), and whether cmping stopped before pinging (profiles could not be
+    set up or did not come online), i.e. the error is about a relay, not a direction.
+    When the output is not JSON (killed, crashed) the text is parsed as before."""
+    n = 2 if both else 1
+    try:
+        stdout, stderr, rc = _run_cmping_subprocess(
+            cmping_cmd(cmping_path, count, src, dst, timeout, both), timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return [{"success": False, "error": f"Timeout expired ({timeout}s)"}] * n, False
+    try:
+        data = json.loads(stdout)
+    except (TypeError, ValueError):
+        return [_parse_single_cmping(stdout, stderr, rc)] * n, False
+    if data.get("error"):
+        return [{"success": False, "error": data["error"]}] * n, True
+    results = [_direction_result(d) for d in data.get("directions", [])]
+    while len(results) < n:
+        results.append({"success": False, "error": "no result"})
+    return results[:n], False
 
 
 def _run_cmping_subprocess(cmd, timeout=60):
@@ -291,19 +334,15 @@ def _run_monitor_single(cmping_path, src, dst):
     """Run a single cmping check (src -> dst) with retry on failure.
     Uses the global lock to avoid conflicts with user /cmping commands.
     Returns dict with 'success', 'avg' (if success), 'error' (if failed), 'checked_at'."""
-    import subprocess
 
     def do_check(count="1", timeout=60):
-        cmd = cmping_cmd(cmping_path, count, src, dst, timeout)
         try:
             state._cmping_global_lock.acquire()
             try:
-                stdout, stderr, rc = _run_cmping_subprocess(cmd, timeout=timeout)
+                results, _setup_error = run_cmping(cmping_path, src, dst, count, timeout)
             finally:
                 state._cmping_global_lock.release()
-            return _parse_single_cmping(stdout, stderr, rc)
-        except subprocess.TimeoutExpired:
-            return {"success": False, "error": f"Timeout expired ({timeout}s)"}
+            return results[0]
         except Exception as e:
             return {"success": False, "error": str(e)}
 
