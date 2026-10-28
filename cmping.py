@@ -78,6 +78,16 @@ def _parse_single_cmping(stdout, stderr, returncode):
         "error": err_msg
     }
 
+def cmping_cmd(cmping_path, count, src, dst, timeout=60):
+    """cmping command line for a run that _run_cmping_subprocess() kills after `timeout` seconds.
+
+    Half the time goes to waiting for the profiles to come online (cmping -w): a profile that
+    does not come online then fails as "<address> not online after Ns", naming the relay,
+    instead of the whole run being killed with a bare "Timeout expired". The other half is
+    left for setting up the profiles (configure alone may take 20 s) and the pings."""
+    return [cmping_path, "-c", str(count), "-w", str(timeout // 2), src, dst]
+
+
 def _run_cmping_subprocess(cmd, timeout=60):
     """Run cmping as a subprocess with proper cleanup on timeout.
     Returns (stdout, stderr, returncode)."""
@@ -284,7 +294,7 @@ def _run_monitor_single(cmping_path, src, dst):
     import subprocess
 
     def do_check(count="1", timeout=60):
-        cmd = [cmping_path, "-c", count, src, dst]
+        cmd = cmping_cmd(cmping_path, count, src, dst, timeout)
         try:
             state._cmping_global_lock.acquire()
             try:

@@ -108,6 +108,18 @@ class TestBouncerBot(unittest.TestCase):
         self.assertEqual(cmping._format_duration(86400), "1d")
         self.assertEqual(cmping._format_duration(90000), "1d 1h")
 
+    def test_cmping_cmd_waits_half_the_run_for_profiles(self):
+        self.assertEqual(cmping.cmping_cmd("/bin/cmping", 3, "a.example", "b.example", timeout=60),
+                         ["/bin/cmping", "-c", "3", "-w", "30", "a.example", "b.example"])
+        self.assertEqual(cmping.cmping_cmd("/bin/cmping", "5", "a.example", "b.example", timeout=90)[3:5], ["-w", "45"])
+
+    def test_profile_timeout_names_the_relay(self):
+        # cmping exits 1 with this line when a profile does not come online in time
+        out = "✗ Timeout or error waiting for profiles to be online: abc@relay.example not online after 30s\n"
+        result = cmping._parse_single_cmping(out, "", 1)
+        self.assertFalse(result["success"])
+        self.assertIn("abc@relay.example not online after 30s", result["error"])
+
     def test_cmping_incident_database_operations(self):
         now = int(time.time())
         inc_id = database.create_cmping_incident(now)

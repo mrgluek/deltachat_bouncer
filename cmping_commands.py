@@ -62,7 +62,7 @@ def _bg_cmping_worker_inner(bot, accid, chat_id, msg_id, bot_domains, specified_
         forward_res = None
         forward_general = False
         try:
-            cmd = [cmping_path, "-c", "3", s1, s2]
+            cmd = cmping.cmping_cmd(cmping_path, 3, s1, s2, timeout=60)
             config.logger.info(f"Running: {' '.join(cmd)}")
             stdout, stderr, rc = cmping._run_cmping_subprocess(cmd, timeout=60)
             res = cmping._parse_single_cmping(stdout, stderr, rc)
@@ -81,7 +81,7 @@ def _bg_cmping_worker_inner(bot, accid, chat_id, msg_id, bot_domains, specified_
         # Ping s2 -> s1
         backward_res = None
         try:
-            cmd = [cmping_path, "-c", "3", s2, s1]
+            cmd = cmping.cmping_cmd(cmping_path, 3, s2, s1, timeout=60)
             config.logger.info(f"Running: {' '.join(cmd)}")
             stdout, stderr, rc = cmping._run_cmping_subprocess(cmd, timeout=60)
             res = cmping._parse_single_cmping(stdout, stderr, rc)
@@ -178,7 +178,7 @@ def _bg_cmping_worker_inner(bot, accid, chat_id, msg_id, bot_domains, specified_
             forward_res = None
             forward_general = False
             try:
-                cmd = [cmping_path, "-c", "3", h1, h2]
+                cmd = cmping.cmping_cmd(cmping_path, 3, h1, h2, timeout=60)
                 config.logger.info(f"Running: {' '.join(cmd)}")
                 stdout, stderr, rc = cmping._run_cmping_subprocess(cmd, timeout=60)
                 res = cmping._parse_single_cmping(stdout, stderr, rc)
@@ -199,7 +199,7 @@ def _bg_cmping_worker_inner(bot, accid, chat_id, msg_id, bot_domains, specified_
                 
             backward_res = None
             try:
-                cmd = [cmping_path, "-c", "3", h2, h1]
+                cmd = cmping.cmping_cmd(cmping_path, 3, h2, h1, timeout=60)
                 config.logger.info(f"Running: {' '.join(cmd)}")
                 stdout, stderr, rc = cmping._run_cmping_subprocess(cmd, timeout=60)
                 res = cmping._parse_single_cmping(stdout, stderr, rc)
