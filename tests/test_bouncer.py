@@ -155,6 +155,26 @@ class TestBouncerBot(unittest.TestCase):
             results, _ = cmping.run_cmping("/bin/cmping", "a.example", "b.example", 1, 60, both=True)
         self.assertEqual(results, [{"success": False, "error": "Timeout expired (60s)"}] * 2)
 
+    def test_monitor_pair_is_one_run_both_ways(self):
+        ok = [{"success": True, "avg": 900.0}, {"success": True, "avg": 1100.0}]
+        with patch("cmping.run_cmping", return_value=(ok, False)) as run, patch("cmping.time.sleep") as sleep:
+            fwd, bwd = cmping._run_monitor_pair("/bin/cmping", "a.example", "b.example")
+        run.assert_called_once_with("/bin/cmping", "a.example", "b.example", 1, 90, both=True)
+        sleep.assert_not_called()
+        self.assertEqual((fwd["avg"], bwd["avg"]), (900.0, 1100.0))
+        self.assertIn("checked_at", fwd)
+
+    def test_monitor_pair_retries_only_failed_direction(self):
+        first = [{"success": True, "avg": 900.0}, {"success": False, "error": "1 of 1 pings lost"}]
+        retry = [{"success": False, "error": "2 of 5 pings lost"}, {"success": True, "avg": 1500.0}]
+        with patch("cmping.run_cmping", side_effect=[(first, False), (retry, False)]) as run, \
+                patch("cmping.time.sleep"):
+            fwd, bwd = cmping._run_monitor_pair("/bin/cmping", "a.example", "b.example")
+        self.assertEqual(run.call_args_list[1].args[3:5], (5, 120))
+        # The passed direction keeps its first result; the failed one takes the retry
+        self.assertEqual((fwd["success"], fwd["avg"]), (True, 900.0))
+        self.assertEqual((bwd["success"], bwd["avg"]), (True, 1500.0))
+
     def test_two_server_cmping_report_uses_one_run(self):
         out = self._cmping_json([self._direction(avg=900.0), self._direction(avg=1100.0)])
         with patch("cmping._run_cmping_subprocess", return_value=(out, "", 0)) as run, \

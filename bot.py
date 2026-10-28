@@ -74,7 +74,7 @@ from cmping import (
     _get_cmping_incident_update_interval,
     _parse_single_cmping,
     _run_cmping_subprocess,
-    _run_monitor_single,
+    _run_monitor_pair,
     _sync_cmping_incident_alerts,
 )
 from cmping_commands import (

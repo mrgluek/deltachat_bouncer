@@ -219,10 +219,8 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
     any_source_success = False
 
     for dst in targets:
-        # Forward: source -> dst
-        fwd_result = _run_monitor_single(cmping_path, source, dst)
-        # Backward: dst -> source
-        bwd_result = _run_monitor_single(cmping_path, dst, source)
+        # source -> dst and dst -> source in one cmping run (--both)
+        fwd_result, bwd_result = _run_monitor_pair(cmping_path, source, dst)
 
         fwd_success = fwd_result.get("success")
         bwd_success = bwd_result.get("success")
@@ -330,32 +328,40 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
     _sync_cmping_incident_alerts(bot, accid, all_servers)
 
 
-def _run_monitor_single(cmping_path, src, dst):
-    """Run a single cmping check (src -> dst) with retry on failure.
-    Uses the global lock to avoid conflicts with user /cmping commands.
-    Returns dict with 'success', 'avg' (if success), 'error' (if failed), 'checked_at'."""
+def _run_monitor_pair(cmping_path, src, dst):
+    """Check src -> dst and dst -> src in one cmping run (--both), with retry on failure.
 
-    def do_check(count="1", timeout=60):
+    One run sets the profiles up once for both directions; two runs per pair did that
+    twice. Uses the global lock to avoid conflicts with user /cmping commands.
+    Returns (fwd, bwd) dicts with 'success', 'avg' (if success), 'error' (if failed),
+    'checked_at'."""
+
+    def do_check(count, timeout):
         try:
             state._cmping_global_lock.acquire()
             try:
-                results, _setup_error = run_cmping(cmping_path, src, dst, count, timeout)
+                results, _setup_error = run_cmping(cmping_path, src, dst, count, timeout, both=True)
             finally:
                 state._cmping_global_lock.release()
-            return results[0]
+            return results
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return [{"success": False, "error": str(e)}] * 2
 
-    result = do_check(count="1", timeout=60)
+    results = do_check(count=1, timeout=90)
 
-    # If failed, retry once with 5 pings after 10 seconds to filter transient issues
-    if not result.get("success"):
-        config.logger.info(f"CMPing monitor: {src} -> {dst} failed ({result.get('error')}), retrying with -c 5 in 10s...")
+    # If a direction failed, retry once with 5 pings after 10 seconds to filter transient
+    # issues; only failed directions take the retry's result, a passed one keeps its own
+    failed = [i for i, r in enumerate(results) if not r.get("success")]
+    if failed:
+        names = {0: f"{src} -> {dst}", 1: f"{dst} -> {src}"}
+        details = "; ".join(f"{names[i]}: {results[i].get('error')}" for i in failed)
+        config.logger.info(f"CMPing monitor: {details} failed, retrying with -c 5 in 10s...")
         time.sleep(10)
-        result = do_check(count="5", timeout=90)
+        retry = do_check(count=5, timeout=120)
+        results = [retry[i] if i in failed else r for i, r in enumerate(results)]
 
-    result["checked_at"] = time.time()
-    return result
+    now = time.time()
+    return tuple(dict(r, checked_at=now) for r in results)
 
 
 def _clear_all_errors_for_server(server: str):
