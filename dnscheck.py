@@ -846,3 +846,64 @@ def host_command(bot, accid, event):
     name, _, server = parsed
     # "host|" keeps these apart from /dns answers for the same name in the shared cache
     _answer(bot, accid, msg, f"host|{name}|{server}", lambda: run_host(name, server))
+
+
+# ── /wl: only the Russian mobile whitelist lines of the /dns report (not in /help) ──
+
+WL_USAGE = "Usage: `/wl <domain | IPv4 address>`, e.g. `/wl chatmail.uk`"
+WL_MX_HOSTS = 5  # as in the /dns mail section
+
+
+def _wl_target(payload: str):
+    """-> (ipaddress object or normalized domain, None) or (None, error text)."""
+    toks = payload.split()
+    if len(toks) != 1:
+        return None, WL_USAGE
+    tok = re.sub(r"^[a-z][a-z0-9+.-]*://", "", toks[0], flags=re.I).split("/")[0]  # a link: its host
+    try:
+        return ipaddress.ip_address(tok.strip("[]")), None
+    except ValueError:
+        name = _norm_name(tok)
+        return (name, None) if name else (None, f"❌ `{toks[0][:60]}` is not a domain name or IP address.\n{WL_USAGE}")
+
+
+def wl_report(name) -> str:
+    """The whitelist lines of /dns for a domain (its addresses and MX addresses) or of /ip for an address."""
+    if not isinstance(name, str):
+        line = whitelist.ip_line(name)
+        return f"📶 **RU mobile whitelist** · {name.compressed}\n{line}" if line else _wl_off()
+    res = make_resolver()
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futs = {t: pool.submit(query, res, name, t) for t in ("A", "AAAA", "MX")}
+        r = {t: f.result() for t, f in futs.items()}
+    if r["A"].status == "nxdomain":
+        return f"❌ {_display(name)} does not exist (NXDOMAIN)."
+    addrs = r["A"].records + r["AAAA"].records
+    mx_ips = []
+    if r["MX"].ok:
+        hosts = [rd.exchange.to_text().rstrip(".").lower() for rd in sorted(r["MX"].rdata, key=lambda x: x.preference)]
+        for host in [h for h in hosts if h][:WL_MX_HOSTS]:
+            mx_ips += [a for t in ("A", "AAAA") for a in query(res, host, t).records]
+    lines = [whitelist.addresses_line(addrs + mx_ips), whitelist.domain_line(name)]
+    lines = [line for line in lines if line]
+    if not lines:
+        return _wl_off()
+    if not any(line.startswith(whitelist.LABEL + ":") for line in lines):
+        lines.insert(0, "ℹ️ No IPv4 addresses (A records of the domain or of its MX hosts) to check")
+    return "\n".join([f"📶 **RU mobile whitelist** · {_display(name)}"] + lines)
+
+
+def _wl_off() -> str:
+    return "ℹ️ The RU mobile whitelist checks are turned off."
+
+
+@config.dc_cli.on(events.NewMessage(command="/wl"))
+def wl_command(bot, accid, event):
+    msg = event.msg
+    payload = (event.payload or "").strip()
+    target, error = _wl_target(payload) if payload else (None, WL_USAGE)
+    if error:
+        dc_helpers._send(bot, accid, msg.chat_id, error, reply_to_id=msg.id)
+        return
+    # "wl|" keeps these apart from /dns answers for the same name in the shared cache
+    _answer(bot, accid, msg, f"wl|{target}", lambda: wl_report(target))

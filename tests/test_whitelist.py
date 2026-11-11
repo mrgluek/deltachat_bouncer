@@ -230,6 +230,102 @@ class TestLoading(Base):
         self.assertIn("list unavailable", whitelist.addresses_line(["2.63.1.1"]))
 
 
+class TestWlCommand(Base):
+    """/wl: the whitelist lines of /dns for a domain, or of /ip for an address."""
+
+    def setUp(self):
+        super().setUp()
+        import dnscheck
+        import state
+        self.dnscheck = dnscheck
+        state._dns_cache.clear()
+        state._dns_pending = 0
+        self.records = {}
+        p = patch.object(dnscheck, "query", side_effect=self._query)
+        p.start()
+        self.addCleanup(p.stop)
+        p = patch.object(dnscheck, "make_resolver", return_value=MagicMock())
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _query(self, res, name, rtype):
+        rd = self.records.get((name, rtype))
+        if rd is None:
+            return self.dnscheck.Res("nodata")
+        if isinstance(rd, self.dnscheck.Res):
+            return rd
+        return self.dnscheck.Res("ok", records=rd, rdata=[])
+
+    def _event(self, payload):
+        ev = MagicMock()
+        ev.msg.chat_id, ev.msg.id = 100, 200
+        ev.payload = payload
+        return ev
+
+    def _run(self, payload):
+        with patch.object(self.dnscheck.dc_helpers, "_send") as send, \
+                patch.object(self.dnscheck.dc_helpers, "_react"), \
+                patch.object(self.dnscheck, "_pool") as pool:
+            pool.submit.side_effect = lambda fn, *a: fn(*a)
+            self.dnscheck.wl_command(MagicMock(), 1, self._event(payload))
+        return send.call_args[0][3]
+
+    def test_target_parsing(self):
+        t = self.dnscheck._wl_target
+        self.assertEqual(str(t("2.63.1.1")[0]), "2.63.1.1")
+        self.assertEqual(t("https://Chatmail.Example/path?x=1"), ("chatmail.example", None))
+        self.assertEqual(t("chatmail.example."), ("chatmail.example", None))
+        self.assertIn("Usage", t("a.example b.example")[1])
+        self.assertIn("not a domain name", t("not_a!")[1])
+
+    def test_usage_without_argument(self):
+        self.assertIn("Usage", self._run(""))
+
+    def test_ip(self):
+        text = self._run("2.63.1.1")
+        self.assertIn("✅ in 2.63.0.0/17", text)
+        self.assertIn("❌ not listed", self._run("8.8.8.8"))
+
+    def test_domain_addresses_and_mx(self):
+        self.records = {
+            ("chatmail.example", "A"): ["2.63.1.1"],
+            ("chatmail.example", "MX"): self.dnscheck.Res(
+                "ok", rdata=[MagicMock(preference=10, exchange=MagicMock(to_text=lambda: "mx.mail.example."))]),
+            ("mx.mail.example", "A"): ["8.8.8.8"],
+        }
+        text = self._run("chatmail.example")
+        self.assertIn(f"{whitelist.LABEL}: 2.63.1.1 ✅ (in 2.63.0.0/17), 8.8.8.8 ❌", text)
+        self.assertIn("(domains): ✅ chatmail.example is listed", text)
+
+    def test_domain_without_ipv4(self):
+        text = self._run("other.example")
+        self.assertIn("No IPv4 addresses", text)
+        self.assertIn("(domains): ❌ other.example is not listed", text)
+
+    def test_nxdomain(self):
+        self.records = {("nope.example", "A"): self.dnscheck.Res("nxdomain")}
+        self.assertIn("does not exist", self._run("nope.example"))
+
+    def test_checks_off(self):
+        self.db["ru_whitelist_ip"] = "off"
+        self.db["ru_whitelist_domain"] = "off"
+        self.assertIn("turned off", self._run("2.63.1.1"))
+        self.assertIn("turned off", self._run("chatmail.example"))
+
+    def test_list_unavailable(self):
+        self.mock_fetch.side_effect = lambda url: None
+        with patch.object(whitelist, "WAIT_SECONDS", 0.1):
+            text = self._run("8.8.8.8")
+        self.assertIn("list unavailable", text)
+
+    def test_cached_apart_from_dns(self):
+        self.records = {("chatmail.example", "A"): ["2.63.1.1"]}
+        first = self._run("chatmail.example")
+        self.mock_fetch.reset_mock()
+        self.records = {}
+        self.assertEqual(self._run("chatmail.example"), first)  # answered from the cache
+
+
 class _Trickle:
     """A response that sends a byte at a time and never ends."""
 
