@@ -211,6 +211,24 @@ class TestServer(unittest.TestCase):
         self.assertEqual(res.nameservers, ["173.245.59.1"])
         self.assertIn("authoritative ray.ns.cloudflare.com", via)
 
+    def test_auth_refuses_non_public_name_servers(self):
+        zone = {("chatmail.uk", "NS"): ok("NS", "ns.example."),
+                ("ns.example", "A"): ok("A", "127.0.0.1", "10.0.0.5"),
+                ("ns.example", "AAAA"): ok("AAAA", "::1")}
+        with FakeDNS(zone):
+            dnscheck.dns.resolver.zone_for_name.return_value = dns.name.from_text("chatmail.uk")
+            result = dnscheck.run("chatmail.uk", "A", "auth")
+        self.assertEqual(result, "❌ The authoritative name servers of chatmail.uk are not on public addresses.")
+
+    def test_auth_skips_non_public_addresses_in_mixed_answers(self):
+        zone = {("chatmail.uk", "NS"): ok("NS", "ns.example."),
+                ("ns.example", "A"): ok("A", "10.0.0.5", "8.8.8.8"),
+                ("ns.example", "AAAA"): ok("AAAA", "::1")}
+        with FakeDNS(zone):
+            dnscheck.dns.resolver.zone_for_name.return_value = dns.name.from_text("chatmail.uk")
+            resolver, _ = dnscheck._resolve_server("auth", "chatmail.uk", MagicMock())
+        self.assertEqual(resolver.nameservers, ["8.8.8.8"])
+
     def test_default_resolvers_are_public(self):
         with patch.object(config, "DNS_RESOLVERS", ["1.1.1.1", "8.8.8.8"]):
             res, via = dnscheck._resolve_server(None, "a.org", dnscheck.make_resolver())

@@ -170,7 +170,7 @@ def _public_ip(text: str):
         ip = ipaddress.ip_address(text.strip("[]"))
     except ValueError:
         return None
-    return ip if ip.is_global else None
+    return ip if ip.is_global and not ip.is_multicast and not ip.is_reserved else None
 
 
 def parse_args(payload: str):
@@ -225,9 +225,10 @@ def _resolve_server(server: str | None, name: str, sysres) -> tuple[dns.resolver
             return f"Could not get the name servers of zone {zone}: {ns.problem()}."
         for ns_name in sorted(ns.records):
             ips = [r for t in ("A", "AAAA") for r in query(sysres, ns_name, t).records]
+            ips = [ip.compressed for addr in ips if (ip := _public_ip(addr)) is not None]
             if ips:
                 return make_resolver(ips), f"authoritative {ns_name.rstrip('.')} (zone {zone})"
-        return f"Name servers of zone {zone} have no addresses."
+        return f"The authoritative name servers of {zone} are not on public addresses."
     ip = _public_ip(server)
     if ip is None:
         host = _norm_name(server)

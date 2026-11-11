@@ -3,6 +3,7 @@
 Admin/fingerprint checks, message sending with transport-stat tracking,
 reactions, the delayed-command debouncer, and small chat-lookup utilities.
 """
+import ipaddress
 import logging
 import os
 import re
@@ -16,6 +17,73 @@ import dc_fingerprint
 import state
 from config import logger
 from outbox import outbox, PRIO_ALERT, PRIO_REPLY, PRIO_LOW  # noqa: F401  (priorities for callers)
+
+
+def _start_command_worker(bot, accid, msg, command, limit, target, args):
+    """Reserve running + waiting capacity before creating a command thread."""
+    with state._command_queue_lock:
+        full = state._command_pending.get(command, 0) >= limit
+        if not full:
+            state._command_pending[command] = state._command_pending.get(command, 0) + 1
+    if full:
+        _send(bot, accid, msg.chat_id, "⏳ Too many requests are waiting, please try again in a minute.")
+        return
+
+    def release():
+        with state._command_queue_lock:
+            state._command_pending[command] -= 1
+
+    def run(*worker_args):
+        try:
+            target(*worker_args)
+        finally:
+            release()
+
+    try:
+        _react(bot, accid, msg.id, "⏳")
+        threading.Thread(target=run, args=args, daemon=True).start()
+    except BaseException:
+        release()
+        raise
+
+
+def _relay_domain_valid(host):
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        return False
+    except ValueError:
+        import config
+        return bool(config.DOMAIN_REGEX.fullmatch(host))
+
+
+def _public_relay(host):
+    """Resolve in a worker, refusing missing, mixed or non-public addresses."""
+    import dns.exception
+    import dns.resolver
+    import dnscheck
+
+    if not _relay_domain_valid(host):
+        return False
+    resolver = dnscheck.make_resolver()
+    addresses = []
+    try:
+        for rtype in ("A", "AAAA"):
+            try:
+                addresses.extend(ipaddress.ip_address(r.to_text())
+                                 for r in resolver.resolve(host, rtype, lifetime=3))
+            except dns.resolver.NoAnswer:
+                pass
+    except (dns.exception.DNSException, ValueError):
+        return False
+    return bool(addresses) and all(ip.is_global and not ip.is_multicast and not ip.is_reserved for ip in addresses)
+
+
+def _check_public_relays(bot, accid, chat_id, hosts):
+    for host in dict.fromkeys(hosts):
+        if not _public_relay(host):
+            _send(bot, accid, chat_id, f"❌ {host} does not point to a public address.")
+            return False
+    return True
 
 
 def _get_domain_lock(domain: str) -> threading.Lock:
@@ -37,6 +105,8 @@ def _prune_anti_spam_dicts():
         state._chat_relays_anti_spam,
         state._chat_search_anti_spam,
         state._chat_cmping_anti_spam,
+        state._virus_anti_spam,
+        state._virus_cooldown_notified,
         state._chat_cmcall_anti_spam,
         state._chat_slap_anti_spam,
         state._mention_anti_spam,
@@ -269,7 +339,7 @@ def queue_msg(bot, accid, chat_id, msg_data, priority=PRIO_REPLY, wait=False, la
     wait=True blocks until it was sent and returns the msg_id - for a message that is edited
     later, or whose file is deleted right after (the core reads the file when it sends)."""
     fut = outbox.submit(lambda: _send_now(bot, accid, chat_id, msg_data), priority=priority,
-                        label=label or f"message to chat {chat_id}")
+                        label=label or f"message to chat {chat_id}", wait=wait)
     return _result(fut, wait)
 
 
@@ -312,7 +382,7 @@ def _edit_or_send(bot, accid, chat_id, msg_id, text, priority=PRIO_REPLY, key=No
 
     if key is None and msg_id and not callable(msg_id):
         key = ("edit", msg_id)
-    fut = outbox.submit(job, priority=priority, key=key, label=f"edit/message in chat {chat_id}")
+    fut = outbox.submit(job, priority=priority, key=key, label=f"edit/message in chat {chat_id}", wait=wait)
     return _result(fut, wait)
 
 
