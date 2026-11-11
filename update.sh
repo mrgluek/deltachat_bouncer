@@ -82,7 +82,8 @@ fi
 if [ "$LOCAL" != "$REMOTE" ] || [ "$FORCE" = true ]; then
     if [ "$FORCE" = true ]; then
         echo "🔄 Force update requested."
-    else
+    fi
+    if [ "$LOCAL" != "$REMOTE" ]; then
         echo "🆕 Deploying $WHAT..."
         git reset --hard "$REMOTE"
     fi
