@@ -68,7 +68,7 @@ def tearDownModule():
 
 class TestCommandLimits(unittest.TestCase):
     def setUp(self):
-        for name in ("_command_pending", "_virus_anti_spam"):
+        for name in ("_command_pending", "_virus_anti_spam", "_virus_cooldown_notified"):
             patcher = patch.object(state, name, {}, create=True)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -114,13 +114,67 @@ class TestCommandLimits(unittest.TestCase):
             self.event.msg.chat_id = 88
             virustotal.virus_command(self.bot, 1, self.event)
             self.assertEqual(thread.call_count, 1)
-            self.assertIn("cooldown", self._send.call_args.args[3])
+            self.bot.rpc.send_reaction.assert_called_once_with(1, 9, [dc_helpers.reaction_text("⏳", "cooldown")])
+            self._send.assert_not_called()
             self.event.msg.from_id = 77
             virustotal.virus_command(self.bot, 1, self.event)
             self.assertEqual(thread.call_count, 2)
             self._is_dc_admin.return_value = True
             virustotal.virus_command(self.bot, 1, self.event)
             self.assertEqual(thread.call_count, 3)
+
+    def test_virus_cooldown_notifies_once_per_sender_per_window(self):
+        self._is_dc_admin.return_value = False
+        self.event.payload = "https://relay.example"
+        with patch("threading.Thread") as thread, \
+                patch.object(virustotal.time, "time", return_value=1000) as clock, \
+                patch.object(dc_helpers, "_react_or_send") as notify:
+            virustotal.virus_command(self.bot, 1, self.event)
+            for chat_id in range(10, 15):
+                self.event.msg.chat_id = chat_id
+                virustotal.virus_command(self.bot, 1, self.event)
+            notify.assert_called_once_with(self.bot, 1, 10, 9, "⏳", "cooldown",
+                "⏳ /virus is on cooldown, please try again in a moment.")
+            self._send.assert_not_called()
+            self.assertEqual(thread.call_count, 1)
+            clock.return_value += config.VIRUSTOTAL_USER_COOLDOWN_SECONDS
+            virustotal.virus_command(self.bot, 1, self.event)
+            virustotal.virus_command(self.bot, 1, self.event)
+            virustotal.virus_command(self.bot, 1, self.event)
+            self.assertEqual(thread.call_count, 2)
+            self.assertEqual(notify.call_count, 2)
+
+    def _run_add_monitor(self):
+        with patch.object(database, "is_cmping_monitor", return_value=False), \
+                patch("threading.Thread") as thread:
+            cmping_commands.cmpingadd_command(self.bot, 1, self.event)
+            self._react.assert_called_once_with(self.bot, 1, 9, "⏳")
+            kwargs = thread.call_args.kwargs
+            kwargs["target"](*kwargs["args"])
+
+    def test_cmpingadd_finishes_reaction_on_success(self):
+        with patch.object(dc_helpers, "_public_relay", return_value=True), \
+                patch.object(database, "add_cmping_monitor") as add:
+            self._run_add_monitor()
+        add.assert_called_once_with("relay.example")
+        self.assertEqual(self._react.call_args.args, (self.bot, 1, 9, "☑️"))
+        self.assertEqual(state._command_pending["cmping"], 0)
+
+    def test_cmpingadd_finishes_reaction_on_non_public_host(self):
+        with patch.object(dc_helpers, "_public_relay", return_value=False), \
+                patch.object(database, "add_cmping_monitor") as add:
+            self._run_add_monitor()
+        add.assert_not_called()
+        self.assertEqual(self._react.call_args.args, (self.bot, 1, 9, "❌"))
+        self.assertEqual(state._command_pending["cmping"], 0)
+
+    def test_cmpingadd_finishes_reaction_on_exception(self):
+        with patch.object(dc_helpers, "_public_relay", return_value=True), \
+                patch.object(database, "add_cmping_monitor", side_effect=RuntimeError("database")):
+            with self.assertRaisesRegex(RuntimeError, "database"):
+                self._run_add_monitor()
+        self.assertEqual(self._react.call_args.args, (self.bot, 1, 9, "❌"))
+        self.assertEqual(state._command_pending["cmping"], 0)
 
     def test_slots_release_on_worker_exception_and_start_failure(self):
         target = MagicMock(side_effect=RuntimeError("worker"))
@@ -185,7 +239,7 @@ class TestCommandLimits(unittest.TestCase):
                 patch.object(database, "add_cmping_monitor") as add:
             cmping_commands.bg_cmping_worker(self.bot, 1, 8, 9, ["bot.example"], ["relay.example"])
             calls.bg_cmcall_worker(self.bot, 1, 8, 9, "relay.example", "relay.example")
-            cmping_commands._add_public_monitor(self.bot, 1, 8, "relay.example", ["bot.example"])
+            cmping_commands._add_public_monitor(self.bot, 1, 8, 9, "relay.example", ["bot.example"])
             ping.assert_not_called()
             call.assert_not_called()
             add.assert_not_called()

@@ -343,17 +343,22 @@ def cmpingadd_command(bot, accid, event):
 
     dc_helpers._start_command_worker(
         bot, accid, msg, "cmping", config.MAX_QUEUED_CMPING, _add_public_monitor,
-        (bot, accid, msg.chat_id, domain, bot_domains))
+        (bot, accid, msg.chat_id, msg.id, domain, bot_domains))
 
 
-def _add_public_monitor(bot, accid, chat_id, domain, bot_domains):
-    if not dc_helpers._check_public_relays(bot, accid, chat_id, [domain]):
-        return
-    database.add_cmping_monitor(domain)
-    total_monitors = len(database.get_all_cmping_monitors())
-    total = len(bot_domains) + total_monitors
-    dc_helpers._send(bot, accid, chat_id,
-          f"✅ {domain} added to monitoring.\nTotal: {len(bot_domains)} transport + {total_monitors} monitored = {total} servers.")
+def _add_public_monitor(bot, accid, chat_id, msg_id, domain, bot_domains):
+    reaction = "❌"
+    try:
+        if not dc_helpers._check_public_relays(bot, accid, chat_id, [domain]):
+            return
+        database.add_cmping_monitor(domain)
+        total_monitors = len(database.get_all_cmping_monitors())
+        total = len(bot_domains) + total_monitors
+        dc_helpers._send(bot, accid, chat_id,
+              f"✅ {domain} added to monitoring.\nTotal: {len(bot_domains)} transport + {total_monitors} monitored = {total} servers.")
+        reaction = "☑️"
+    finally:
+        dc_helpers._react(bot, accid, msg_id, reaction)
 
 @config.dc_cli.on(events.NewMessage(command="/cmpingdel"))
 def cmpingdel_command(bot, accid, event):

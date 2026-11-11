@@ -584,10 +584,15 @@ def virus_command(bot, accid, event):
         with state._command_queue_lock:
             last = state._virus_anti_spam.get(msg.from_id, float("-inf"))
             cooling = now - last < config.VIRUSTOTAL_USER_COOLDOWN_SECONDS
+            notify = cooling and state._virus_cooldown_notified.get(msg.from_id) != last
+            if notify:
+                state._virus_cooldown_notified[msg.from_id] = last
             if not cooling:
                 state._virus_anti_spam[msg.from_id] = now
         if cooling:
-            dc_helpers._send(bot, accid, msg.chat_id, "⏳ /virus is on cooldown, please try again in a moment.")
+            if notify:
+                dc_helpers._react_or_send(bot, accid, msg.chat_id, msg.id, "⏳", "cooldown",
+                    "⏳ /virus is on cooldown, please try again in a moment.")
             return
 
     dc_helpers._start_command_worker(
