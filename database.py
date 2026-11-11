@@ -934,14 +934,20 @@ def is_fingerprint_banned(fingerprint: str) -> bool:
         return cursor.fetchone() is not None
 
 
-def get_all_banned(limit: int = 1000) -> list[dict]:
+def get_all_banned(limit: int | None = None) -> list[dict]:
     """[{fingerprint, contact_id, name, addr, banned_at}, ...], oldest first."""
     with _reader_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT fingerprint, contact_id, name, addr, banned_at FROM banned_fingerprints "
-                       "ORDER BY banned_at ASC LIMIT ?", (limit,))
+                       "ORDER BY banned_at ASC LIMIT ?", (-1 if limit is None else limit,))
         return [{"fingerprint": r[0], "contact_id": r[1], "name": r[2] or "", "addr": r[3] or "",
                  "banned_at": float(r[4] or 0)} for r in cursor.fetchall()]
+
+
+def count_banned() -> int:
+    """The number of bans, without loading policy rows."""
+    with _reader_connection() as conn:
+        return conn.execute("SELECT COUNT(*) FROM banned_fingerprints").fetchone()[0]
 
 
 def get_admin_fingerprint():

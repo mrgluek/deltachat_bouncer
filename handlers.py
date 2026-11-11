@@ -106,7 +106,7 @@ def handle_dc_info_message(bot, accid, event):
                 is_self_removed = True
 
     # A banned person was added (by the bot's invite link or by a member): remove them again
-    if is_join_event and info_contact_id:
+    if is_join_event:
         try:
             if moderation.enforce_ban_on_join(bot, accid, dc_chat_id, info_contact_id):
                 return

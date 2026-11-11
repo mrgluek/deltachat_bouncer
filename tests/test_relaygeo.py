@@ -2,11 +2,14 @@
 import ipaddress
 import os
 import sys
+import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-TEST_DB = "test_relaygeo_bouncer.db"
+TEST_DIR = tempfile.TemporaryDirectory(prefix="test_relaygeo_")
+TEST_DB = os.path.join(TEST_DIR.name, "bouncer.db")
 os.environ["DB_PATH"] = TEST_DB
 
 try:
@@ -57,8 +60,11 @@ class Base(unittest.TestCase):
         database.init_db()
         relaygeo._cache = None
         relaygeo._busy.clear()
+        for name in ("_wl_busy", "_wl_versions"):
+            if hasattr(relaygeo, name):
+                getattr(relaygeo, name).clear()
         relaygeo._failed_at.clear()
-        p = patch.object(relaygeo.threading, "Thread", _SyncThread)
+        p = patch.object(relaygeo, "threading", SimpleNamespace(Thread=_SyncThread))
         p.start()
         self.addCleanup(p.stop)
         self.wl_on = False
@@ -100,14 +106,14 @@ class TestLookup(Base):
 
 class TestFlag(Base):
     def test_first_call_starts_lookup_then_cached(self):
-        with patch.object(relaygeo, "lookup", return_value={"cc": "DE", "wl": None}) as look:
+        with patch.object(relaygeo, "lookup", return_value={"cc": "DE", "wl": None, "ips": []}) as look:
             self.assertEqual(relaygeo.flag("A.example"), "")     # unknown yet: nothing to show
             self.assertEqual(relaygeo.flag("a.example"), "🇩🇪")  # the lookup has run since
             self.assertEqual(relaygeo.flag("a.example"), "🇩🇪")
         self.assertEqual(look.call_count, 1)
 
     def test_survives_restart(self):
-        with patch.object(relaygeo, "lookup", return_value={"cc": "FR", "wl": None}):
+        with patch.object(relaygeo, "lookup", return_value={"cc": "FR", "wl": None, "ips": []}):
             relaygeo.flag("a.example")
         relaygeo._cache = None  # a new process reads the database
         with patch.object(relaygeo, "lookup") as look:
@@ -116,7 +122,7 @@ class TestFlag(Base):
 
     def test_stale_entry_is_shown_while_refreshed(self):
         relaygeo._cache = {"a.example": {"cc": "DE", "wl": None, "at": time.time() - relaygeo.CACHE_SECONDS - 5}}
-        with patch.object(relaygeo, "lookup", return_value={"cc": "NL", "wl": None}) as look:
+        with patch.object(relaygeo, "lookup", return_value={"cc": "NL", "wl": None, "ips": []}) as look:
             self.assertEqual(relaygeo.flag("a.example"), "🇩🇪")  # old value now
             look.assert_called_once()
             self.assertEqual(relaygeo.flag("a.example"), "🇳🇱")  # new one after the refresh
@@ -146,7 +152,7 @@ class TestWhitelist(Base):
     def test_all_ipv4_listed(self):
         self.wl_on = True
         self.wl = {"203.0.113.5": "203.0.113.0/24", "203.0.113.6": "203.0.113.0/24"}
-        self.assertEqual(self._lookup(self.IPS), {"cc": "RU", "wl": True})
+        self.assertEqual(self._lookup(self.IPS)["wl"], True)
 
     def test_one_address_not_listed(self):
         self.wl_on = True
@@ -164,9 +170,11 @@ class TestWhitelist(Base):
 
     def test_whitelisted_reads_cache_and_respects_switch(self):
         self.wl_on = True
-        relaygeo._cache = {"a.example": {"cc": "RU", "wl": True, "at": time.time()},
-                           "b.example": {"cc": "DE", "wl": False, "at": time.time()},
-                           "c.example": {"cc": "DE", "wl": None, "at": time.time()}}
+        relaygeo._cache = {"a.example": {"cc": "RU", "wl": True, "at": time.time(), "ips": []},
+                           "b.example": {"cc": "DE", "wl": False, "at": time.time(), "ips": []},
+                           "c.example": {"cc": "DE", "wl": None, "at": time.time(), "ips": []}}
+        relaygeo._cache["a.example"]["ips"] = ["203.0.113.5"]
+        self.wl = {"203.0.113.5": "203.0.113.0/24"}
         self.assertTrue(relaygeo.whitelisted("a.example"))
         self.assertFalse(relaygeo.whitelisted("b.example"))
         self.assertFalse(relaygeo.whitelisted("c.example"))
@@ -183,6 +191,56 @@ class TestWhitelist(Base):
             self.assertTrue(relaygeo.whitelisted("a.example"))     # and refreshed in the background
 
 
+class TestWhitelistRefresh(Base):
+    IPS = TestWhitelist.IPS
+    _lookup = TestWhitelist._lookup
+
+    def test_fifth_address_is_checked(self):
+        self.wl_on = True
+        ips = [ipaddress.ip_address(f"203.0.113.{i}") for i in range(1, 6)]
+        self.wl = {str(ip): "203.0.113.0/24" for ip in ips[:4]}
+        self.wl[str(ips[4])] = ""
+        self.assertFalse(self._lookup(ips)["wl"])
+
+    def test_capped_addresses_never_report_positive(self):
+        self.wl_on = True
+        ips = [ipaddress.ip_address(f"203.0.113.{i}") for i in range(1, 18)]
+        self.wl = {str(ip): "203.0.113.0/24" for ip in ips}
+        self.assertIsNot(self._lookup(ips)["wl"], True)
+
+    def test_switch_and_list_generation_recheck_without_network(self):
+        ips = self.IPS[:1]
+        self.wl = {str(ips[0]): "203.0.113.0/24"}
+        with patch.object(relaygeo.iplookup, "resolve", return_value=ips) as dns, \
+                patch.object(relaygeo.iplookup, "_ipinfo_ip", return_value={"country": "RU"}) as country, \
+                patch.object(relaygeo.whitelist, "generation", return_value=1, create=True) as generation:
+            relaygeo.country("a.example")  # country cached while whitelist is off
+            self.assertFalse(relaygeo.whitelisted("a.example"))
+            self.wl_on = True
+            self.assertTrue(relaygeo.whitelisted("a.example"))
+            self.wl[str(ips[0])] = ""
+            generation.return_value = 2
+            self.assertFalse(relaygeo.whitelisted("a.example"))
+            self.wl[str(ips[0])] = "203.0.113.0/24"
+            generation.return_value = 3
+            self.assertTrue(relaygeo.whitelisted("a.example"))
+            self.assertEqual(dns.call_count, 1)
+            self.assertEqual(country.call_count, 1)
+
+    def test_unavailable_list_retried_soon_without_country_lookup(self):
+        self.wl_on = True
+        with patch.object(relaygeo.iplookup, "resolve", return_value=self.IPS[:1]) as dns, \
+                patch.object(relaygeo.iplookup, "_ipinfo_ip", return_value={"country": "RU"}) as country:
+            relaygeo.country("a.example")
+            self.assertFalse(relaygeo.whitelisted("a.example"))
+            self.wl = {str(self.IPS[0]): "203.0.113.0/24"}
+            later = time.time() + relaygeo.RETRY_SECONDS + 1
+            with patch.object(relaygeo.time, "time", return_value=later):
+                self.assertTrue(relaygeo.whitelisted("a.example"))
+            self.assertEqual(dns.call_count, 1)
+            self.assertEqual(country.call_count, 1)
+
+
 class TestParseCountry(unittest.TestCase):
     def test_forms(self):
         for text in ("🇷🇺", "ru", "RU", " Ru "):
@@ -191,7 +249,7 @@ class TestParseCountry(unittest.TestCase):
             self.assertIsNone(relaygeo.parse_country(text))
 
     def test_country_code_without_flag(self):
-        relaygeo._cache = {"a.example": {"cc": "DE", "wl": None, "at": time.time()}}
+        relaygeo._cache = {"a.example": {"cc": "DE", "wl": None, "at": time.time(), "ips": []}}
         self.assertEqual(relaygeo.country("A.example"), "DE")
 
 

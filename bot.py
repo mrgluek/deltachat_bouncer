@@ -43,6 +43,7 @@ import stickers
 import transports
 import virustotal
 import web.routes
+from message_dedup import MessageDedup
 
 
 # ── Backward-compatible facade ──
@@ -530,31 +531,23 @@ def on_start(bot, args):
     from deltachat2 import SpecialContactId, Bot, EventType
     from deltachat2.transport import JsonRpcError
 
-    from collections import OrderedDict
-    _processed_msg_ids = OrderedDict()
-
-    def _is_and_mark_processed(msgid: int) -> bool:
-        if msgid in _processed_msg_ids:
-            return True
-        _processed_msg_ids[msgid] = True
-        while len(_processed_msg_ids) > 2000:
-            _processed_msg_ids.popitem(last=False)
-        return False
+    _processed_messages = MessageDedup()
 
     def custom_process_messages(accid: int, retry=True) -> None:
         try:
             for msgid in bot.rpc.get_next_msgs(accid):
-                if _is_and_mark_processed(msgid):
-                    continue
-                msg = bot.rpc.get_message(accid, msgid)
-                outgoing = msg.from_id == SpecialContactId.SELF
-                if config.logger.isEnabledFor(logging.DEBUG):
-                    config.logger.debug(f"custom_process_messages: msgid={msgid}, from_id={msg.from_id}, is_info={msg.is_info}, text={msg.text!r}")
-                # Process the message if it's outgoing, from a contact > LAST_SPECIAL, or a system/info message
-                if outgoing or msg.from_id > SpecialContactId.LAST_SPECIAL or msg.is_info:
+                with _processed_messages.processing(accid, msgid) as claimed:
+                    if not claimed:
+                        continue
+                    msg = bot.rpc.get_message(accid, msgid)
+                    outgoing = msg.from_id == SpecialContactId.SELF
                     if config.logger.isEnabledFor(logging.DEBUG):
-                        config.logger.debug(f"custom_process_messages: calling _on_new_msg for msgid={msgid}")
-                    bot._on_new_msg(accid, msg)
+                        config.logger.debug(f"custom_process_messages: msgid={msgid}, from_id={msg.from_id}, is_info={msg.is_info}, text={msg.text!r}")
+                    # Process the message if it's outgoing, from a contact > LAST_SPECIAL, or a system/info message
+                    if outgoing or msg.from_id > SpecialContactId.LAST_SPECIAL or msg.is_info:
+                        if config.logger.isEnabledFor(logging.DEBUG):
+                            config.logger.debug(f"custom_process_messages: calling _on_new_msg for msgid={msgid}")
+                        bot._on_new_msg(accid, msg)
                 bot.rpc.set_config(accid, "last_msg_id", str(msgid))
         except JsonRpcError as err:
             config.logger.exception(err)
@@ -562,25 +555,26 @@ def on_start(bot, args):
                 custom_process_messages(accid, False)
 
     def custom_process_message(accid: int, msgid: int) -> None:
-        if _is_and_mark_processed(msgid):
-            return
         try:
-            msg = bot.rpc.get_message(accid, msgid)
-            outgoing = msg.from_id == SpecialContactId.SELF
-            if config.logger.isEnabledFor(logging.DEBUG):
-                config.logger.debug(f"custom_process_message: msgid={msgid}, from_id={msg.from_id}, is_info={msg.is_info}, text={msg.text!r}")
-            # Process the message if it's outgoing, from a contact > LAST_SPECIAL, or a system/info message
-            if outgoing or msg.from_id > SpecialContactId.LAST_SPECIAL or msg.is_info:
+            with _processed_messages.processing(accid, msgid) as claimed:
+                if not claimed:
+                    return
+                msg = bot.rpc.get_message(accid, msgid)
+                outgoing = msg.from_id == SpecialContactId.SELF
                 if config.logger.isEnabledFor(logging.DEBUG):
-                    config.logger.debug(f"custom_process_message: calling _on_new_msg or dispatching for msgid={msgid}")
-                if hasattr(bot, "_on_new_msg"):
-                    bot._on_new_msg(accid, msg)
-                else:
-                    from deltachat2 import NewMsgEvent, Event, events
-                    event = NewMsgEvent(command="", payload="", msg=msg)
-                    if not msg.is_info and msg.text.startswith(bot.command_prefix):
-                        bot._parse_command(accid, event)
-                    bot._on_event(Event(accid, event), events.NewMessage)
+                    config.logger.debug(f"custom_process_message: msgid={msgid}, from_id={msg.from_id}, is_info={msg.is_info}, text={msg.text!r}")
+                # Process the message if it's outgoing, from a contact > LAST_SPECIAL, or a system/info message
+                if outgoing or msg.from_id > SpecialContactId.LAST_SPECIAL or msg.is_info:
+                    if config.logger.isEnabledFor(logging.DEBUG):
+                        config.logger.debug(f"custom_process_message: calling _on_new_msg or dispatching for msgid={msgid}")
+                    if hasattr(bot, "_on_new_msg"):
+                        bot._on_new_msg(accid, msg)
+                    else:
+                        from deltachat2 import NewMsgEvent, Event, events
+                        event = NewMsgEvent(command="", payload="", msg=msg)
+                        if not msg.is_info and msg.text.startswith(bot.command_prefix):
+                            bot._parse_command(accid, event)
+                        bot._on_event(Event(accid, event), events.NewMessage)
         except JsonRpcError as err:
             config.logger.exception(err)
 

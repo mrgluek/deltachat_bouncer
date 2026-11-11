@@ -1,11 +1,13 @@
 """/ban, /unban: the ban list (database.py) and its enforcement (moderation.py)."""
 import os
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-TEST_DB = "test_ban_bouncer.db"
+TEST_DIR = tempfile.TemporaryDirectory(prefix="test_ban_")
+TEST_DB = os.path.join(TEST_DIR.name, "bouncer.db")
 os.environ["DB_PATH"] = TEST_DB
 
 try:
@@ -38,6 +40,9 @@ import database
 import dc_helpers
 import moderation
 
+REAL_FINGERPRINT = dc_helpers._get_contact_fingerprint
+REAL_ADMIN_CHECK = dc_helpers._is_dc_admin
+
 FP_A = "A" * 40
 FP_B = "B" * 40
 FP_ADMIN = "C" * 40
@@ -49,6 +54,9 @@ class Base(unittest.TestCase):
         database.DB_PATH = TEST_DB
         self._cleanup_files()
         database.init_db()
+        if hasattr(moderation, "_ban_fingerprint_cache"):
+            moderation._ban_fingerprint_cache.clear()
+            moderation._ban_scan_offset.clear()
         self.bot = MagicMock()
         self.people = {10: ("Alice", "alice@example.org", FP_A), 11: ("Bob", "bob@example.org", FP_B),
                        12: ("Admin", "admin@example.org", FP_ADMIN)}
@@ -190,7 +198,6 @@ class TestEnforcement(Base):
         self.assertFalse(moderation.enforce_ban_on_join(self.bot, 1, 100, 11))  # empty ban list
         database.add_banned_fingerprint(FP_A)
         self.assertFalse(moderation.enforce_ban_on_join(self.bot, 1, 100, 11))
-        self.assertFalse(moderation.enforce_ban_on_join(self.bot, 1, 100, 1))   # the bot itself
         self.assertEqual(self.removed, [])
 
     def test_admin_is_never_removed(self):
@@ -206,6 +213,131 @@ class TestEnforcement(Base):
         database.remove_banned_fingerprint(FP_B)
         self.assertEqual(moderation.ban_sweep(self.bot, 1), 0)
         self.bot.rpc.get_chat_contacts.assert_not_called()  # nothing banned: no scan
+
+
+class TestReconcile(Base):
+    def test_fingerprint_only_sweep_and_lifetime_cache(self):
+        database.add_banned_fingerprint(FP_B)
+        with patch.object(dc_helpers, "_get_contact_fingerprint", wraps=dc_helpers._get_contact_fingerprint) as fp:
+            self.assertEqual(moderation.ban_sweep(self.bot, 1), 2)
+            calls = fp.call_count
+            self.assertGreater(calls, 0)
+            moderation.ban_sweep(self.bot, 1)
+            self.assertEqual(fp.call_count, calls)
+        self.assertEqual(database.get_all_banned()[0]["contact_id"], 11)
+
+    def test_periodic_resolution_is_bounded_and_progresses(self):
+        database.add_banned_fingerprint(FP_B)
+        with patch.object(moderation, "BAN_RESOLVE_LIMIT", 1):
+            with patch.object(dc_helpers, "_get_contact_fingerprint", wraps=dc_helpers._get_contact_fingerprint) as fp:
+                moderation.ban_sweep(self.bot, 1)
+                self.assertEqual(fp.call_count, 1)
+                moderation.ban_sweep(self.bot, 1)
+                moderation.ban_sweep(self.bot, 1)
+        self.assertIn((100, 11), self.removed)
+
+    def test_unresolved_join_retries_once(self):
+        database.add_banned_fingerprint(FP_A)
+        for value in (None, RuntimeError("RPC unavailable")):
+            with self.subTest(value=value):
+                self.removed.clear()
+                self.chats[100] = [1, 10, 11, 12]
+                with patch.object(dc_helpers, "_get_contact_fingerprint", side_effect=[value, FP_A]), \
+                        patch.object(moderation.threading, "Timer") as timer:
+                    self.assertFalse(moderation.enforce_ban_on_join(self.bot, 1, 100, 10))
+                    timer.assert_called_once()
+                    callback = timer.call_args.args[1]
+                    callback()
+                    self.assertEqual(self.removed, [(100, 10)])
+                    self.assertEqual(timer.call_count, 1)
+
+    def test_unresolved_contact_does_not_starve_later_members(self):
+        database.add_banned_fingerprint(FP_B)
+        with patch.object(moderation, "BAN_RESOLVE_LIMIT", 1), \
+                patch.object(dc_helpers, "_get_contact_fingerprint", side_effect=lambda b, a, cid: FP_B if cid == 11 else None):
+            self.assertEqual(moderation.ban_sweep(self.bot, 1), 0)
+            self.assertEqual(moderation.ban_sweep(self.bot, 1), 2)
+
+    def test_empty_check_does_not_load_policy_rows(self):
+        with patch.object(database, "get_all_banned", side_effect=AssertionError("unnecessary policy load")):
+            self.assertFalse(moderation.enforce_ban_on_join(self.bot, 1, 100, 10))
+
+    def test_startup_monitor_reconciles_before_hourly_sleep(self):
+        database.add_banned_fingerprint(FP_B)
+        with patch.object(moderation.time, "sleep", side_effect=[None, StopIteration]) as sleep, \
+                patch.object(moderation, "_refresh_catalog_member_counts"):
+            with self.assertRaises(StopIteration):
+                moderation._background_monitor_loop(self.bot, 1)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [10, 3600])
+        self.assertEqual(sorted(self.removed), [(100, 11), (102, 11)])
+
+    def test_join_never_removes_from_non_group(self):
+        database.add_banned_fingerprint(FP_A, contact_id=10)
+        self.bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Mailinglist"}
+        self.assertFalse(moderation.enforce_ban_on_join(self.bot, 1, 100, 10))
+        self.assertEqual(moderation.ban_sweep(self.bot, 1), 0)
+        self.assertEqual(self.removed, [])
+
+    def test_policy_and_unban_include_ban_after_1000(self):
+        for i in range(1001):
+            database.add_banned_fingerprint(f"{i:040X}")
+        database.add_banned_fingerprint(FP_B, contact_id=11)
+        self.assertEqual(len(database.get_all_banned()), 1002)
+        self.assertEqual(database.count_banned(), 1002)
+        self.assertIn("and 2 more", moderation._ban_list_text())
+        self.assertEqual(moderation.ban_sweep(self.bot, 1), 2)
+        self.assertIn("Unbanned", self._run(moderation.unban_command, FP_B))
+        self.assertFalse(database.is_fingerprint_banned(FP_B))
+
+
+class TestJoinHandler(Base):
+    def _join(self, contact_id):
+        import handlers
+        msg = SimpleNamespace(chat_id=100, from_id=12, text="Member added",
+                              system_message_type=handlers.SystemMessageType.MEMBER_ADDED_TO_GROUP,
+                              info_contact_id=contact_id, infoContactId=None)
+        handlers.handle_dc_info_message(self.bot, 1, SimpleNamespace(msg=msg))
+
+    def test_bot_join_checks_existing_members_in_that_group(self):
+        database.add_banned_fingerprint(FP_A)
+        database.add_banned_fingerprint(FP_ADMIN)
+        self.bot.rpc.get_chatlist_entries.return_value = []  # new group not in the chat list yet
+        database.set_admin_fingerprint(FP_ADMIN)
+        self.bot.rpc.get_chat_securejoin_qr_code.return_value = "https://i.delta.chat/#" + "D" * 40 + "&x"
+        self.bot.rpc.get_contact_encryption_info.side_effect = lambda accid, cid: (
+            "Me:\n" + "D" * 40 + "\n\nMember:\n" + self.people[cid][2])
+        with patch.object(dc_helpers, "_get_contact_fingerprint", wraps=REAL_FINGERPRINT), \
+                patch.object(dc_helpers, "_is_dc_admin", wraps=REAL_ADMIN_CHECK):
+            self._join(1)
+        self.assertEqual(self.removed, [(100, 10)])
+        self.assertIn(12, self.chats[100])
+        self.assertIn(1, self.chats[100])
+        self.assertIn(10, self.chats[101])
+
+    def test_missing_contact_id_retries_group_once(self):
+        database.add_banned_fingerprint(FP_A)
+        with patch.object(moderation.threading, "Timer") as timer:
+            self._join(None)
+            timer.assert_called_once()
+            timer.call_args.args[1]()
+            self.assertEqual(self.removed, [(100, 10)])
+            self.assertEqual(timer.call_count, 1)
+
+    def test_join_retry_can_read_real_encryption_info(self):
+        database.add_banned_fingerprint(FP_A)
+        # Exercise the real parser/helper at the handler boundary.
+        with patch.object(dc_helpers, "_get_contact_fingerprint", wraps=REAL_FINGERPRINT):
+            self.bot.rpc.get_contact_encryption_info.side_effect = [None, self.encryption_info()]
+            self.bot.rpc.get_chat_securejoin_qr_code.return_value = "https://i.delta.chat/#" + "D" * 40 + "&x"
+            with patch.object(moderation.threading, "Timer") as timer:
+                self._join(10)
+                timer.assert_called_once()
+                timer.call_args.args[1]()
+        self.assertEqual(self.removed, [(100, 10)])
+
+    @staticmethod
+    def encryption_info():
+        return "Me:\n" + "D" * 40 + "\n\nAlice:\n" + FP_A + "\n"
 
 
 class TestKickByName(Base):

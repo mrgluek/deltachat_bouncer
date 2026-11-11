@@ -1,6 +1,7 @@
 """Russian mobile internet whitelist (whitelist.py): parsing, lookups, report lines, refresh."""
 import os
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -74,6 +75,39 @@ class Base(unittest.TestCase):
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
+
+
+class TestGeneration(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="test_whitelist_")
+        self.addCleanup(temp.cleanup)
+        db = whitelist.database
+        db.close_db()
+        previous_path = db.DB_PATH
+        db.DB_PATH = os.path.join(temp.name, "bouncer.db")
+        db.init_db()
+
+        def cleanup():
+            db.close_db()
+            db.DB_PATH = previous_path
+
+        self.addCleanup(cleanup)
+        fetch = patch.object(whitelist, "_fetch", return_value=LIST)
+        fetch.start()
+        self.addCleanup(fetch.stop)
+
+    def test_load_and_switch_increment_generation(self):
+        before = whitelist.generation()
+        whitelist._load("ip")
+        self.assertGreater(whitelist.generation(), before)
+        before = whitelist.generation()
+        whitelist.command_reply("ip off")
+        self.assertGreater(whitelist.generation(), before)
+        before = whitelist.generation()
+        whitelist.command_reply("ip off")
+        self.assertEqual(whitelist.generation(), before)
+        whitelist.command_reply("ip on")
+        self.assertGreater(whitelist.generation(), before)
 
 
 class TestParse(unittest.TestCase):
