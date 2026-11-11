@@ -1,9 +1,10 @@
-"""Country flags of relay servers for /cmpinglist.
+"""Country flags and RU-whitelist status of relay servers for /cmpinglist.
 
 flag(domain) never waits for the network: it answers from a cache (a day, kept in the
 database so a restart does not empty it) and, when an entry is missing or older than a day,
 starts one background lookup - resolve the host, ask ipinfo.io (RIPEstat as a fallback) for
-the country of its first address - while the old flag, if any, is still shown. A failed
+the country of its first address and check its IPv4 addresses against the RU mobile
+whitelist (whitelist.py) - while the old values, if any, are still shown. A failed
 lookup is retried after RETRY_SECONDS.
 """
 import json
@@ -13,6 +14,7 @@ import time
 import config
 import database
 import iplookup
+import whitelist
 
 CACHE_SECONDS = 24 * 3600
 RETRY_SECONDS = 3600
@@ -41,25 +43,41 @@ def _save() -> None:
         config.logger.warning(f"Could not save the relay country cache: {e}")
 
 
+def lookup(domain: str) -> dict | None:
+    """{"cc": country code of the first address, "wl": all IPv4 addresses are in the RU mobile
+    whitelist (None when that check is off or its list unavailable)}, or None when the host
+    does not resolve or no country is found."""
+    ips = iplookup.resolve(domain)
+    if not ips:
+        return None
+    ip_s = ips[0].compressed
+    info = iplookup._ipinfo_ip(ip_s) or {}
+    cc = info.get("country_code") or (info.get("country") if len(info.get("country") or "") == 2 else None)
+    cc = cc or iplookup._ripe_country(ip_s)
+    if not (cc and len(cc) == 2 and cc.isalpha()):
+        return None
+    wl = None
+    if whitelist.enabled("ip"):
+        v4 = [ip for ip in ips if ip.version == 4][:4]
+        statuses = [whitelist.ip_status(ip) for ip in v4]  # may wait for the first download: we are in the background
+        if not v4:
+            wl = False  # the list is IPv4 only
+        elif None not in statuses:
+            wl = all(statuses)
+    return {"cc": cc.upper(), "wl": wl}
+
+
 def lookup_country(domain: str) -> str | None:
-    """Two-letter country code of the host's first address, or None."""
-    for ip in iplookup.resolve(domain):
-        ip_s = ip.compressed
-        info = iplookup._ipinfo_ip(ip_s) or {}
-        cc = info.get("country_code") or (info.get("country") if len(info.get("country") or "") == 2 else None)
-        cc = cc or iplookup._ripe_country(ip_s)
-        if cc and len(cc) == 2 and cc.isalpha():
-            return cc.upper()
-        return None  # the first address is the one that is asked about
-    return None
+    found = lookup(domain)
+    return found["cc"] if found else None
 
 
 def _refresh(domain: str) -> None:
     try:
-        cc = lookup_country(domain)
+        found = lookup(domain)
         with _lock:
-            if cc:
-                _load()[domain] = {"cc": cc, "at": time.time()}
+            if found:
+                _load()[domain] = {"cc": found["cc"], "wl": found["wl"], "at": time.time()}
                 _failed_at.pop(domain, None)
                 _save()
             else:
@@ -73,25 +91,37 @@ def _refresh(domain: str) -> None:
             _busy.discard(domain)
 
 
-def country(domain: str) -> str:
-    """Two-letter country code of the relay, "" while unknown; starts a refresh when stale."""
+def _entry(domain: str) -> dict:
+    """The cached entry ({} while unknown); starts a refresh when missing, stale or from before
+    the whitelist check was added. Never waits."""
     domain = domain.strip().lower()
     now = time.time()
     with _lock:
-        entry = _load().get(domain)
-        stale = entry is None or now - entry.get("at", 0) > CACHE_SECONDS
+        entry = _load().get(domain) or {}
+        stale = not entry or "wl" not in entry or now - entry.get("at", 0) > CACHE_SECONDS
         start = (stale and domain not in _busy and now - _failed_at.get(domain, 0) > RETRY_SECONDS)
         if start:
             _busy.add(domain)
-        cc = entry.get("cc") if entry else ""
+        entry = dict(entry)
     if start:
         threading.Thread(target=_refresh, args=(domain,), name="relay-geo", daemon=True).start()
-    return cc or ""
+    return entry
+
+
+def country(domain: str) -> str:
+    """Two-letter country code of the relay, "" while unknown."""
+    return _entry(domain).get("cc") or ""
 
 
 def flag(domain: str) -> str:
     """Flag emoji for the relay's country, "" while unknown."""
     return iplookup._flag(country(domain))
+
+
+def whitelisted(domain: str) -> bool:
+    """True when all the relay's IPv4 addresses are in the RU mobile whitelist (as of its last
+    lookup) and that check is turned on."""
+    return _entry(domain).get("wl") is True and whitelist.enabled("ip")
 
 
 def parse_country(text: str) -> str | None:

@@ -268,56 +268,103 @@ class TestCommands(MonitorTestBase):
             mon.cmcallunskip_command(self.bot, 1, event)
         self.assertEqual(database.get_cmcall_skipped(), [])
 
+    @patch("cmping_commands.relaygeo.whitelisted", return_value=False)
     @patch("cmping_commands.relaygeo.flag", return_value="")
     @patch("cmping_commands.dc_helpers._send")
     @patch("cmping_commands.dc_helpers._get_bot_domains", return_value=["a.example"])
-    def test_cmpinglist_shows_call_badges(self, _domains, send, _flag):
+    def test_cmpinglist_shows_call_badges(self, _domains, send, _flag, _wl):
         self.cycle({("a.example", "c.example"): fail(stage="setup", callee_turn="none")})
         event = MagicMock()
         event.payload = ""
         cmping_commands.cmpinglist_command(self.bot, 1, event)
         text = send.call_args[0][3]
-        self.assertIn("a.example: ⚪️ no data · 📞✅", text)
-        self.assertIn("c.example: ⚪️ no data · 📞➖ no TURN", text)
+        self.assertIn("a.example · 📞✅", text)  # no data: no speed and no circle
+        self.assertIn("c.example · 📞➖ no TURN", text)
+        self.assertNotIn("no data", text)
         self.assertIn("📞 Calls: checked every 60 min", text)
 
-    @patch("cmping_commands.dc_helpers._send")
-    @patch("cmping_commands.dc_helpers._get_bot_domains", return_value=["a.example", "b.example", "c.example"])
-    def test_cmpinglist_entry_format(self, _domains, send):
-        flags = {"a.example": "🇷🇺", "b.example": "🇩🇪", "c.example": ""}
-        averages = {"a.example": (1439.7, 100), "b.example": (870.0, 37), "c.example": (None, 0)}
-        with patch("cmping_commands.relaygeo.flag", side_effect=flags.get), \
+    def _list(self, domains, averages, flags=None, listed=(), payload=""):
+        flags = flags or {}
+        with patch("cmping_commands.dc_helpers._send") as send, \
+                patch("cmping_commands.dc_helpers._get_bot_domains", return_value=domains), \
+                patch("cmping_commands.relaygeo.flag", side_effect=lambda d: flags.get(d, "")), \
+                patch("cmping_commands.relaygeo.country", side_effect=lambda d: {"🇷🇺": "RU", "🇩🇪": "DE"}.get(flags.get(d), "")), \
+                patch("cmping_commands.relaygeo.whitelisted", side_effect=lambda d: d in listed), \
+                patch("cmping_commands.database.get_all_cmping_monitors", return_value=[]), \
                 patch("cmping_commands.database.get_average_ping_for_server", side_effect=lambda d, limit: averages[d]):
-            cmping_commands.cmpinglist_command(self.bot, 1, MagicMock(payload=""))
-        text = send.call_args[0][3]
+            cmping_commands.cmpinglist_command(self.bot, 1, MagicMock(payload=payload))
+        return send.call_args[0][3]
+
+    def test_cmpinglist_entry_format(self):
+        text = self._list(["a.example", "b.example", "c.example"],
+                          {"a.example": (1439.7, 100), "b.example": (870.0, 37), "c.example": (None, 0)},
+                          flags={"a.example": "🇷🇺", "b.example": "🇩🇪"})
         self.assertIn("1. 🇷🇺 a.example: 🟢 1.4s · ", text)    # flag before the name, seconds, no count at 100
         self.assertNotIn("🏓 100", text)
         self.assertIn("2. 🇩🇪 b.example: 🟢 0.9s (🏓 37) · ", text)  # fewer than 100 pings: count stays
-        self.assertIn("3. c.example: ⚪️ no data", text)
+        self.assertIn("3. c.example · ", text)                 # no data: just the name
         self.assertNotIn(" ms", text)
 
-    @patch("cmping_commands.dc_helpers._send")
-    @patch("cmping_commands.dc_helpers._get_bot_domains", return_value=["a.example", "b.example", "d.example"])
-    def test_cmpinglist_country_filter(self, _domains, send):
-        countries = {"a.example": "RU", "b.example": "DE", "c.example": "RU", "d.example": ""}
-        with patch("cmping_commands.relaygeo.country", side_effect=lambda d: countries.get(d, "")), \
-                patch("cmping_commands.relaygeo.flag", side_effect=lambda d: {"RU": "🇷🇺", "DE": "🇩🇪"}.get(countries.get(d), "")), \
-                patch("cmping_commands.database.get_average_ping_for_server", return_value=(1700.0, 100)):
-            self.cycle({})  # c.example is a manual monitor
-            for arg in ("🇷🇺", "ru", " RU "):
-                cmping_commands.cmpinglist_command(self.bot, 1, MagicMock(payload=arg))
-                text = send.call_args[0][3]
-                self.assertIn("CMPing Monitor Servers 🇷🇺", text)
-                self.assertIn("1. 🇷🇺 a.example: 🟢 1.7s", text)
-                self.assertIn("🇷🇺 c.example", text)          # a monitored server qualifies too
-                self.assertNotIn("b.example", text)
-                self.assertNotIn("d.example", text)
-                self.assertIn("Showing 2 of ", text)
-                self.assertIn("Country not known yet for 1", text)
-            cmping_commands.cmpinglist_command(self.bot, 1, MagicMock(payload="fr"))
-            self.assertIn("No servers in FR", send.call_args[0][3])
-            cmping_commands.cmpinglist_command(self.bot, 1, MagicMock(payload="russia"))
-            self.assertIn("Give a country flag", send.call_args[0][3])
+    def test_cmpinglist_colors_relative_to_median(self):
+        avgs = {"a.example": (1500.0, 100), "b.example": (1600.0, 100), "c.example": (1700.0, 100),
+                "d.example": (2500.0, 100), "e.example": (4000.0, 100)}
+        text = self._list(list(avgs), avgs)       # median 1.7 s: 🟢 ≤ 2.1, 🟡 ≤ 3.4, 🟠 ≤ 5.1
+        for line, circle in (("a.example", "🟢"), ("c.example", "🟢"), ("d.example", "🟡"), ("e.example", "🟠")):
+            self.assertIn(f"{line}: {circle}", text)
+        self.assertIn("🟢 ≤ 2.1s · 🟡 ≤ 3.4s · 🟠 ≤ 5.1s · 🔴 slower (relative to the median of all servers)", text)
+
+    def test_cmpinglist_whitelisted_is_white_whatever_the_speed(self):
+        avgs = {"a.example": (800.0, 100), "b.example": (900.0, 100), "c.example": (7000.0, 100)}
+        text = self._list(list(avgs), avgs, listed={"a.example", "c.example"})
+        self.assertIn("a.example: ⚪️ 0.8s", text)
+        self.assertIn("c.example: ⚪️ 7.0s", text)
+        self.assertIn("b.example: 🟢 0.9s", text)
+        self.assertIn("⚪️ in the RU mobile whitelist (/wl)", text)
+        self.assertNotIn("in the RU mobile whitelist", self._list(list(avgs), avgs))
+
+    def test_cmpinglist_no_legend_without_data(self):
+        text = self._list(["a.example"], {"a.example": (None, 0)})
+        self.assertNotIn("🟢", text)
+
+    def test_cmpinglist_country_filter(self):
+        avgs = {"a.example": (1700.0, 100), "b.example": (1700.0, 100), "c.example": (1700.0, 100),
+                "d.example": (1700.0, 100)}
+        flags = {"a.example": "🇷🇺", "b.example": "🇩🇪", "c.example": "🇷🇺"}   # d.example: country not known yet
+        for arg in ("🇷🇺", "ru", " RU "):
+            text = self._list(list(avgs), avgs, flags=flags, payload=arg)
+            self.assertIn("CMPing Monitor Servers 🇷🇺", text)
+            self.assertIn("1. 🇷🇺 a.example: 🟢 1.7s", text)
+            self.assertIn("3. 🇷🇺 c.example", text)             # numbers stay those of the full list
+            self.assertNotIn("b.example", text)
+            self.assertNotIn("d.example", text)
+            self.assertIn("Showing 2 of 4 servers", text)
+            self.assertIn("Country not known yet for 1", text)
+        self.assertIn("No servers in FR", self._list(list(avgs), avgs, flags=flags, payload="fr"))
+        self.assertIn("Give a country flag", self._list(list(avgs), avgs, flags=flags, payload="russia"))
+
+    def test_filter_keeps_colors_of_the_full_list(self):
+        avgs = {"a.example": (3000.0, 100), "b.example": (1500.0, 100), "c.example": (1500.0, 100)}
+        text = self._list(list(avgs), avgs, flags={"a.example": "🇷🇺"}, payload="ru")  # median 1.5 s of ALL
+        self.assertIn("a.example: 🟡 3.0s", text)
+
+
+class TestPingScale(unittest.TestCase):
+    def test_relative_scale_and_fixed_for_few_servers(self):
+        self.assertEqual(cmping_commands.ping_scale([2000.0, 3000.0]), cmping_commands.FIXED_LIMITS_MS)
+        self.assertEqual(cmping_commands.ping_scale([]), cmping_commands.FIXED_LIMITS_MS)
+        limits = cmping_commands.ping_scale([2000.0, 2000.0, 8000.0])  # median 2 s
+        self.assertEqual(limits, (2500.0, 4000.0, 6000.0))
+
+    def test_circles_and_guards(self):
+        limits = cmping_commands.ping_scale([2000.0, 2000.0, 2000.0])  # 🟢 ≤ 2.5s, 🟡 ≤ 4s, 🟠 ≤ 6s
+        c = cmping_commands.ping_circle
+        self.assertEqual([c(x, limits) for x in (2400, 3900, 5900, 6100)], ["🟢", "🟡", "🟠", "🔴"])
+        self.assertEqual(c(9000, limits), "🔴")
+        slow = cmping_commands.ping_scale([9000.0, 9000.0, 9000.0])
+        self.assertEqual(c(9000, slow), "🟠")        # all slow: never green or yellow
+        fast = cmping_commands.ping_scale([200.0, 200.0, 200.0])  # 🟢 ≤ 250 ms
+        self.assertEqual(c(900, fast), "🟢")         # under a second is always green
+        self.assertEqual(c(1100, fast), "🔴")
 
 
 if __name__ == "__main__":

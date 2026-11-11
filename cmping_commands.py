@@ -6,6 +6,7 @@ Execution primitives and incident formatting live in cmping.py."""
 import concurrent.futures
 import os
 import shutil
+import statistics
 import threading
 import time
 from datetime import datetime, timezone
@@ -382,6 +383,41 @@ def cmpingdel_command(bot, accid, event):
     else:
         dc_helpers._send(bot, accid, msg.chat_id, f"❌ {domain} is not in monitoring list.")
 
+# /cmpinglist colors: relative to the median of all servers with data (3 or more of them), so that
+# the spread between the relays shows, with absolute guards; fewer servers: fixed limits.
+FAST_MS, SLOW_MS = 1000, 6000                # below: always green; above: never better than orange
+MEDIAN_FACTORS = (1.25, 2.0, 3.0)            # green / yellow / orange up to this many medians
+FIXED_LIMITS_MS = (2000, 4000, 6000)
+CIRCLES = ("🟢", "🟡", "🟠", "🔴")
+MIN_FOR_MEDIAN = 3
+
+
+def ping_scale(averages: list[float]) -> tuple[float, ...]:
+    """Upper limits in ms for 🟢 / 🟡 / 🟠 (slower is 🔴) given the average pings of all servers."""
+    if len(averages) < MIN_FOR_MEDIAN:
+        return FIXED_LIMITS_MS
+    median = statistics.median(averages)
+    return tuple(median * f for f in MEDIAN_FACTORS)
+
+
+def ping_circle(avg_ms: float, limits: tuple[float, ...]) -> str:
+    idx = next((i for i, lim in enumerate(limits) if avg_ms <= lim), 3)
+    if avg_ms < FAST_MS:
+        idx = 0
+    elif avg_ms >= SLOW_MS:
+        idx = max(idx, 2)
+    return CIRCLES[idx]
+
+
+def _legend(limits: tuple[float, ...], any_listed: bool) -> str:
+    g, y, o = (f"{lim / 1000:.1f}s" for lim in limits)
+    median = limits != FIXED_LIMITS_MS
+    text = f"🟢 ≤ {g} · 🟡 ≤ {y} · 🟠 ≤ {o} · 🔴 slower" + (" (relative to the median of all servers)" if median else "")
+    if any_listed:
+        text += "\n⚪️ in the RU mobile whitelist (/wl), whatever the speed"
+    return text
+
+
 @config.dc_cli.on(events.NewMessage(command="/cmpinglist"))
 def cmpinglist_command(bot, accid, event):
     msg = event.msg
@@ -406,30 +442,24 @@ def cmpinglist_command(bot, accid, event):
 
     lines = ["📡 **CMPing Monitor Servers" + (f" {iplookup._flag(wanted)}" if wanted else "") + ":**\n"]
 
+    # Averages of all servers (also when filtering: a circle must not change with the filter)
+    averages = {d: database.get_average_ping_for_server(d, limit=100) for d in all_servers}
+    limits = ping_scale([avg for avg, _ in averages.values() if avg is not None])
+    listed = {d for d in all_servers if relaygeo.whitelisted(d)}  # in the RU mobile whitelist
+
     def format_server_entry(idx, domain):
         return _format_ping_entry(idx, domain) + f" · {cmcall_monitor.server_badge(domain)}"
 
     def _format_ping_entry(idx, domain):
         fl = relaygeo.flag(domain)
         label = f"{fl} {domain}" if fl else domain
-        avg_ping, count = database.get_average_ping_for_server(domain, limit=100)
-        if avg_ping is not None:
-            if avg_ping < 2000:
-                circle = "🟢"
-            elif avg_ping < 4000:
-                circle = "🟡"
-            elif avg_ping < 6000:
-                circle = "🟠"
-            else:
-                circle = "🔴"
-
-            # The average covers the last 100 pings; the count is only worth showing below that
-            seen = f" (🏓 {count})" if count < 100 else ""
-            return f"  {idx}. {label}: {circle} {avg_ping / 1000:.1f}s{seen}"
-
-        else:
-            return f"  {idx}. {label}: ⚪️ no data"
-
+        avg_ping, count = averages[domain]
+        if avg_ping is None:
+            return f"  {idx}. {label}"  # no data: no speed, no circle
+        circle = "⚪️" if domain in listed else ping_circle(avg_ping, limits)
+        # The average covers the last 100 pings; the count is only worth showing below that
+        seen = f" (🏓 {count})" if count < 100 else ""
+        return f"  {idx}. {label}: {circle} {avg_ping / 1000:.1f}s{seen}"
 
     if wanted:
         # Numbers stay those of the full list. A server whose country is not known yet
@@ -476,6 +506,9 @@ def cmpinglist_command(bot, accid, event):
             interval_min = config.CMPING_MONITOR_INTERVAL // 60
             lines.append(f"Next check source: {next_source}")
             lines.append(f"Interval: {interval_min} min | Full rotation: ~{n * interval_min} min")
+
+    if any(avg is not None for avg, _ in averages.values()):
+        lines.append("\n" + _legend(limits, bool(listed)))
 
     if config.CMCALL_MONITOR_INTERVAL > 0:
         lines.append(
