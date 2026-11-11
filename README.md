@@ -127,7 +127,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/contact<ID>` — Share contact card for the given ID (e.g., `/contact123`).
 - `/help` — Show available commands and bot information.
 - `/donate` — Support project development ❤️
-- `/initadmin` — Claim administrative ownership (private chat only).
+- `/initadmin` — Claim administrative ownership (private end-to-end encrypted chat only: the bot binds your address and key fingerprint in one step).
 - `/autokick [on/off/days/ignore/unignore]` — Configure auto-kick with warnings (default: 90 days, e.g. `/autokick 30`) or manage cryptographic fingerprint ignore list (`/autokick ignore <email/nick>`, `/autokick unignore <fp/email>`) (Admin only).
 - `/kick <user_id>` — Remove a member from the current group by contact ID, search query, or message reply (Admin only).
 - `/ban <user|ID|fingerprint>` / `/unban <address|ID|fingerprint start>` — Ban a person's key everywhere the bot is: removed from all its groups and from any it is added to later; `/ban` alone lists the bans (Admin only).
