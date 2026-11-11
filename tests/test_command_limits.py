@@ -68,6 +68,11 @@ def tearDownModule():
 
 class TestCommandLimits(unittest.TestCase):
     def setUp(self):
+        # Own database: when other test modules ran first, database.DB_PATH points to theirs
+        database.close_db()
+        database.DB_PATH = TEST_DB
+        database.init_db()
+        self.addCleanup(database.close_db)
         for name in ("_command_pending", "_virus_anti_spam", "_virus_cooldown_notified"):
             patcher = patch.object(state, name, {}, create=True)
             patcher.start()

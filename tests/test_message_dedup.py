@@ -63,6 +63,13 @@ class TestBotDedup(unittest.TestCase):
     def setUp(self):
         # Reuse the full bot import stubs used by the existing integration tests.
         from tests import test_bouncer
+        import state
+        # on_start() stores its (mock) bot in the shared state; later tests must not see it
+        for name in ("dc_bot_instance", "dc_accid", "index_page_html_cache"):
+            patcher = patch.object(state, name, getattr(state, name, None))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(state.bot_invite_link_cache.clear)
         self.module = test_bouncer.bot
         self.bot = Mock()
         self.bot.rpc.get_all_account_ids.return_value = []
