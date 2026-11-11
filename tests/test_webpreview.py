@@ -1119,6 +1119,144 @@ class TestWebPreview(unittest.TestCase):
                 os.remove(custom_avatar)
 
 
+    def test_channel_attachment_rejected_before_download(self):
+        import config
+        from types import SimpleNamespace
+        rpc_bot = MagicMock()
+        rpc_bot.rpc.get_message.return_value = {'download_state': 'failure'}
+        token = database.add_catalog_channel(9400, 'Size', '', 1, '')
+        channel = database.get_catalog_channel_by_chat_id(9400)
+        msg = SimpleNamespace(id=901, is_info=False, text='Keep text', timestamp=901,
+                              file=None, filename='large.bin', file_bytes=100, view_type='File', from_id=1)
+        with patch.object(config, 'CHANNEL_MEDIA_MAX_BYTES', 10, create=True), \
+             patch('channels.sync_channel_profile'), patch('dc_helpers.time.sleep'):
+            channels._ingest_channel_post(rpc_bot, 1, msg, channel, token)
+        rpc_bot.rpc.download_full_message.assert_not_called()
+        rpc_bot.rpc.download_msg.assert_not_called()
+        self.assertEqual(database.get_channel_posts(9400)[0]['media_type'], 'skipped')
+
+    def test_channel_attachment_limits_keep_text_and_mark_skipped(self):
+        import config
+        import tempfile
+        from types import SimpleNamespace
+        token = database.add_catalog_channel(9401, 'Quota', '', 1, '')
+        channel = database.get_catalog_channel_by_chat_id(9401)
+        with tempfile.TemporaryDirectory() as source_dir:
+            source = os.path.join(source_dir, 'file.txt')
+            with open(source, 'wb') as f:
+                f.write(b'1234567890')
+            for msg_id, attachment_limit, total_limit in ((901, 5, 100), (902, 20, 5)):
+                with self.subTest(msg_id=msg_id), patch.object(config, 'CHANNEL_MEDIA_MAX_BYTES', attachment_limit, create=True), \
+                     patch.object(config, 'CHANNEL_MEDIA_MAX_TOTAL_BYTES', total_limit, create=True), patch('channels.sync_channel_profile'):
+                    msg = SimpleNamespace(id=msg_id, is_info=False, text='Keep this text', timestamp=msg_id,
+                                          file=source, filename='file.txt', from_id=1, view_type='File', file_bytes=10)
+                    channels._ingest_channel_post(None, 1, msg, channel, token)
+                    post = database.get_channel_posts(9401, limit=1)[0]
+                    self.assertEqual(post['text'], 'Keep this text')
+                    self.assertEqual(post['media_type'], 'skipped')
+                    self.assertIsNone(post['media_path'])
+            self.assertFalse(os.path.exists(os.path.join(state.CHANNEL_MEDIA_DIR, token, '902_file.txt')))
+
+    def test_channel_media_global_quota_counts_other_channels(self):
+        import channel_media
+        import config
+        import tempfile
+        with tempfile.TemporaryDirectory() as source_dir:
+            source = os.path.join(source_dir, 'file')
+            with open(source, 'wb') as f:
+                f.write(b'123456')
+            with patch.object(config, 'CHANNEL_MEDIA_MAX_TOTAL_BYTES', 10):
+                first = os.path.join(state.CHANNEL_MEDIA_DIR, 'first', '1_file.txt')
+                second = os.path.join(state.CHANNEL_MEDIA_DIR, 'second', '2_file.txt')
+                self.assertTrue(channel_media.store_file(source, first))
+                self.assertFalse(channel_media.store_file(source, second))
+                self.assertFalse(os.path.exists(second))
+
+    def test_pruning_deletes_only_orphaned_media_inside_directory(self):
+        import tempfile
+        folder = os.path.join(state.CHANNEL_MEDIA_DIR, 'prunetoken')
+        os.makedirs(folder, exist_ok=True)
+        old = os.path.join(folder, '1_old.txt')
+        shared = os.path.join(folder, 'shared.txt')
+        for path in (old, shared):
+            with open(path, 'w') as f:
+                f.write('media')
+        with tempfile.TemporaryDirectory() as outside_dir:
+            outside = os.path.join(outside_dir, 'keep.txt')
+            with open(outside, 'w') as f:
+                f.write('outside')
+            link = os.path.join(folder, 'link.txt')
+            os.symlink(outside, link)
+            for msg_id, path in enumerate((old, shared, outside, link, shared), 1):
+                database.save_channel_post(9402, msg_id, text='post', media_path=path, timestamp=msg_id)
+            self.assertEqual(database.prune_channel_posts(9402, 1), 4)
+            self.assertFalse(os.path.exists(old))
+            self.assertTrue(os.path.exists(shared))
+            self.assertTrue(os.path.exists(outside))
+
+    def test_channel_removal_deletes_cached_media_and_avatar(self):
+        for hard in (False, True):
+            with self.subTest(hard=hard):
+                chat_id = 9403 + int(hard)
+                token = database.add_catalog_channel(chat_id, 'Remove', '', 1, '')
+                folder = os.path.join(state.CHANNEL_MEDIA_DIR, token)
+                os.makedirs(folder, exist_ok=True)
+                media = os.path.join(folder, '1_file.txt')
+                avatar = os.path.join(folder, 'avatar.png')
+                for path in (media, avatar):
+                    with open(path, 'w') as f:
+                        f.write('cached')
+                database.save_channel_post(chat_id, chat_id, text='post', media_path=media)
+                remove = database.hard_remove_catalog_channel if hard else database.remove_catalog_channel
+                self.assertTrue(remove(chat_id))
+                self.assertFalse(os.path.exists(media))
+                self.assertFalse(os.path.exists(avatar))
+                if not hard:
+                    self.assertEqual(database.get_channel_posts(chat_id)[0]['text'], 'post')
+                    self.assertIsNone(database.get_channel_posts(chat_id)[0]['media_path'])
+
+    def test_deleted_channel_media_and_avatar_return_404(self):
+        import asyncio
+        token = database.add_catalog_channel(9405, 'Deleted', '', 1, '')
+        database.remove_catalog_channel(9405)
+        # Even stale files left behind must not be served.
+        folder = os.path.join(state.CHANNEL_MEDIA_DIR, token)
+        os.makedirs(folder, exist_ok=True)
+        for name in ('1_file.png', 'avatar.png'):
+            with open(os.path.join(folder, name), 'wb') as f:
+                f.write(b'cached')
+        request = MagicMock()
+        request.match_info = {'token': token, 'msg_id': '1', 'filename': 'file.png'}
+        self.assertEqual(asyncio.run(pw_routes.handle_media_file(request)).status, 404)
+        self.assertEqual(asyncio.run(pw_routes.handle_channel_avatar(request)).status, 404)
+
+    def test_uploaded_active_content_is_downloaded_with_sandbox_headers(self):
+        import asyncio
+        token = database.add_catalog_channel(9406, 'Content', '', 1, '')
+        folder = os.path.join(state.CHANNEL_MEDIA_DIR, token)
+        os.makedirs(folder, exist_ok=True)
+        for ext in ('svg', 'html', 'xhtml', 'xml', 'js', 'pdf', 'txt', 'png', 'mp3', 'mp4'):
+            with self.subTest(ext=ext):
+                name = f'file.{ext}'
+                with open(os.path.join(folder, f'1_{name}'), 'w') as f:
+                    f.write('<svg onload="alert(1)"></svg>')
+                request = MagicMock()
+                request.match_info = {'token': token, 'msg_id': '1', 'filename': name}
+                response = asyncio.run(pw_routes.handle_media_file(request))
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.headers['X-Content-Type-Options'], 'nosniff')
+                self.assertEqual(response.headers['Content-Security-Policy'], "sandbox; default-src 'none'")
+                if ext not in ('png', 'mp3', 'mp4'):
+                    self.assertEqual(response.headers['Content-Type'], 'application/octet-stream')
+                    self.assertEqual(response.headers['Content-Disposition'], 'attachment')
+                else:
+                    self.assertNotIn('Content-Disposition', response.headers)
+        with open(os.path.join(folder, 'avatar.png'), 'wb') as f:
+            f.write(b'\x89PNG\r\n\x1a\n')
+        response = asyncio.run(pw_routes.handle_channel_avatar(request))
+        self.assertEqual(response.headers['Content-Security-Policy'], "sandbox; default-src 'none'")
+
+
 if __name__ == "__main__":
     unittest.main()
 

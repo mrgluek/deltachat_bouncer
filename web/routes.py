@@ -23,6 +23,7 @@ except ImportError:
 
 import activitypub
 import config
+import channel_media
 import database
 import security
 import state
@@ -213,7 +214,11 @@ def get_default_channel_avatar_response():
     return web.Response(
         text=_DEFAULT_CHANNEL_AVATAR_SVG,
         content_type="image/svg+xml",
-        headers={'Cache-Control': 'public, max-age=3600'}
+        headers={
+            'Cache-Control': 'public, max-age=3600',
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy': "sandbox; default-src 'none'",
+        }
     )
 
 async def handle_channel_default_avatar(request):
@@ -451,17 +456,21 @@ async def handle_channel_qr_svg(request):
         return web.Response(status=500)
 
 
+def _get_active_channel(token):
+    channel = database.get_web_channel_by_token(token)
+    return channel if channel and not channel.get('is_deleted') else None
+
+
 @security.rate_limited("assets", max_requests=120, window_seconds=60)
 async def handle_channel_avatar(request):
     token = request.match_info.get('token')
-    channel = database.get_web_channel_by_token(token)
+    channel = _get_active_channel(token)
     if not channel:
         return web.Response(status=404)
 
     avatar_cache_path = os.path.join(state.CHANNEL_MEDIA_DIR, token, "avatar.png")
     if os.path.exists(avatar_cache_path):
-        content_type = security._guess_media_content_type(avatar_cache_path)
-        return web.FileResponse(avatar_cache_path, headers={'Cache-Control': 'public, max-age=3600', 'Content-Type': content_type})
+        return web.FileResponse(avatar_cache_path, headers={'Cache-Control': 'public, max-age=3600', **security.channel_media_headers(avatar_cache_path)})
 
     if state.dc_bot_instance and state.dc_accid:
         chat_id = channel.get('chat_id')
@@ -509,10 +518,9 @@ async def handle_channel_avatar(request):
                     pass
 
             if prof_img and os.path.exists(prof_img):
-                os.makedirs(os.path.join(state.CHANNEL_MEDIA_DIR, token), exist_ok=True)
-                shutil.copy2(prof_img, avatar_cache_path)
-                content_type = security._guess_media_content_type(avatar_cache_path)
-                return web.FileResponse(avatar_cache_path, headers={'Cache-Control': 'public, max-age=3600', 'Content-Type': content_type})
+                if not channel_media.store_file(prof_img, avatar_cache_path):
+                    return get_default_channel_avatar_response()
+                return web.FileResponse(avatar_cache_path, headers={'Cache-Control': 'public, max-age=3600', **security.channel_media_headers(avatar_cache_path)})
         except Exception as e:
             config.logger.debug(f"Failed to fetch avatar for channel {token}: {e}")
 
@@ -534,8 +542,8 @@ async def handle_channel_rss(request):
             return web.Response(status=304, headers={"ETag": etag, "Cache-Control": "public, max-age=120"})
         return web.Response(text=rss_xml, content_type="application/rss+xml", charset="utf-8", headers={"ETag": etag, "Cache-Control": "public, max-age=120"})
 
-    channel = database.get_web_channel_by_token(token)
-    if not channel or channel.get('is_deleted'):
+    channel = _get_active_channel(token)
+    if not channel:
         return web.Response(status=404, text="Channel not found")
 
     try:
@@ -567,33 +575,32 @@ async def handle_media_file(request):
     msg_id = request.match_info.get('msg_id')
     filename = request.match_info.get('filename')
 
-    channel = database.get_web_channel_by_token(token)
+    channel = _get_active_channel(token)
     if not channel:
         return web.Response(status=404, text="Channel not found")
 
-    expected_dir = os.path.abspath(os.path.join(state.CHANNEL_MEDIA_DIR, token))
-    target_path = os.path.abspath(os.path.join(expected_dir, f"{msg_id}_{filename}"))
-    if not target_path.startswith(expected_dir):
+    expected_dir = os.path.realpath(os.path.join(state.CHANNEL_MEDIA_DIR, token))
+    target_path = os.path.realpath(os.path.join(expected_dir, f"{msg_id}_{filename}"))
+    if not channel_media.inside_media_dir(target_path) or os.path.commonpath((expected_dir, target_path)) != expected_dir:
         return web.Response(status=403, text="Forbidden")
 
     if not os.path.exists(target_path):
         stem, _ = os.path.splitext(filename)
-        webp_target = os.path.abspath(os.path.join(expected_dir, f"{msg_id}_{stem}.webp"))
-        if webp_target.startswith(expected_dir) and os.path.exists(webp_target):
+        webp_target = os.path.realpath(os.path.join(expected_dir, f"{msg_id}_{stem}.webp"))
+        if os.path.commonpath((expected_dir, webp_target)) == expected_dir and channel_media.inside_media_dir(webp_target) and os.path.exists(webp_target):
             target_path = webp_target
         else:
-            alt_path = os.path.abspath(os.path.join(expected_dir, filename))
-            if alt_path.startswith(expected_dir) and os.path.exists(alt_path):
+            alt_path = os.path.realpath(os.path.join(expected_dir, filename))
+            if os.path.commonpath((expected_dir, alt_path)) == expected_dir and channel_media.inside_media_dir(alt_path) and os.path.exists(alt_path):
                 target_path = alt_path
             else:
                 return web.Response(status=404, text="Media not found")
 
-    content_type = security._guess_media_content_type(target_path)
     return web.FileResponse(
         target_path,
         headers={
             'Cache-Control': 'public, max-age=86400',
-            'Content-Type': content_type,
+            **security.channel_media_headers(target_path),
         }
     )
 

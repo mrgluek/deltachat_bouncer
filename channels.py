@@ -14,6 +14,7 @@ from deltachat2 import events
 
 import activitypub
 import catalog_review
+import channel_media
 import config
 import database
 import dc_helpers
@@ -62,7 +63,7 @@ def _ingest_channel_post(bot, accid, msg, catalog_channel: dict, token: str):
         media_filename = None
         media_path = None
 
-        file_info = dc_helpers._get_msg_file_info(bot, accid, msg)
+        file_info = dc_helpers._get_msg_file_info(bot, accid, msg, max_bytes=config.CHANNEL_MEDIA_MAX_BYTES)
         if file_info and file_info.get("path") and os.path.exists(file_info["path"]):
             src_path = file_info["path"]
             orig_filename = file_info.get("filename") or os.path.basename(src_path)
@@ -82,41 +83,26 @@ def _ingest_channel_post(bot, accid, msg, catalog_channel: dict, token: str):
                 media_type = 'file'
 
             dest_dir = os.path.join(state.CHANNEL_MEDIA_DIR, token)
-            os.makedirs(dest_dir, exist_ok=True)
-
             if media_type == 'image' and ext not in ('.gif', '.svg'):
                 stem = os.path.splitext(safe_filename)[0]
                 webp_filename = f"{stem}.webp"
-                webp_dest_file = f"{msg_id}_{webp_filename}"
-                webp_dest_path = os.path.join(dest_dir, webp_dest_file)
-                if os.path.exists(webp_dest_path) or stickers._optimize_image_to_webp(src_path, webp_dest_path):
+                webp_dest_path = os.path.join(dest_dir, f"{msg_id}_{webp_filename}")
+                if channel_media.store_file(src_path, webp_dest_path, optimize=True):
                     media_path = webp_dest_path
                     media_filename = webp_filename
-                else:
-                    dest_file = f"{msg_id}_{safe_filename}"
-                    dest_path = os.path.join(dest_dir, dest_file)
-                    try:
-                        if not os.path.exists(dest_path):
-                            shutil.copy2(src_path, dest_path)
-                        media_path = dest_path
-                        media_filename = safe_filename
-                    except Exception as e:
-                        config.logger.warning(f"Failed to copy media for channel post {msg_id}: {e}")
-            else:
-                dest_file = f"{msg_id}_{safe_filename}"
-                dest_path = os.path.join(dest_dir, dest_file)
-                try:
-                    if not os.path.exists(dest_path):
-                        shutil.copy2(src_path, dest_path)
+            if not media_path:
+                dest_path = os.path.join(dest_dir, f"{msg_id}_{safe_filename}")
+                if channel_media.store_file(src_path, dest_path):
                     media_path = dest_path
                     media_filename = safe_filename
-                except Exception as e:
-                    config.logger.warning(f"Failed to copy media for channel post {msg_id}: {e}")
+
+        if file_info and not media_path:
+            media_type = 'skipped'
 
         if media_path or file_info:
             text = config.DC_FALLBACK_PATTERN.sub('', text).strip()
 
-        if text or media_path:
+        if text or media_path or media_type == 'skipped':
             database.save_channel_post(
                 chat_id=chat_id,
                 msg_id=msg_id,
@@ -193,10 +179,9 @@ def sync_channel_profile(bot, accid, chat_id: int) -> bool:
                 # Compare bytes, not paths: core reuses the blob dir and a changed
                 # picture may keep a similar name; an unchanged one must not bust the cache.
                 if not os.path.exists(cache_path) or not filecmp.cmp(new_img, cache_path, shallow=False):
-                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                    shutil.copy2(new_img, cache_path)
-                    config.logger.info(f"Channel {chat_id} avatar updated")
-                    changed = True
+                    if channel_media.store_file(new_img, cache_path):
+                        config.logger.info(f"Channel {chat_id} avatar updated")
+                        changed = True
             elif not new_img and os.path.exists(cache_path):
                 # Avatar was removed: drop the stale copy so the default is served again.
                 os.remove(cache_path)

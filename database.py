@@ -1299,23 +1299,40 @@ def update_catalog_channel_member_count(chat_id: int, member_count: int) -> bool
         return cursor.rowcount > 0
 
 
+def _remove_channel_media(conn, chat_id):
+    paths = [row[0] for row in conn.execute(
+        "SELECT media_path FROM catalog_channel_posts WHERE chat_id = ? AND media_path IS NOT NULL", (chat_id,))]
+    conn.execute(
+        "UPDATE catalog_channel_posts SET media_path = NULL, media_filename = NULL, media_type = 'skipped' "
+        "WHERE chat_id = ? AND media_path IS NOT NULL", (chat_id,))
+    import channel_media
+    for path in paths:
+        if not conn.execute("SELECT 1 FROM catalog_channel_posts WHERE media_path = ? LIMIT 1", (path,)).fetchone():
+            channel_media.delete_file(path)
+    row = conn.execute("SELECT token FROM catalog_channels WHERE chat_id = ?", (chat_id,)).fetchone()
+    if row and row[0]:
+        retained = conn.execute("SELECT media_path FROM catalog_channel_posts WHERE media_path IS NOT NULL")
+        channel_media.remove_channel_files(row[0], [item[0] for item in retained])
+
+
 def remove_catalog_channel(chat_id: int) -> bool:
     """Soft-delete channel so web preview shows a graceful removal notice."""
     with _writer_transaction() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
+        cursor = conn.execute(
             "UPDATE catalog_channels SET is_deleted = 1, deleted_at = ? WHERE chat_id = ?",
             (time.time(), chat_id)
         )
-        return cursor.rowcount > 0
+        removed = cursor.rowcount > 0
+        _remove_channel_media(conn, chat_id)
+        return removed
 
 
 def hard_remove_catalog_channel(chat_id: int) -> bool:
     """Permanently delete channel and its cached posts."""
     with _writer_transaction() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM catalog_channel_posts WHERE chat_id = ?", (chat_id,))
-        cursor.execute("DELETE FROM catalog_channels WHERE chat_id = ?", (chat_id,))
+        _prune_channel_posts(conn, chat_id, 0)
+        _remove_channel_media(conn, chat_id)
+        cursor = conn.execute("DELETE FROM catalog_channels WHERE chat_id = ?", (chat_id,))
         return cursor.rowcount > 0
 
 
@@ -1608,17 +1625,26 @@ def get_channel_posts(chat_id: int, limit: int = 50, offset: int = 0) -> list[di
 
 def prune_channel_posts(chat_id: int, keep_count: int = 100):
     with _writer_transaction() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            DELETE FROM catalog_channel_posts
-            WHERE chat_id = ? AND id NOT IN (
-                SELECT id FROM catalog_channel_posts
-                WHERE chat_id = ?
-                ORDER BY timestamp DESC, id DESC
-                LIMIT ?
-            )
-        ''', (chat_id, chat_id, keep_count))
-        return cursor.rowcount
+        return _prune_channel_posts(conn, chat_id, keep_count)
+
+
+def _prune_channel_posts(conn, chat_id, keep_count):
+    cursor = conn.cursor()
+    predicate = """chat_id = ? AND id NOT IN (
+        SELECT id FROM catalog_channel_posts WHERE chat_id = ?
+        ORDER BY timestamp DESC, id DESC LIMIT ?
+    )"""
+    params = (chat_id, chat_id, keep_count)
+    cursor.execute("SELECT media_path FROM catalog_channel_posts WHERE " + predicate, params)
+    paths = [row[0] for row in cursor.fetchall() if row[0]]
+    cursor.execute("DELETE FROM catalog_channel_posts WHERE " + predicate, params)
+    removed = cursor.rowcount
+    import channel_media
+    for path in paths:
+        cursor.execute("SELECT 1 FROM catalog_channel_posts WHERE media_path = ? LIMIT 1", (path,))
+        if not cursor.fetchone():
+            channel_media.delete_file(path)
+    return removed
 
 
 def update_catalog_chat_description(catalog_id: int, description: str):

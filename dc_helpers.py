@@ -562,7 +562,7 @@ def _extract_first_url(text: str) -> str | None:
     return url if url else None
 
 
-def _get_msg_file_info(bot, accid, msg) -> dict | None:
+def _get_msg_file_info(bot, accid, msg, max_bytes=None) -> dict | None:
     """Extract local file path and filename from a Delta Chat message object, downloading if needed."""
     if not msg:
         return None
@@ -577,6 +577,13 @@ def _get_msg_file_info(bot, accid, msg) -> dict | None:
     file_name = getattr(msg, "filename", None) if not isinstance(msg, dict) else msg.get("filename")
     if not isinstance(file_name, str):
         file_name = None
+
+    declared_size = msg.get("file_bytes") if isinstance(msg, dict) else getattr(msg, "file_bytes", None)
+    if max_bytes is not None:
+        if ((isinstance(declared_size, int) and declared_size > max_bytes) or
+                (file_path and os.path.isfile(file_path) and os.path.getsize(file_path) > max_bytes)):
+            logger.warning(f"Channel media skipped for msg {msg_id}: attachment size limit exceeded")
+            return {"skipped": True}
 
     if file_path and os.path.exists(file_path):
         name = file_name or os.path.basename(file_path)
@@ -613,6 +620,9 @@ def _get_msg_file_info(bot, accid, msg) -> dict | None:
                 cur = bot.rpc.get_message(accid, msg_id)
                 cur_path = getattr(cur, "file", None) if not isinstance(cur, dict) else cur.get("file")
                 if isinstance(cur_path, str) and os.path.exists(cur_path):
+                    if max_bytes is not None and os.path.getsize(cur_path) > max_bytes:
+                        logger.warning(f"Channel media skipped for msg {msg_id}: attachment size limit exceeded")
+                        return {"skipped": True}
                     cur_name = getattr(cur, "filename", None) if not isinstance(cur, dict) else cur.get("filename")
                     return {"path": cur_path, "filename": cur_name if isinstance(cur_name, str) else os.path.basename(cur_path)}
                 raw_cur_ds = getattr(cur, "download_state", None) if not isinstance(cur, dict) else cur.get("download_state")

@@ -138,3 +138,17 @@ def _get_base_url(request) -> str:
             host = "localhost"
         base_url = f"{scheme}://{str(host).strip()}"
     return base_url.strip().rstrip("/")
+
+
+def channel_media_headers(filepath):
+    content_type = _guess_media_content_type(filepath)
+    allowed = (content_type in {"image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"}
+               or content_type.startswith(("audio/", "video/")))
+    headers = {
+        "Content-Type": content_type if allowed else "application/octet-stream",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "sandbox; default-src 'none'",
+    }
+    if not allowed:
+        headers["Content-Disposition"] = "attachment"
+    return headers

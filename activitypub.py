@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import html
 import ipaddress
@@ -250,6 +251,10 @@ def verify_http_signature(method: str, path: str, headers: dict, body: bytes,
     if not sig_info:
         return False
 
+    covered, _ = _signature_covers_request(method, headers_lower, body, sig_info)
+    if not covered:
+        return False
+
     # Date / timestamp check
     created_ts = sig_info.get('created')
     now = datetime.now(timezone.utc)
@@ -265,6 +270,9 @@ def verify_http_signature(method: str, path: str, headers: dict, body: bytes,
                 return False
         except Exception:
             return False
+
+    else:
+        return False
 
     # Digest check
     if method.upper() in ('POST', 'PUT'):
@@ -538,6 +546,51 @@ def format_post_html(text: str) -> str:
 _delivery_queue = None
 _http_session = None
 _web_loop = None
+_fetch_semaphore = None
+REMOTE_JSON_MAX_BYTES = 256 * 1024
+DNS_TIMEOUT = 5
+_dns_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ap-dns")
+
+
+def _is_public_address(address: str) -> bool:
+    ip = ipaddress.ip_address(address)
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return ip.is_global and not ip.is_multicast
+
+
+class PublicResolver:
+    """Resolve once off the event loop; the connector uses only checked IPs."""
+    async def resolve(self, host, port=0, family=socket.AF_UNSPEC):
+        loop = asyncio.get_running_loop()
+        infos = await asyncio.wait_for(
+            loop.run_in_executor(_dns_executor, lambda: socket.getaddrinfo(
+                host, port, family=family, type=socket.SOCK_STREAM,
+                proto=socket.IPPROTO_TCP)), timeout=DNS_TIMEOUT)
+        if not infos or any(not _is_public_address(info[4][0]) for info in infos):
+            raise OSError("Remote host resolves to a non-global address")
+        return [dict(hostname=host, host=info[4][0], port=port,
+                     family=info[0], proto=info[2], flags=socket.AI_NUMERICHOST)
+                for info in infos]
+
+    async def close(self):
+        pass
+
+
+def _get_fetch_semaphore():
+    global _fetch_semaphore
+    if _fetch_semaphore is None:
+        _fetch_semaphore = asyncio.Semaphore(8)
+    return _fetch_semaphore
+
+
+async def _read_remote_json(response):
+    data = bytearray()
+    async for chunk in response.content.iter_chunked(16384):
+        data.extend(chunk)
+        if len(data) > REMOTE_JSON_MAX_BYTES:
+            raise ValueError("Remote JSON exceeds size limit")
+    return json.loads(data)
 
 async def init_delivery_worker(loop: asyncio.AbstractEventLoop):
     """Initialize delivery queue and HTTP session. Called from _run_web_server."""
@@ -547,8 +600,9 @@ async def init_delivery_worker(loop: asyncio.AbstractEventLoop):
         return
         
     _web_loop = loop
-    _delivery_queue = asyncio.Queue()
+    _delivery_queue = asyncio.Queue(maxsize=2000)
     _http_session = _aiohttp.ClientSession(
+        connector=_aiohttp.TCPConnector(resolver=PublicResolver(), use_dns_cache=False),
         timeout=_aiohttp.ClientTimeout(total=15),
         headers={"User-Agent": f"BouncerBot/{VERSION} (+https://dc.gluek.info)"}
     )
@@ -610,9 +664,9 @@ async def deliver_to_inbox(inbox_url: str, body: bytes, private_key_pem: str, ke
     headers = sign_headers('POST', inbox_url, body, private_key_pem, key_id)
     headers['Content-Type'] = 'application/activity+json'
     try:
-        async with _http_session.post(inbox_url, data=body, headers=headers) as resp:
+        async with _http_session.post(inbox_url, data=body, headers=headers, allow_redirects=False) as resp:
             if resp.status >= 400:
-                resp_text = await resp.text()
+                resp_text = (await resp.content.read(200)).decode("utf-8", errors="replace")
                 logger.warning(f"AP POST {inbox_url} returned {resp.status}: {resp_text[:200]}")
             else:
                 logger.info(f"AP delivered to {inbox_url}: {resp.status}")
@@ -654,10 +708,13 @@ def queue_post_delivery(token: str, post_data: dict, base_url: str):
         return
     base_url = (base_url or "").strip().rstrip('/')
     try:
-        asyncio.run_coroutine_threadsafe(
-            _delivery_queue.put((token, post_data, base_url)),
-            _web_loop
-        )
+        def enqueue():
+            if _delivery_queue.full():
+                _delivery_queue.get_nowait()
+                _delivery_queue.task_done()
+                logger.warning("AP delivery queue full; dropped oldest post")
+            _delivery_queue.put_nowait((token, post_data, base_url))
+        _web_loop.call_soon_threadsafe(enqueue)
     except Exception as e:
         logger.warning(f"Failed to queue AP delivery: {e}")
 
@@ -679,87 +736,62 @@ def _get_default_signing_info() -> tuple[str, str] | None:
     except Exception:
         return None
 
-def is_safe_url(url: str, allow_private: bool | None = None) -> tuple[bool, str]:
-    """Validate that a URL is safe to fetch and does not target private or internal resources (SSRF protection).
-    Returns (is_safe, error_reason).
-    """
+def is_safe_url(url: str) -> tuple[bool, str]:
+    """Check URL syntax/literal IPs; PublicResolver checks DNS at connection time."""
     if not url or not isinstance(url, str):
         return False, "Empty or invalid URL"
-
     try:
         parsed = urlparse(url)
-    except Exception as e:
-        return False, f"URL parse error: {e}"
-
-    scheme = (parsed.scheme or "").lower()
-    if scheme not in ("http", "https"):
-        return False, f"Unsupported scheme: '{scheme}'"
-
-    hostname = parsed.hostname
-    if not hostname:
-        return False, "Missing hostname in URL"
-
-    hostname = hostname.lower()
-
-    if allow_private is None:
-        allow_private = (
-            os.getenv("ALLOW_PRIVATE_NETWORKS", "").lower() in ("1", "true", "yes") or
-            database.get_config("allow_private_networks") == "1"
-        )
-
-    if not allow_private:
-        # Check forbidden local / internal domain names
+        hostname = parsed.hostname
+        parsed.port  # Reject malformed ports before making a request.
+        if parsed.scheme not in ("http", "https") or not hostname:
+            return False, "Invalid HTTP URL"
+        if parsed.username is not None or parsed.password is not None:
+            return False, "URL credentials are forbidden"
         if (hostname in ("localhost", "localhost.localdomain") or
-                hostname.endswith(".local") or
-                hostname.endswith(".internal") or
-                hostname.endswith(".lan") or
-                hostname.endswith(".home.arpa")):
-            return False, f"Access to local hostname '{hostname}' is forbidden"
-
-        # RFC 2606 reserved testing domains (safe in unit test environments)
-        if (hostname.endswith(".example") or hostname.endswith(".test") or
-                hostname == "example.com" or hostname.endswith(".example.com") or
-                hostname == "remote.social" or hostname.endswith(".remote.social")):
-            return True, "OK"
-
-        # If hostname is an explicit IP address
+                hostname.endswith((".local", ".internal", ".lan", ".home.arpa"))):
+            return False, "Local hostname is forbidden"
         try:
-            ip_obj = ipaddress.ip_address(hostname)
-            if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped:
-                ip_obj = ip_obj.ipv4_mapped
-            if (ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or
-                    ip_obj.is_reserved or ip_obj.is_multicast or ip_obj.is_unspecified):
-                return False, f"Target IP {hostname} is in a reserved or private range"
-            return True, "OK"
+            ipaddress.ip_address(hostname)
         except ValueError:
-            # Domain name, resolve via DNS
-            pass
+            return True, "OK"
+        if not _is_public_address(hostname):
+            return False, "Non-global IP address is forbidden"
+    except (ValueError, TypeError) as e:
+        return False, f"Invalid URL: {e}"
+    return True, "OK"
 
-        try:
-            port = parsed.port or (443 if scheme == "https" else 80)
-            addr_infos = socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP)
-        except socket.gaierror as e:
-            return False, f"DNS resolution failed for {hostname}: {e}"
-        except Exception as e:
-            return False, f"Error resolving {hostname}: {e}"
 
-        if not addr_infos:
-            return False, f"No IP addresses resolved for {hostname}"
-
-        for addr_info in addr_infos:
-            ip_str = addr_info[4][0]
-            try:
-                ip_obj = ipaddress.ip_address(ip_str)
-            except ValueError:
-                return False, f"Invalid resolved IP address: {ip_str}"
-
-            if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped:
-                ip_obj = ip_obj.ipv4_mapped
-
-            if (ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or
-                    ip_obj.is_reserved or ip_obj.is_multicast or ip_obj.is_unspecified):
-                return False, f"Target {hostname} resolved to reserved/private IP {ip_str}"
-
+def _signature_covers_request(method, headers, body, info):
+    components = {h.lower() for h in info.get('headers', [])}
+    if info.get('format') == 'rfc9421':
+        target = ('@request-target' in components or
+                  ('@method' in components and ('@target-uri' in components or
+                   ('@path' in components and '@query' in components))))
+        host = bool(components & {'host', '@authority', '@target-uri'})
+        fresh = 'date' in components or info.get('created') is not None
+    else:
+        target = '(request-target)' in components
+        host = 'host' in components
+        fresh = 'date' in components
+    if not target or not host or not fresh:
+        return False, "Signature must cover request target, host and date/created"
+    if method.upper() in ('POST', 'PUT') or body:
+        digest = base64.b64encode(hashlib.sha256(body or b'').digest()).decode('ascii')
+        signed_digest = False
+        for name, expected in (('digest', f'SHA-256={digest}'),
+                               ('content-digest', f'sha-256=:{digest}:')):
+            value = headers.get(name)
+            if value is not None:
+                # Base64 is case sensitive, even though the algorithm name is not.
+                algorithm, sep, encoded = value.partition('=')
+                expected_algorithm, _, expected_encoded = expected.partition('=')
+                if not sep or algorithm.lower() != expected_algorithm.lower() or encoded != expected_encoded:
+                    return False, "Digest header does not match body SHA-256"
+                if name in components:
+                    signed_digest = True
+        if not signed_digest:
+            return False, "Signature must cover a body digest"
     return True, "OK"
 
 
@@ -787,6 +819,10 @@ def validate_signature_cheap(method: str, headers: dict, body: bytes) -> tuple[b
         return False, "Missing signature data in Signature header"
     if not sig_info.get('headers'):
         return False, "Missing headers list in Signature header"
+
+    covered, reason = _signature_covers_request(method, headers_lower, body, sig_info)
+    if not covered:
+        return False, reason
 
     # 1. Date header / created timestamp freshness verification (±300s)
     created_ts = sig_info.get('created')
@@ -889,6 +925,13 @@ def get_last_fetch_status(url: str) -> int | None:
 async def fetch_remote_actor(actor_id: str, use_cache: bool = True,
                              sign_as_token: str | None = None,
                              base_url: str | None = None) -> dict | None:
+    async with _get_fetch_semaphore():
+        return await _fetch_remote_actor(actor_id, use_cache, sign_as_token, base_url)
+
+
+async def _fetch_remote_actor(actor_id: str, use_cache: bool = True,
+                             sign_as_token: str | None = None,
+                             base_url: str | None = None) -> dict | None:
     """Fetch and cache a remote actor JSON for Follow verification and key retrieval.
     Supports Authorized Fetch (HTTP Signatures on GET) for instances like GoToSocial/Akkoma."""
     if _http_session is None:
@@ -918,7 +961,7 @@ async def fetch_remote_actor(actor_id: str, use_cache: bool = True,
             logger.warning(f"Error signing GET request for {actor_id}: {e}")
 
     try:
-        async with _http_session.get(actor_id, headers=headers, timeout=_aiohttp.ClientTimeout(total=10)) as resp:
+        async with _http_session.get(actor_id, headers=headers, timeout=_aiohttp.ClientTimeout(total=10), allow_redirects=False) as resp:
             fetch_url = actor_id.split('#')[0]
             _last_fetch_status[actor_id] = resp.status
             _last_fetch_status[fetch_url] = resp.status
@@ -936,11 +979,11 @@ async def fetch_remote_actor(actor_id: str, use_cache: bool = True,
                             'User-Agent': f'BouncerBot/{VERSION} (+https://dc.gluek.info)',
                         }
                         auth_headers.update(sign_headers('GET', actor_id, None, priv_pem, key_id))
-                        async with _http_session.get(actor_id, headers=auth_headers, timeout=_aiohttp.ClientTimeout(total=10)) as resp2:
+                        async with _http_session.get(actor_id, headers=auth_headers, timeout=_aiohttp.ClientTimeout(total=10), allow_redirects=False) as resp2:
                             _last_fetch_status[actor_id] = resp2.status
                             _last_fetch_status[fetch_url] = resp2.status
                             if resp2.status == 200:
-                                actor_data = await resp2.json(content_type=None)
+                                actor_data = await _read_remote_json(resp2)
                                 _remote_actor_cache[actor_id] = (time.time() + REMOTE_ACTOR_CACHE_TTL, actor_data)
                                 return actor_data
                             elif resp2.status in (403, 404, 410):
@@ -959,7 +1002,7 @@ async def fetch_remote_actor(actor_id: str, use_cache: bool = True,
                 else:
                     logger.warning(f"Failed to fetch actor {actor_id}: {resp.status}")
                 return None
-            actor_data = await resp.json(content_type=None)
+            actor_data = await _read_remote_json(resp)
             _remote_actor_cache[actor_id] = (time.time() + REMOTE_ACTOR_CACHE_TTL, actor_data)
             return actor_data
     except Exception as e:
