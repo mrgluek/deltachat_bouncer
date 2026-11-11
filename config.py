@@ -45,6 +45,8 @@ VERSION = "2.52.1"
 # Attachments over 64 KB are not downloaded automatically. Not 1 byte: the core then also defers
 # every plain text message (commands, links) to a one-by-one "download later", which delays replies.
 DOWNLOAD_LIMIT = 65536
+CHANNEL_MEDIA_MAX_BYTES = 20 * 1024 * 1024
+CHANNEL_MEDIA_MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 
 # Ntfy Bot has its own /newgroup. In a group where it is a member, the bouncer
 # leaves plain /newgroup to it so one command does not create two groups.

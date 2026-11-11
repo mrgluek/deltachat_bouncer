@@ -159,7 +159,7 @@ class TestSecurity(unittest.TestCase):
             "http://[::ffff:10.0.0.1]/key",
         ]
         for url in unsafe_ips:
-            safe, reason = activitypub.is_safe_url(url, allow_private=False)
+            safe, reason = activitypub.is_safe_url(url)
             self.assertFalse(safe, f"Expected {url} to be rejected as unsafe, but got safe. Reason: {reason}")
 
     def test_is_safe_url_blocks_local_and_internal_hostnames(self):
@@ -172,7 +172,7 @@ class TestSecurity(unittest.TestCase):
             "http://gateway.home.arpa/status",
         ]
         for url in unsafe_hosts:
-            safe, reason = activitypub.is_safe_url(url, allow_private=False)
+            safe, reason = activitypub.is_safe_url(url)
             self.assertFalse(safe, f"Expected {url} to be rejected as unsafe, but got safe. Reason: {reason}")
 
     def test_is_safe_url_blocks_non_http_schemes_and_invalid_inputs(self):
@@ -191,20 +191,9 @@ class TestSecurity(unittest.TestCase):
             safe, reason = activitypub.is_safe_url(url)
             self.assertFalse(safe, f"Expected {url} to be rejected, but got safe.")
 
-    def test_is_safe_url_allows_testing_domains_and_override(self):
-        safe_urls = [
-            "https://example.com/users/alice",
-            "https://test.example.com/actor",
-            "https://actor.test/users/bob",
-            "https://remote.social/users/carol",
-        ]
-        for url in safe_urls:
-            safe, reason = activitypub.is_safe_url(url)
-            self.assertTrue(safe, f"Expected {url} to be allowed, but rejected: {reason}")
-
-        # Override with allow_private=True
-        safe_private, _ = activitypub.is_safe_url("http://127.0.0.1:8080/actor", allow_private=True)
-        self.assertTrue(safe_private)
+    def test_is_safe_url_rejects_private_even_with_environment_override(self):
+        with patch.dict(os.environ, {"ALLOW_PRIVATE_NETWORKS": "1"}):
+            self.assertFalse(activitypub.is_safe_url("http://127.0.0.1:8080/actor")[0])
 
     def test_fetch_remote_actor_and_resolve_key_block_unsafe_urls(self):
         # fetch_remote_actor should abort before making any HTTP request
@@ -240,8 +229,9 @@ class TestSecurity(unittest.TestCase):
 
     def test_validate_signature_cheap_unsafe_key_id(self):
         headers = {
-            "Signature": 'keyId="http://169.254.169.254/key",algorithm="rsa-sha256",headers="(request-target) host date",signature="abc"',
+            "Signature": 'keyId="http://169.254.169.254/key",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="abc"',
             "Date": email.utils.formatdate(usegmt=True),
+            "Digest": "SHA-256=" + base64.b64encode(hashlib.sha256(b"").digest()).decode(),
         }
         valid, reason = activitypub.validate_signature_cheap("POST", headers, b"")
         self.assertFalse(valid)
@@ -250,7 +240,8 @@ class TestSecurity(unittest.TestCase):
     def test_validate_signature_cheap_date_checks(self):
         # Missing Date
         headers = {
-            "Signature": 'keyId="https://example.com/key",algorithm="rsa-sha256",headers="(request-target) host date",signature="abc"',
+            "Digest": "SHA-256=" + base64.b64encode(hashlib.sha256(b"").digest()).decode(),
+            "Signature": 'keyId="https://example.com/key",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="abc"',
         }
         valid, reason = activitypub.validate_signature_cheap("POST", headers, b"")
         self.assertFalse(valid)

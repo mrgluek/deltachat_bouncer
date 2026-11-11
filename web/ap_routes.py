@@ -128,7 +128,9 @@ async def handle_ap_inbox(request):
     activity_actor = activity.get("actor")
     if isinstance(activity_actor, dict):
         activity_actor = activity_actor.get("id") or activity_actor.get("url")
-    if isinstance(activity_actor, str) and key_id:
+    if not isinstance(activity_actor, str) or not activity_actor:
+        return web.Response(status=401, text="Missing activity actor")
+    if key_id:
         actor_host = urllib.parse.urlparse(activity_actor).netloc.lower()
         key_host = urllib.parse.urlparse(key_id).netloc.lower()
         if actor_host and key_host and actor_host != key_host:
@@ -138,22 +140,6 @@ async def handle_ap_inbox(request):
     # Fetch remote public key with Authorized Fetch support
     pub_pem, key_doc = await activitypub.resolve_public_key(key_id, sign_as_token=token, base_url=base_url)
     if not pub_pem:
-        fetch_status = activitypub.get_last_fetch_status(key_id)
-        if act_type == "Delete" and fetch_status in (403, 404, 410):
-            deleted_actor = activity.get("actor") or activity.get("object")
-            if isinstance(deleted_actor, dict):
-                deleted_actor = deleted_actor.get("id") or deleted_actor.get("url")
-            if isinstance(deleted_actor, str) and key_id:
-                actor_host = urllib.parse.urlparse(deleted_actor).netloc.lower()
-                key_host = urllib.parse.urlparse(key_id).netloc.lower()
-                if actor_host and actor_host == key_host:
-                    removed = database.remove_ap_followers_by_actor(deleted_actor)
-                    config.logger.info(
-                        f"Processed Delete for gone/suspended AP actor: {deleted_actor} "
-                        f"(remote status {fetch_status}, removed {removed} follower record(s))"
-                    )
-                    return web.Response(status=202, text="Accepted")
-
         config.logger.warning(f"Could not resolve remote actor public key for {key_id}")
         return web.Response(status=401, text="Could not resolve remote actor public key")
 
@@ -248,12 +234,8 @@ async def handle_ap_inbox(request):
         return web.Response(status=202, text="Accepted")
 
     elif act_type == "Delete":
-        deleted_actor = activity.get("actor") or activity.get("object")
-        if isinstance(deleted_actor, dict):
-            deleted_actor = deleted_actor.get("id") or deleted_actor.get("url")
-        if isinstance(deleted_actor, str):
-            database.remove_ap_followers_by_actor(deleted_actor)
-            config.logger.info(f"Removed deleted AP actor: {deleted_actor}")
+        database.remove_ap_followers_by_actor(activity_actor)
+        config.logger.info(f"Removed deleted AP actor: {activity_actor}")
         return web.Response(status=202, text="Accepted")
 
     return web.Response(status=202, text="Accepted")

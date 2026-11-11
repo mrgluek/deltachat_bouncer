@@ -934,15 +934,202 @@ class TestActivityPub(unittest.TestCase):
         }
         req.read = AsyncMock(return_value=body_bytes)
 
-        # Simulate remote instance returning 403 or 410 on public key / actor fetch
-        activitypub._last_fetch_status[key_id] = 403
-        activitypub._last_fetch_status[actor_id] = 403
+        for status in (403, 404, 410):
+            with self.subTest(status=status):
+                activitypub.reset_signature_replay_cache()
+                activitypub._last_fetch_status[key_id] = status
+                activitypub._last_fetch_status[actor_id] = status
+                with patch("activitypub.resolve_public_key", new_callable=AsyncMock) as mock_resolve:
+                    mock_resolve.return_value = (None, None)
+                    resp = asyncio.run(pw_ap_routes.handle_ap_inbox(req))
+                    self.assertEqual(resp.status, 401)
+                    self.assertEqual(database.get_ap_followers_count(token), 1)
 
-        with patch("activitypub.resolve_public_key", new_callable=AsyncMock) as mock_resolve:
-            mock_resolve.return_value = (None, None)
-            resp = asyncio.run(pw_ap_routes.handle_ap_inbox(req))
-            self.assertEqual(resp.status, 202)
-            self.assertEqual(database.get_ap_followers_count(token), 0)
+    def test_signature_requires_signed_target_and_body_digest(self):
+        from cryptography.hazmat.primitives import serialization, hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+        private, public = activitypub.generate_actor_keypair()
+        key = serialization.load_pem_private_key(private.encode(), password=None)
+        body = b'{"type":"Follow"}'
+        url = 'https://dc.gluek.info/inbox'
+        for components, include_digest in (
+                (['(request-target)', 'host', 'date'], False),
+                (['(request-target)', 'host', 'date'], True),
+                (['host', 'date', 'digest'], True)):
+            with self.subTest(components=components, include_digest=include_digest):
+                headers = activitypub.sign_headers('POST', url, body, private, 'https://actor.test/key')
+                values = {name.lower(): value for name, value in headers.items()}
+                lines = [f'{name}: post /inbox' if name == '(request-target)' else f'{name}: {values[name]}'
+                         for name in components]
+                signature = base64.b64encode(key.sign('\n'.join(lines).encode(), padding.PKCS1v15(), hashes.SHA256())).decode()
+                headers['Signature'] = f'keyId="https://actor.test/key",headers="{" ".join(components)}",signature="{signature}"'
+                if not include_digest:
+                    del headers['Digest']
+                self.assertFalse(activitypub.validate_signature_cheap('POST', headers, body)[0])
+                self.assertFalse(activitypub.verify_http_signature('POST', '/inbox', headers, body, public))
+
+    def test_rfc9421_requires_signed_target_and_body_digest(self):
+        from cryptography.hazmat.primitives import serialization, hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+        private, public = activitypub.generate_actor_keypair()
+        key = serialization.load_pem_private_key(private.encode(), password=None)
+        body = b'{"type":"Follow"}'
+        digest = 'sha-256=:' + base64.b64encode(hashlib.sha256(body).digest()).decode() + ':'
+        for components, include_digest in (
+                (['@method', '@target-uri', 'host'], False),
+                (['@method', '@target-uri', 'host'], True),
+                (['host', 'content-digest'], True),
+                (['@target-uri', 'host', 'content-digest'], True),
+                (['@method', 'host', 'content-digest'], True)):
+            with self.subTest(components=components, include_digest=include_digest):
+                params = '(' + ' '.join(f'"{name}"' for name in components) + f');created={int(time.time())};keyid="https://actor.test/key"'
+                values = {'@method': 'POST', '@target-uri': 'https://dc.gluek.info/inbox',
+                          'host': 'dc.gluek.info', 'content-digest': digest}
+                lines = [f'"{name}": {values[name]}' for name in components]
+                lines.append(f'"@signature-params": {params}')
+                signature = base64.b64encode(key.sign('\n'.join(lines).encode(), padding.PKCS1v15(), hashes.SHA256())).decode()
+                headers = {'Host': values['host'], 'Signature-Input': f'sig1={params}', 'Signature': f'sig1=:{signature}:'}
+                if include_digest:
+                    headers['Content-Digest'] = digest
+                self.assertFalse(activitypub.validate_signature_cheap('POST', headers, body)[0])
+                self.assertFalse(activitypub.verify_http_signature('POST', '/inbox', headers, body, public))
+
+    def test_dns_resolver_rejects_private_answers_for_all_hosts(self):
+        import socket
+        import threading
+        async def check():
+            for host in ('example.com', 'actor.test', 'actor.example', 'remote.social', 'ordinary.org'):
+                def lookup(*args, **kwargs):
+                    self.assertNotEqual(threading.get_ident(), main_thread)
+                    return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, '', ('127.0.0.1', 443))]
+                with patch('activitypub.socket.getaddrinfo', side_effect=lookup):
+                    with self.assertRaises(OSError):
+                        await activitypub.PublicResolver().resolve(host, 443)
+        main_thread = threading.get_ident()
+        asyncio.run(check())
+
+    def test_dns_resolver_timeout_keeps_loop_responsive(self):
+        import threading
+        release = threading.Event()
+        def lookup(*args, **kwargs):
+            release.wait(1)
+            return []
+        async def check():
+            with patch('activitypub.socket.getaddrinfo', side_effect=lookup), patch('activitypub.DNS_TIMEOUT', 0.02):
+                try:
+                    with self.assertRaises(asyncio.TimeoutError):
+                        await activitypub.PublicResolver().resolve('actor.test', 443)
+                finally:
+                    release.set()
+        asyncio.run(check())
+
+    def test_remote_fetch_pins_dns_preserves_host_and_refuses_redirects(self):
+        import socket
+        from aiohttp import web, ClientSession, TCPConnector
+        async def check():
+            requests = []
+            async def handler(request):
+                requests.append((request.host, request.path))
+                if request.path == '/redirect':
+                    raise web.HTTPFound('/internal')
+                return web.json_response({'id': 'https://actor.test/actor'})
+            app = web.Application()
+            app.router.add_get('/{name}', handler)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, '127.0.0.1', 0)
+            await site.start()
+            port = site._server.sockets[0].getsockname()[1]
+            try:
+                async with ClientSession(connector=TCPConnector(resolver=activitypub.PublicResolver(), use_dns_cache=False, force_close=True)) as session:
+                    activitypub._fetch_semaphore = None
+                    # Test-only injection allows the local fixture; production rejects it.
+                    with patch('activitypub._http_session', session), patch('activitypub._is_public_address', return_value=True), \
+                         patch('activitypub.socket.getaddrinfo', return_value=[(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, '', ('127.0.0.1', port))]) as lookup:
+                        result = await activitypub.fetch_remote_actor(f'http://actor.test:{port}/actor', use_cache=False)
+                        self.assertIsNotNone(result)
+                        self.assertEqual(lookup.call_count, 1)
+                        self.assertEqual(requests, [(f'actor.test:{port}', '/actor')])
+                        result = await activitypub.fetch_remote_actor(f'http://actor.test:{port}/redirect', use_cache=False)
+                        self.assertIsNone(result)
+                        self.assertEqual([path for _, path in requests], ['/actor', '/redirect'])
+            finally:
+                await runner.cleanup()
+        asyncio.run(check())
+
+    def test_remote_json_size_cap(self):
+        async def chunks():
+            for _ in range(17):
+                yield b' ' * 16384
+        response = MagicMock()
+        response.content.iter_chunked.return_value = chunks()
+        async def check():
+            with self.assertRaises(ValueError):
+                await activitypub._read_remote_json(response)
+        asyncio.run(check())
+
+    def test_remote_fetch_concurrency_is_bounded(self):
+        async def check():
+            active = 0
+            maximum = 0
+            gate = asyncio.Event()
+            async def fetch(*args):
+                nonlocal active, maximum
+                active += 1
+                maximum = max(maximum, active)
+                await gate.wait()
+                active -= 1
+            activitypub._fetch_semaphore = None
+            with patch('activitypub._fetch_remote_actor', side_effect=fetch):
+                tasks = [asyncio.create_task(activitypub.fetch_remote_actor('https://actor.test')) for _ in range(12)]
+                await asyncio.sleep(0)
+                self.assertEqual(maximum, 8)
+                gate.set()
+                await asyncio.gather(*tasks)
+        asyncio.run(check())
+        activitypub._fetch_semaphore = None
+
+    def test_delivery_queue_drops_oldest_when_full(self):
+        async def check():
+            def discard(coro):
+                coro.close()
+            with patch('activitypub._aiohttp.ClientSession'), patch('activitypub.asyncio.create_task', side_effect=discard):
+                await activitypub.init_delivery_worker(asyncio.get_running_loop())
+            try:
+                for i in range(2001):
+                    activitypub.queue_post_delivery('token', {'msg_id': i}, 'https://bot.test')
+                await asyncio.sleep(0)
+                self.assertEqual(activitypub._delivery_queue.qsize(), 2000)
+                self.assertEqual(activitypub._delivery_queue.get_nowait()[1]['msg_id'], 1)
+            finally:
+                activitypub._delivery_queue = None
+                activitypub._http_session = None
+                activitypub._web_loop = None
+        asyncio.run(check())
+
+
+    def test_actor_fetch_disables_automatic_redirects(self):
+        response = MagicMock(status=302)
+        session = MagicMock()
+        session.get.return_value.__aenter__ = AsyncMock(return_value=response)
+        async def check():
+            with patch('activitypub._http_session', session):
+                self.assertIsNone(await activitypub.fetch_remote_actor('https://actor.test/redirect', use_cache=False))
+                self.assertIs(session.get.call_args.kwargs.get('allow_redirects'), False)
+        asyncio.run(check())
+
+    def test_actor_fetch_rejects_oversized_json(self):
+        async def chunks():
+            yield b' ' * (256 * 1024 + 1)
+        response = MagicMock(status=200)
+        response.content.iter_chunked.return_value = chunks()
+        response.json = AsyncMock(return_value={'id': 'oversized'})
+        session = MagicMock()
+        session.get.return_value.__aenter__ = AsyncMock(return_value=response)
+        async def check():
+            with patch('activitypub._http_session', session):
+                self.assertIsNone(await activitypub.fetch_remote_actor('https://actor.test/huge', use_cache=False))
+        asyncio.run(check())
 
 
 if __name__ == "__main__":
