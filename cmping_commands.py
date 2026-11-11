@@ -30,6 +30,8 @@ def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers
         state._cmping_global_lock.acquire()  # block until available
 
     try:
+        if not dc_helpers._check_public_relays(bot, accid, chat_id, specified_servers):
+            return
         _bg_cmping_worker_inner(bot, accid, chat_id, msg_id, bot_domains, specified_servers)
     finally:
         state._cmping_global_lock.release()
@@ -290,15 +292,12 @@ def cmping_command(bot, accid, event, skip_cooldown: bool = False):
         return
 
     for s in specified_servers:
-        if not config.DOMAIN_REGEX.match(s):
+        if not dc_helpers._relay_domain_valid(s):
             dc_helpers._send(bot, accid, msg.chat_id, f"❌ Invalid server domain: `{s}`. Please specify a valid domain name.")
             return
 
     # Update cooldown
     state._chat_cmping_anti_spam[msg.chat_id] = now
-    
-    # 3. Add reaction ⏳
-    dc_helpers._react(bot, accid, msg.id, "⏳")
     
     # 4. Get bot transport domains
     bot_domains = dc_helpers._get_bot_domains(bot, accid)
@@ -308,12 +307,9 @@ def cmping_command(bot, accid, event, skip_cooldown: bool = False):
         dc_helpers._send(bot, accid, msg.chat_id, "❌ Error: Could not determine bot's own transport domain.")
         return
 
-    # 5. Spawn background thread to run cmping
-    threading.Thread(
-        target=bg_cmping_worker,
-        args=(bot, accid, msg.chat_id, msg.id, bot_domains, specified_servers),
-        daemon=True
-    ).start()
+    dc_helpers._start_command_worker(
+        bot, accid, msg, "cmping", config.MAX_QUEUED_CMPING, bg_cmping_worker,
+        (bot, accid, msg.chat_id, msg.id, bot_domains, specified_servers))
 
 @config.dc_cli.on(events.NewMessage(command="/cmpingadd"))
 def cmpingadd_command(bot, accid, event):
@@ -330,7 +326,7 @@ def cmpingadd_command(bot, accid, event):
 
     domain = parts[1].strip().lower()
     # Validate domain
-    if not config.DOMAIN_REGEX.match(domain):
+    if not dc_helpers._relay_domain_valid(domain):
         dc_helpers._send(bot, accid, msg.chat_id, f"❌ Invalid domain: {domain}")
         return
 
@@ -345,10 +341,18 @@ def cmpingadd_command(bot, accid, event):
         dc_helpers._send(bot, accid, msg.chat_id, f"ℹ️ {domain} is already in monitoring.")
         return
 
+    dc_helpers._start_command_worker(
+        bot, accid, msg, "cmping", config.MAX_QUEUED_CMPING, _add_public_monitor,
+        (bot, accid, msg.chat_id, domain, bot_domains))
+
+
+def _add_public_monitor(bot, accid, chat_id, domain, bot_domains):
+    if not dc_helpers._check_public_relays(bot, accid, chat_id, [domain]):
+        return
     database.add_cmping_monitor(domain)
     total_monitors = len(database.get_all_cmping_monitors())
     total = len(bot_domains) + total_monitors
-    dc_helpers._send(bot, accid, msg.chat_id,
+    dc_helpers._send(bot, accid, chat_id,
           f"✅ {domain} added to monitoring.\nTotal: {len(bot_domains)} transport + {total_monitors} monitored = {total} servers.")
 
 @config.dc_cli.on(events.NewMessage(command="/cmpingdel"))

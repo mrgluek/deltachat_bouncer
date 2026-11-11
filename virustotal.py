@@ -579,12 +579,19 @@ def virus_command(bot, accid, event):
         )
         return
 
-    dc_helpers._react(bot, accid, msg.id, "⏳")
+    if not dc_helpers._is_dc_admin(bot, accid, msg.from_id):
+        now = time.time()
+        with state._command_queue_lock:
+            last = state._virus_anti_spam.get(msg.from_id, float("-inf"))
+            cooling = now - last < config.VIRUSTOTAL_USER_COOLDOWN_SECONDS
+            if not cooling:
+                state._virus_anti_spam[msg.from_id] = now
+        if cooling:
+            dc_helpers._send(bot, accid, msg.chat_id, "⏳ /virus is on cooldown, please try again in a moment.")
+            return
 
-    threading.Thread(
-        target=bg_virus_worker,
-        args=(bot, accid, msg.chat_id, msg.id, target_type, target_data, vt_key, msg, payload),
-        daemon=True,
-    ).start()
+    dc_helpers._start_command_worker(
+        bot, accid, msg, "virus", config.MAX_QUEUED_VIRUS, bg_virus_worker,
+        (bot, accid, msg.chat_id, msg.id, target_type, target_data, vt_key, msg, payload))
 
 

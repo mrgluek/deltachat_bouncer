@@ -568,6 +568,8 @@ def bg_cmcall_worker(bot, accid, chat_id, msg_id, s1, s2):
                                   "⏳ Another CMCall test is running, your request is queued...")
         state._cmcall_global_lock.acquire()
     try:
+        if not dc_helpers._check_public_relays(bot, accid, chat_id, [s1, s2]):
+            return
         servers = [s1] if s1 == s2 else [s1, s2]
         result = run_cmcall(servers)
         dc_helpers._react(bot, accid, msg_id, "☑️" if result.get("ok") else "❌")
@@ -585,7 +587,7 @@ def cmcall_command(bot, accid, event):
         dc_helpers._send(bot, accid, msg.chat_id, usage)
         return
     for s in servers:
-        if not config.DOMAIN_REGEX.match(s):
+        if not dc_helpers._relay_domain_valid(s):
             dc_helpers._send(bot, accid, msg.chat_id, f"❌ Invalid server domain: `{s}`. {usage}")
             return
 
@@ -598,12 +600,11 @@ def cmcall_command(bot, accid, event):
             return
     state._chat_cmcall_anti_spam[msg.chat_id] = now
 
-    dc_helpers._react(bot, accid, msg.id, "⏳")
     s1 = servers[0]
     s2 = servers[1] if len(servers) == 2 else servers[0]
-    threading.Thread(
-        target=bg_cmcall_worker, args=(bot, accid, msg.chat_id, msg.id, s1, s2), daemon=True
-    ).start()
+    dc_helpers._start_command_worker(
+        bot, accid, msg, "cmcall", config.MAX_QUEUED_CMCALL, bg_cmcall_worker,
+        (bot, accid, msg.chat_id, msg.id, s1, s2))
 
 
 # --------------------------------------------------------------------------

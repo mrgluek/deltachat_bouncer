@@ -15,6 +15,8 @@ edit, reaction and deletion the bot sends goes through this queue:
   in the queue, takes the more urgent priority, and both callers get the result (an incident
   message edited three times while the queue is full goes out once, with the latest text).
 - Expiry (expires_in) drops a job that waited too long, without using a token.
+- Ordinary waiting jobs are capped; overflow drops the oldest at the lowest priority.
+  Alerts and jobs submitted with wait=True are protected.
 - A backlog is logged (at most once a minute) while BACKLOG_WARN or more messages wait.
 
 Sends run in one worker thread (the RPC calls block). Until start() is called - in tests - a
@@ -26,6 +28,7 @@ import concurrent.futures
 import heapq
 import itertools
 import logging
+import os
 import threading
 import time
 
@@ -35,6 +38,7 @@ RATE_PER_MINUTE = 50
 BURST = 5
 
 BACKLOG_WARN = 20
+MAX_QUEUED_ORDINARY = int(os.environ.get("OUTBOX_MAX_QUEUED_ORDINARY", "500"))
 
 PRIO_ALERT = 0  # cmping / cmcall monitoring alerts and their edits
 PRIO_REPLY = 1  # replies, reactions, mentions, welcome - everything a user started
@@ -44,17 +48,20 @@ PRIO_NAMES = {PRIO_ALERT: "alert", PRIO_REPLY: "reply", PRIO_LOW: "low"}
 
 
 class _Job:
-    __slots__ = ("priority", "seq", "fn", "key", "expires_at", "label", "future", "done")
+    __slots__ = ("priority", "seq", "fn", "key", "expires_at", "label", "future", "done", "protected")
 
-    def __init__(self, priority, seq, fn, key, expires_at, label):
+    def __init__(self, priority, seq, fn, key, expires_at, label, protected=False):
         self.priority, self.seq, self.fn, self.key = priority, seq, fn, key
         self.expires_at, self.label = expires_at, label
+        self.protected = protected
         self.future = concurrent.futures.Future()
         self.done = False  # popped (sent, dropped or replaced by a re-queued copy)
 
 
 class Outbox:
-    def __init__(self, rate_per_minute: float = RATE_PER_MINUTE, burst: int = BURST, clock=time.monotonic):
+    def __init__(self, rate_per_minute: float = RATE_PER_MINUTE, burst: int = BURST, clock=time.monotonic, max_queued=MAX_QUEUED_ORDINARY):
+        self.max_queued = max(0, max_queued)
+        self._last_drop_log = float("-inf")
         self.rate = rate_per_minute / 60.0
         self.burst = burst
         self.clock = clock
@@ -66,13 +73,13 @@ class Outbox:
         self._cond = threading.Condition()
         self._thread = None
         self._last_backlog_log = float("-inf")
-        self.stats = {"sent": 0, "merged": 0, "expired": 0, "failed": 0}
+        self.stats = {"sent": 0, "merged": 0, "expired": 0, "failed": 0, "dropped": 0}
 
     # ---- submitting ----------------------------------------------------------
 
     def submit(self, fn, priority: int = PRIO_REPLY, key=None, expires_in: float | None = None,
-               label: str = "") -> concurrent.futures.Future:
-        """Queue fn() (a blocking send returning e.g. a msg_id); returns a Future with its result."""
+               label: str = "", wait: bool = False) -> concurrent.futures.Future:
+        """Queue fn(); return its Future. wait=True protects jobs whose callers need the result."""
         now = self.clock()
         expires_at = now + expires_in if expires_in is not None else None
         # Not started (tests): send right away. Also from inside a job (the worker thread): queuing
@@ -85,18 +92,38 @@ class Outbox:
             old = self._by_key.get(key) if key is not None else None
             if old is not None and not old.done:
                 # Same message waiting already: newest content, its place in line, the more urgent priority
+                old.protected = old.protected or wait
                 old.fn, old.label = fn, label or old.label
                 old.expires_at = None if (old.expires_at is None or expires_at is None) else max(old.expires_at, expires_at)
                 self.stats["merged"] += 1
                 if priority < old.priority:
                     old.done = True  # skip the old heap entry; a copy goes in at the new priority
-                    job = _Job(priority, old.seq, fn, key, old.expires_at, old.label)
+                    job = _Job(priority, old.seq, fn, key, old.expires_at, old.label, old.protected)
                     job.future = old.future
                     self._push(job)
                 return old.future
-            job = _Job(priority, next(self._seq), fn, key, expires_at, label)
+            job = _Job(priority, next(self._seq), fn, key, expires_at, label, wait)
             self._push(job)
+            self._trim()
             return job.future
+
+    def _trim(self):
+        ordinary = [j for _, _, j in self._heap
+                    if not j.done and not j.protected and j.priority >= PRIO_REPLY]
+        if len(ordinary) <= self.max_queued:
+            return
+        # Lowest priority first; oldest first within that class. Protected jobs
+        # and alerts never compete for this budget.
+        for job in sorted(ordinary, key=lambda j: (-j.priority, j.seq))[:len(ordinary) - self.max_queued]:
+            self._finish(job)
+            job.future.set_result(None)
+            self.stats["dropped"] += 1
+        self._heap = [entry for entry in self._heap if not entry[2].done]
+        heapq.heapify(self._heap)
+        now = self.clock()
+        if now - self._last_drop_log >= 60:
+            self._last_drop_log = now
+            logger.warning("Outbox: dropping ordinary messages at the queue limit")
 
     def _push(self, job):
         heapq.heappush(self._heap, (job.priority, job.seq, job))

@@ -103,6 +103,59 @@ class TestOutbox(unittest.TestCase):
         self.assertLess(outbox.BURST, 10)
 
 
+class TestOutboxLimits(unittest.TestCase):
+    def test_overflow_drops_oldest_at_lowest_priority_and_cleans_keys(self):
+        ob = queued()
+        ob.max_queued = 2
+        reply = ob.submit(lambda: "reply", key="reply")
+        old = ob.submit(lambda: "old", priority=PRIO_LOW, key="old")
+        new = ob.submit(lambda: "new", priority=PRIO_LOW, key="new")
+        self.assertIsNone(old.result(timeout=1))
+        self.assertFalse(reply.done())
+        self.assertFalse(new.done())
+        self.assertNotIn("old", ob._by_key)
+        self.assertEqual(ob.stats["dropped"], 1)
+        self.assertEqual(len(ob._heap), 2)
+
+    def test_replies_are_bounded_but_alerts_and_waiters_survive(self):
+        ob = queued()
+        ob.max_queued = 1
+        alert = ob.submit(lambda: "alert", priority=PRIO_ALERT)
+        protected = ob.submit(lambda: "wait", wait=True, key="wait")
+        first = ob.submit(lambda: "first")
+        last = ob.submit(lambda: "last")
+        self.assertIsNone(first.result(timeout=1))
+        drain(ob)
+        self.assertEqual(alert.result(), "alert")
+        self.assertEqual(protected.result(), "wait")
+        self.assertEqual(last.result(), "last")
+
+    def test_merge_preserves_waiter_protection_when_promoted(self):
+        ob = queued()
+        ob.max_queued = 1
+        original = ob.submit(lambda: "old", priority=PRIO_LOW, key="same", wait=True)
+        merged = ob.submit(lambda: "new", key="same")
+        self.assertIs(original, merged)
+        ob.submit(lambda: None)
+        ob.submit(lambda: None)
+        self.assertFalse(original.done())
+        drain(ob)
+        self.assertEqual(original.result(), "new")
+
+    def test_drop_warnings_are_limited_and_tombstones_do_not_accumulate(self):
+        ob = queued()
+        ob.max_queued = 2
+        with patch.object(outbox.logger, "warning") as warning:
+            for _ in range(1000):
+                ob.submit(lambda: None)
+            self.assertEqual(warning.call_count, 1)
+            self.assertEqual(len(ob._heap), 2)
+            self.assertEqual(ob.stats["dropped"], 998)
+            ob.clock.t += 60
+            ob.submit(lambda: None)
+            self.assertEqual(warning.call_count, 2)
+
+
 class TestHelpersQueued(unittest.TestCase):
     def setUp(self):
         database.close_db()
@@ -129,6 +182,14 @@ class TestHelpersQueued(unittest.TestCase):
         ob.start()
         with patch.object(dc_helpers, "outbox", ob):
             self.assertEqual(dc_helpers._send(self.bot, 1, 10, "status", wait=True), 5000)
+
+    def test_wait_helpers_mark_jobs_as_protected(self):
+        with patch.object(dc_helpers, "_result"):
+            dc_helpers._send(self.bot, 1, 10, "status", wait=True)
+            dc_helpers._edit_or_send(self.bot, 1, 10, 77, "edit", wait=True)
+        jobs = [job for _, _, job in self.ob._heap]
+        self.assertEqual(len(jobs), 2)
+        self.assertTrue(all(job.protected for job in jobs))
 
     def test_reaction_merged(self):
         dc_helpers._react(self.bot, 1, 77, "⏳")

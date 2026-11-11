@@ -130,6 +130,10 @@ _load_env_file()
 
 # VirusTotal rate-limiting
 VIRUSTOTAL_RATE_LIMIT_SECONDS = 15.0
+VIRUSTOTAL_USER_COOLDOWN_SECONDS = float(os.environ.get("VIRUSTOTAL_USER_COOLDOWN_SECONDS", "20"))
+MAX_QUEUED_VIRUS = int(os.environ.get("MAX_QUEUED_VIRUS", "10"))
+MAX_QUEUED_CMPING = int(os.environ.get("MAX_QUEUED_CMPING", "10"))
+MAX_QUEUED_CMCALL = int(os.environ.get("MAX_QUEUED_CMCALL", "5"))
 
 # /ip lookups (ipinfo.io + RIPEstat): one global queue, one lookup per 15 s
 IP_LOOKUP_INTERVAL_SECONDS = 15.0
