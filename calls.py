@@ -99,7 +99,7 @@ class EchoCallManager:
 
     def active_count(self) -> int:
         with self._lock:
-            return sum(1 for s in self.sessions.values() if not s.finished)
+            return len(self.sessions)
 
     def _answer_safe(self, accid: int, event) -> None:
         try:
@@ -110,77 +110,80 @@ class EchoCallManager:
     def _answer(self, accid: int, event) -> None:
         msg_id, chat_id = int(event.msg_id), int(event.chat_id)
         rpc = self.bot.rpc
-        try:
-            contact_id = rpc.get_message(accid, msg_id).from_id
-        except Exception:
-            contact_id = 0
-
-        if self.active_count() >= config.CALL_ECHO_MAX_CONCURRENT:
-            config.logger.info(f"Echo call {msg_id}: declined, {self.active_count()} calls active")
+        with self._lock:
+            active = len(self.sessions)
+            if active >= config.CALL_ECHO_MAX_CONCURRENT or msg_id in self.sessions:
+                session = None
+            else:
+                session = EchoSession(accid, msg_id, chat_id, 0, None)
+                self.sessions[msg_id] = session
+        if session is None:
+            config.logger.info(f"Echo call {msg_id}: declined, {active} calls active")
             _end_call(rpc, accid, msg_id)
             dc_helpers._send(self.bot, accid, chat_id,
                              f"{REPORT_PREFIX} The echo line is busy right now, please call again in a minute.")
             return
 
-        ice = echo_ice_servers(rpc.ice_servers(accid))
-        # The greeting is the caller's own join tune (same as /join in a
-        # meeting, from their key fingerprint); the plain two-tone greeting
-        # stays as the fallback when the tune can't be built.
-        tune = _caller_tune_frames(self.bot, accid, contact_id)
-        peer = rtc.EchoPeer(ice, delay=config.CALL_ECHO_DELAY, greeting=tune is None)
-        session = EchoSession(accid, msg_id, chat_id, contact_id, peer)
-        session.offer_relay_ips = turn_names.relay_ips_from_sdp(event.place_call_info)
-        session.caller_domain = _contact_domain(rpc, accid, contact_id)
-        with self._lock:
-            self.sessions[msg_id] = session
-
-        config.logger.info(
-            f"Echo call {msg_id} from contact {contact_id} in chat {chat_id} "
-            f"(video={event.get('has_video')}, ice servers: {rtc.describe_ice_servers(ice)})"
-        )
         try:
-            answer = self.loop.run(peer.accept(event.place_call_info), timeout=30)
+            # A hangup must not close an empty peer while accept() is still
+            # creating its connection. finish() waits for this setup to end.
+            with session.lock:
+                if session.finished:
+                    return
+                try:
+                    session.contact_id = rpc.get_message(accid, msg_id).from_id
+                except Exception:
+                    session.contact_id = 0
+                ice = echo_ice_servers(rpc.ice_servers(accid))
+                # The greeting is the caller's own join tune (same as /join in a
+                # meeting, from their key fingerprint); the plain two-tone greeting
+                # stays as the fallback when the tune can't be built.
+                tune = _caller_tune_frames(self.bot, accid, session.contact_id)
+                peer = rtc.EchoPeer(ice, delay=config.CALL_ECHO_DELAY, greeting=tune is None)
+                session.peer = peer
+                session.offer_relay_ips = turn_names.relay_ips_from_sdp(event.place_call_info)
+                session.caller_domain = _contact_domain(rpc, accid, session.contact_id)
+                config.logger.info(
+                    f"Echo call {msg_id} from contact {session.contact_id} in chat {chat_id} "
+                    f"(video={event.get('has_video')}, ice servers: {rtc.describe_ice_servers(ice)})"
+                )
+                answer = self.loop.run(peer.accept(event.place_call_info), timeout=30)
+                rpc.accept_incoming_call(accid, msg_id, answer)
+                session.accepted_at = time.time()
+
+            # Watchdog: media must come up, and calls are capped in length.
+            connected = self.loop.run(peer.wait_connected(config.CALL_ECHO_CONNECT_TIMEOUT),
+                                      timeout=config.CALL_ECHO_CONNECT_TIMEOUT + 5)
             if session.finished:
-                # caller hung up while we were gathering: finish() already ran
-                # and closed the (then still empty) peer - close the new pc too
-                self.loop.run(peer.close(), timeout=10)
                 return
-            rpc.accept_incoming_call(accid, msg_id, answer)
+            if connected and tune:
+                peer.echo.play(tune)  # EchoTrack.play: takes precedence over the echo
+            if not connected:
+                session.error = f"no media connection ({peer.failed_state or 'ICE timeout'})"
+                self.finish(session, "ice-failed")
+                return
+            deadline = session.accepted_at + config.CALL_ECHO_MAX_SECONDS
+            while not session.finished and time.time() < deadline:
+                if peer.pc is None or peer.pc.connectionState in ("failed", "closed"):
+                    # A hangup closes the caller's media at once (DTLS close,
+                    # ~0.1 s), while the "call ended" message still has to travel
+                    # through the relays. Wait for it before calling this a drop.
+                    session.media_ended_at = time.time()
+                    grace_end = session.media_ended_at + config.CALL_ECHO_HANGUP_GRACE
+                    while not session.finished and time.time() < grace_end:
+                        time.sleep(0.2)
+                    if not session.finished:
+                        session.error = "media connection lost"
+                        self.finish(session, "media-lost")
+                    return
+                time.sleep(1)
+            if not session.finished:
+                self.finish(session, "max-duration")
         except Exception as e:
             session.error = f"could not answer: {e}"
-            _end_call(rpc, accid, msg_id)
-            self.finish(session, "error", end_call=False)
-            return
-        session.accepted_at = time.time()
-
-        # Watchdog: media must come up, and calls are capped in length.
-        connected = self.loop.run(peer.wait_connected(config.CALL_ECHO_CONNECT_TIMEOUT),
-                                  timeout=config.CALL_ECHO_CONNECT_TIMEOUT + 5)
-        if session.finished:
-            return
-        if connected and tune:
-            peer.echo.play(tune)  # EchoTrack.play: takes precedence over the echo
-        if not connected:
-            session.error = f"no media connection ({peer.failed_state or 'ICE timeout'})"
-            self.finish(session, "ice-failed")
-            return
-        deadline = session.accepted_at + config.CALL_ECHO_MAX_SECONDS
-        while not session.finished and time.time() < deadline:
-            if peer.pc is None or peer.pc.connectionState in ("failed", "closed"):
-                # A hangup closes the caller's media at once (DTLS close,
-                # ~0.1 s), while the "call ended" message still has to travel
-                # through the relays. Wait for it before calling this a drop.
-                session.media_ended_at = time.time()
-                grace_end = session.media_ended_at + config.CALL_ECHO_HANGUP_GRACE
-                while not session.finished and time.time() < grace_end:
-                    time.sleep(0.2)
-                if not session.finished:
-                    session.error = "media connection lost"
-                    self.finish(session, "media-lost")
-                return
-            time.sleep(1)
-        if not session.finished:
-            self.finish(session, "max-duration")
+            raise
+        finally:
+            self.finish(session, "error")
 
     # -- finishing --
 
@@ -191,68 +194,74 @@ class EchoCallManager:
             session.finished = True
             session.end_reason = reason
         try:
-            summary = self.loop.run(session.peer.summary(), timeout=10)
-        except Exception as e:
-            config.logger.warning(f"Echo call {session.msg_id}: stats failed: {e}")
-            summary = {}
-        # TURN servers the caller reached: relay candidates from the offer and
-        # those trickled in later over the iceTrickling channel
-        try:
-            relay_ips = self.loop.run(_remote_relay_ips(session.peer), timeout=5)
-        except Exception:
-            relay_ips = []
-        relay_ips += [ip for ip in session.offer_relay_ips if ip not in relay_ips]
-        try:
-            self.loop.run(session.peer.close(), timeout=10)
-        except Exception:
-            pass
-        if end_call and reason != "hangup":
-            _end_call(self.bot.rpc, session.accid, session.msg_id)
-        try:
-            caller_turn = turn_names.caller_turn(relay_ips, self.bot, session.accid)
-        except Exception as e:
-            config.logger.warning(f"Echo call {session.msg_id}: TURN names failed: {e}")
-            caller_turn = None
+            try:
+                try:
+                    summary = self.loop.run(session.peer.summary(), timeout=10) if session.peer else {}
+                except Exception as e:
+                    config.logger.warning(f"Echo call {session.msg_id}: stats failed: {e}")
+                    summary = {}
+                # TURN servers the caller reached: relay candidates from the offer and
+                # those trickled in later over the iceTrickling channel
+                try:
+                    relay_ips = self.loop.run(_remote_relay_ips(session.peer), timeout=5)
+                except Exception:
+                    relay_ips = []
+                relay_ips += [ip for ip in session.offer_relay_ips if ip not in relay_ips]
+            finally:
+                try:
+                    if session.peer is not None:
+                        self.loop.run(session.peer.close(), timeout=10)
+                except Exception:
+                    pass
 
-        # end of the call = when media stopped, not when the hangup message arrived
-        ended = session.media_ended_at or time.time()
-        duration = max(0.0, ended - session.accepted_at) if session.accepted_at else 0.0
-        rtp = summary.get("rtp", {})
-        try:
-            if config.CALL_ECHO_LOG_DAYS > 0:
-                database.prune_call_echo_log(time.time() - config.CALL_ECHO_LOG_DAYS * 86400)
-                database.add_call_echo_log(
-                    contact_id=session.contact_id,
-                    chat_id=session.chat_id,
-                    started_at=session.started_at,
-                    duration_s=round(duration, 1),
-                    connected=bool(summary.get("connected")),
-                    path=(summary.get("path") or {}).get("kind"),
-                    loss_pct=rtp.get("loss_pct"),
-                    rtt_ms=rtp.get("rtcp_rtt_ms"),
-                    jitter_ms=rtp.get("jitter_ms"),
-                    voice_s=summary.get("voice_s"),
-                    end_reason=reason,
-                    error=session.error,
-                    caller_turn=None if caller_turn is None else ",".join(caller_turn),
-                    caller_domain=session.caller_domain,
-                )
-        except Exception as e:
-            config.logger.warning(f"Echo call {session.msg_id}: could not log call: {e}")
+            if end_call and reason != "hangup":
+                _end_call(self.bot.rpc, session.accid, session.msg_id)
+            try:
+                caller_turn = turn_names.caller_turn(relay_ips, self.bot, session.accid)
+            except Exception as e:
+                config.logger.warning(f"Echo call {session.msg_id}: TURN names failed: {e}")
+                caller_turn = None
 
-        text = format_echo_report(summary, duration, reason, session.error, caller_turn)
-        dc_helpers._send(self.bot, session.accid, session.chat_id, text)
-        # The call message carries the caller's SDP offer, i.e. their ICE
-        # candidates with local and public IP addresses. Core would keep it
-        # for delete_device_after (36 h); the bot has no use for it once the
-        # call is over.
-        try:
-            self.bot.rpc.delete_messages(session.accid, [session.msg_id])
-        except Exception as e:
-            config.logger.warning(f"Echo call {session.msg_id}: could not delete the call message: {e}")
-        config.logger.info(f"Echo call {session.msg_id} finished ({reason}), {duration:.0f}s")
-        with self._lock:
-            self.sessions.pop(session.msg_id, None)
+            # end of the call = when media stopped, not when the hangup message arrived
+            ended = session.media_ended_at or time.time()
+            duration = max(0.0, ended - session.accepted_at) if session.accepted_at else 0.0
+            rtp = summary.get("rtp", {})
+            try:
+                if config.CALL_ECHO_LOG_DAYS > 0:
+                    database.prune_call_echo_log(time.time() - config.CALL_ECHO_LOG_DAYS * 86400)
+                    database.add_call_echo_log(
+                        contact_id=session.contact_id,
+                        chat_id=session.chat_id,
+                        started_at=session.started_at,
+                        duration_s=round(duration, 1),
+                        connected=bool(summary.get("connected")),
+                        path=(summary.get("path") or {}).get("kind"),
+                        loss_pct=rtp.get("loss_pct"),
+                        rtt_ms=rtp.get("rtcp_rtt_ms"),
+                        jitter_ms=rtp.get("jitter_ms"),
+                        voice_s=summary.get("voice_s"),
+                        end_reason=reason,
+                        error=session.error,
+                        caller_turn=None if caller_turn is None else ",".join(caller_turn),
+                        caller_domain=session.caller_domain,
+                    )
+            except Exception as e:
+                config.logger.warning(f"Echo call {session.msg_id}: could not log call: {e}")
+
+            text = format_echo_report(summary, duration, reason, session.error, caller_turn)
+            dc_helpers._send(self.bot, session.accid, session.chat_id, text)
+            # The call message carries the caller's SDP offer, i.e. their ICE
+            # candidates with local and public IP addresses. Core would keep it
+            # for delete_device_after (36 h); the bot has no use for it once the
+            # call is over.
+            try:
+                self.bot.rpc.delete_messages(session.accid, [session.msg_id])
+            except Exception as e:
+                config.logger.warning(f"Echo call {session.msg_id}: could not delete the call message: {e}")
+            config.logger.info(f"Echo call {session.msg_id} finished ({reason}), {duration:.0f}s")
+        finally:
+            with self._lock:
+                self.sessions.pop(session.msg_id, None)
 
 
 def _caller_tune_frames(bot, accid: int, contact_id: int) -> Optional[list]:

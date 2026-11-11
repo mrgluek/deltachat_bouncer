@@ -1,7 +1,10 @@
+import asyncio
 import os
 import sys
+import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 TEST_DB = "test_calls.db"
@@ -141,6 +144,268 @@ class TestReports(unittest.TestCase):
         text = calls.format_cmcall_report(result, "chatmail.uk", "chatmail.uk")
         self.assertIn("❌ Failed at signaling: timeout (60s)", text)
         self.assertNotIn("2️⃣", text)
+
+
+class FakeCallLoop:
+    def __init__(self, name):
+        self.timeout_at = None
+
+    def run(self, coro, timeout=None):
+        if coro.cr_code.co_name == self.timeout_at:
+            coro.close()
+            raise TimeoutError("watchdog expired")
+        return asyncio.run(coro)
+
+
+class FakeEchoPeer:
+    def __init__(self, *args, **kwargs):
+        self.pc = SimpleNamespace(connectionState="connected")
+        self.echo = MagicMock()
+        self.media_task = MagicMock()
+        self.closed = 0
+        self.failure = None
+        self.accept_started = threading.Event()
+        self.accept_release = None
+        self.wait_release = None
+        self.close_started = threading.Event()
+        self.close_release = None
+
+    async def accept(self, offer):
+        self.accept_started.set()
+        if self.accept_release is not None:
+            if not self.accept_release.wait(5):
+                raise TimeoutError("test accept was not released")
+        if self.failure == "accept":
+            raise RuntimeError("accept failed")
+        return "answer"
+
+    async def wait_connected(self, timeout):
+        if self.wait_release is not None:
+            if not self.wait_release.wait(5):
+                raise TimeoutError("test connection was not released")
+        if self.failure == "wait_connected":
+            raise RuntimeError("connect failed")
+        return True
+
+    async def summary(self):
+        if self.failure == "summary":
+            raise RuntimeError("stats failed")
+        return dict(CONNECTED_SUMMARY)
+
+    async def close(self):
+        self.close_started.set()
+        if self.close_release is not None:
+            if not self.close_release.wait(5):
+                raise TimeoutError("test close was not released")
+        self.closed += 1
+        self.media_task.cancel()
+        self.pc.connectionState = "closed"
+        if self.failure == "close":
+            raise RuntimeError("close failed")
+
+
+class TestEchoCallLifecycle(unittest.TestCase):
+    """Admission and cleanup run without cmcall, aiortc or av."""
+
+    def setUp(self):
+        _cleanup_db()
+        database.DB_PATH = TEST_DB
+        database.init_db()
+        self.bot = MagicMock()
+        self.bot.rpc.get_message.return_value = SimpleNamespace(from_id=10)
+        self.peers = []
+        self.failure = None
+        self.tune = None
+        for patcher in (
+            patch.object(calls, "rtc", SimpleNamespace(
+                CallLoop=FakeCallLoop, EchoPeer=self.make_peer,
+                describe_ice_servers=lambda ice: [], _ice_connections=lambda pc: [])),
+            patch.object(calls, "echo_ice_servers", return_value=[]),
+            patch.object(calls, "_caller_tune_frames", side_effect=lambda *a: self.tune),
+            patch.object(calls.turn_names, "caller_turn", return_value=None),
+            patch.object(calls.dc_helpers, "_send"),
+            patch.object(calls.config, "CALL_ECHO_MAX_CONCURRENT", 2),
+            patch.object(calls.config, "CALL_ECHO_MAX_SECONDS", 0),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.manager = calls.EchoCallManager(self.bot)
+
+    def tearDown(self):
+        _cleanup_db()
+
+    def make_peer(self, *args, **kwargs):
+        peer = FakeEchoPeer(*args, **kwargs)
+        peer.failure = self.failure
+        if self.failure == "play":
+            peer.echo.play.side_effect = RuntimeError("play failed")
+        self.peers.append(peer)
+        return peer
+
+    @staticmethod
+    def incoming(msg_id=500):
+        return Ev(msg_id=msg_id, chat_id=42, place_call_info="v=0", has_video=False)
+
+    def test_simultaneous_calls_reserve_before_network_work(self):
+        total = 8
+        entered = []
+        declined = []
+        counts = []
+        condition = threading.Condition()
+        release = threading.Event()
+
+        def ice_servers(accid):
+            with condition:
+                entered.append(accid)
+                counts.append(self.manager.active_count())
+                condition.notify_all()
+            if not release.wait(5):
+                raise TimeoutError("test setup was not released")
+            return "[]"
+
+        def end_call(accid, msg_id):
+            with condition:
+                declined.append(msg_id)
+                condition.notify_all()
+
+        self.bot.rpc.ice_servers.side_effect = ice_servers
+        self.bot.rpc.end_call.side_effect = end_call
+        threads = [threading.Thread(target=self.manager._answer_safe,
+                                    args=(1, self.incoming(500 + i))) for i in range(total)]
+        try:
+            for thread in threads:
+                thread.start()
+            with condition:
+                self.assertTrue(condition.wait_for(lambda: len(entered) + len(declined) == total, 5))
+            self.assertEqual(len(entered), 2)
+            self.assertEqual(len(declined), total - 2)
+            self.assertLessEqual(max(counts), 2)
+        finally:
+            release.set()
+            for thread in threads:
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+        self.assertEqual(len(self.peers), 2)
+        self.assertEqual(self.bot.rpc.accept_incoming_call.call_count, 2)
+        self.assertEqual(self.manager.sessions, {})
+        for peer in self.peers:
+            self.assertEqual(peer.closed, 1)
+            peer.media_task.cancel.assert_called_once()
+
+    def test_session_exceptions_release_slot_and_stop_media(self):
+        for failure in ("accept", "wait_connected", "summary", "close", "play", "signal"):
+            with self.subTest(failure=failure):
+                self.failure = failure
+                self.bot.rpc.accept_incoming_call.side_effect = (
+                    RuntimeError("signaling failed") if failure == "signal" else None)
+                self.tune = ["tune"] if failure == "play" else None
+                self.manager._answer_safe(1, self.incoming())
+                peer = self.peers[-1]
+                self.assertEqual(peer.closed, 1)
+                self.assertEqual(peer.pc.connectionState, "closed")
+                peer.media_task.cancel.assert_called_once()
+                self.assertEqual(self.manager.active_count(), 0)
+                self.assertEqual(self.manager.sessions, {})
+        self.failure = None
+        self.tune = None
+        self.bot.rpc.accept_incoming_call.side_effect = None
+        self.manager._answer_safe(1, self.incoming(501))
+        self.assertEqual(self.peers[-1].closed, 1)
+        self.assertEqual(self.manager.sessions, {})
+
+    def test_loop_watchdog_timeouts_release_slot(self):
+        for operation in ("accept", "wait_connected", "summary"):
+            with self.subTest(operation=operation):
+                self.manager.loop.timeout_at = operation
+                self.manager._answer_safe(1, self.incoming())
+                self.assertEqual(self.peers[-1].closed, 1)
+                self.peers[-1].media_task.cancel.assert_called_once()
+                self.assertEqual(self.manager.sessions, {})
+
+    def test_running_watchdog_failure_releases_slot(self):
+        with patch.object(calls.config, "CALL_ECHO_MAX_SECONDS", 60), \
+                patch.object(calls.time, "sleep", side_effect=RuntimeError("watchdog failed")):
+            self.manager._answer_safe(1, self.incoming())
+        peer = self.peers[-1]
+        self.assertEqual(peer.closed, 1)
+        peer.media_task.cancel.assert_called_once()
+        self.assertEqual(self.manager.sessions, {})
+        self.bot.rpc.end_call.assert_called_once_with(1, 500)
+
+    def test_setup_failure_releases_reservation(self):
+        self.bot.rpc.ice_servers.side_effect = RuntimeError("ICE settings failed")
+        self.manager._answer_safe(1, self.incoming())
+        self.assertEqual(self.manager.sessions, {})
+        self.bot.rpc.end_call.assert_called_once_with(1, 500)
+        self.assertEqual(self.peers, [])
+
+    def test_report_failure_releases_reservation_and_finish_is_idempotent(self):
+        peer = self.make_peer()
+        session = calls.EchoSession(1, 500, 42, 10, peer)
+        self.manager.sessions[500] = session
+        calls.dc_helpers._send.side_effect = RuntimeError("report failed")
+        with self.assertRaisesRegex(RuntimeError, "report failed"):
+            self.manager.finish(session, "error")
+        self.manager.finish(session, "hangup")
+        self.assertEqual(session.end_reason, "error")
+        self.assertEqual(self.manager.sessions, {})
+        self.assertEqual(peer.closed, 1)
+        self.bot.rpc.end_call.assert_called_once_with(1, 500)
+        calls.dc_helpers._send.assert_called_once()
+
+    def test_closing_session_keeps_capacity_reserved(self):
+        peer = self.make_peer()
+        peer.close_release = threading.Event()
+        session = calls.EchoSession(1, 500, 42, 10, peer)
+        self.manager.sessions[500] = session
+        with patch.object(calls.config, "CALL_ECHO_MAX_CONCURRENT", 1):
+            thread = threading.Thread(target=self.manager.finish, args=(session, "hangup"))
+            thread.start()
+            try:
+                self.assertTrue(peer.close_started.wait(5))
+                self.assertEqual(self.manager.active_count(), 1)
+                self.manager._answer_safe(1, self.incoming(501))
+                self.assertEqual(len(self.peers), 1)
+                self.bot.rpc.accept_incoming_call.assert_not_called()
+                self.manager.finish(session, "error")
+            finally:
+                peer.close_release.set()
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+        self.assertEqual(self.manager.sessions, {})
+        self.assertEqual(peer.closed, 1)
+
+    def test_hangup_during_accept_closes_the_created_peer_once(self):
+        peer = self.make_peer()
+        peer.accept_release = threading.Event()
+        peer.wait_release = threading.Event()
+
+        def finish_hangup(session):
+            try:
+                self.manager.finish(session, "hangup")
+            finally:
+                peer.wait_release.set()
+
+        with patch.object(calls.rtc, "EchoPeer", return_value=peer):
+            answer = threading.Thread(target=self.manager._answer_safe, args=(1, self.incoming()))
+            answer.start()
+            try:
+                self.assertTrue(peer.accept_started.wait(5))
+                session = self.manager.sessions[500]
+                hangup = threading.Thread(target=finish_hangup, args=(session,))
+                hangup.start()
+            finally:
+                peer.accept_release.set()
+                answer.join(5)
+                if "hangup" in locals():
+                    hangup.join(5)
+            self.assertFalse(answer.is_alive())
+            self.assertFalse(hangup.is_alive())
+        self.assertEqual(peer.closed, 1)
+        peer.media_task.cancel.assert_called_once()
+        self.assertEqual(session.end_reason, "hangup")
+        self.bot.rpc.end_call.assert_not_called()
+        self.assertEqual(self.manager.sessions, {})
 
 
 @unittest.skipIf(rtc is None, "cmcall/aiortc not installed")
