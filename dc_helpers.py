@@ -257,6 +257,9 @@ def _is_dc_admin(bot, accid, contact_id, contact=None):
         admin_email = database.get_config("admin_dc_email")
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"Admin check (Email) for {contact_id}: stored={admin_email}, contact={sender_email}")
+        if admin_email:
+            logger.warning("Legacy admin has no fingerprint; authorization uses email only. "
+                           "Use set_admin.py to configure the admin fingerprint.")
         if admin_email and sender_email and admin_email.lower().strip() == sender_email.lower().strip():
             return True
 
