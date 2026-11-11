@@ -136,6 +136,32 @@ class TestHelpersQueued(unittest.TestCase):
         drain(self.ob)
         self.bot.rpc.send_reaction.assert_called_once_with(1, 77, ["✅"])
 
+    def test_reaction_text_is_cut_to_the_core_limit(self):
+        self.assertEqual(dc_helpers.reaction_text("⏳", "queued..."), "⏳\u00a0queued...")
+        long = dc_helpers.reaction_text("📋", "a-very-long-topic-name-that-does-not-fit")
+        self.assertLess(len(long.encode("utf-8")), 30)
+        self.assertTrue(long.startswith("📋\u00a0a-very"))
+        self.assertNotIn(" ", long)  # no ASCII whitespace, the core rejects it
+        self.assertEqual(dc_helpers.reaction_text("⏳", ""), "⏳")
+
+    def test_react_or_send_reacts_without_a_message(self):
+        dc_helpers._react_or_send(self.bot, 1, 10, 77, "⏳", "queued...", "⏳ queued, text")
+        drain(self.ob)
+        self.bot.rpc.send_reaction.assert_called_once_with(1, 77, ["⏳\u00a0queued..."])
+        self.bot.rpc.send_msg.assert_not_called()
+
+    def test_react_or_send_falls_back_to_text(self):
+        self.bot.rpc.send_reaction.side_effect = RuntimeError("rejected")
+        dc_helpers._react_or_send(self.bot, 1, 10, 77, "⏳", "queued...", "⏳ queued, text", reply_to_id=77)
+        drain(self.ob)
+        self.assertEqual(self.bot.rpc.send_msg.call_args.args[2].text, "⏳ queued, text")
+
+    def test_queued_reaction_is_replaced_by_the_final_one(self):
+        dc_helpers._react_or_send(self.bot, 1, 10, 77, "⏳", "queued...", "text")
+        dc_helpers._react(self.bot, 1, 77, "☑️")   # same message: one reaction goes out
+        drain(self.ob)
+        self.bot.rpc.send_reaction.assert_called_once_with(1, 77, ["☑️"])
+
     def test_edit_falls_back_to_new_message(self):
         self.bot.rpc.send_edit_request.side_effect = RuntimeError("message deleted")
         stored = []

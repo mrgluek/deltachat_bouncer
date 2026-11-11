@@ -498,8 +498,11 @@ class TestVirusTotalInspection(unittest.TestCase):
                 virustotal.virus_command(self.mock_bot, self.accid, mock_event)
                 time.sleep(0.05)
 
+                # The queue notice is a reaction "⏳ queued..." on the user's message, not a reply
                 send_calls = [c[0][3] for c in mock_send.call_args_list]
-                self.assertTrue(any("Another VirusTotal check is in progress, your request is queued" in t for t in send_calls))
+                self.assertFalse(any("your request is queued" in t for t in send_calls))
+                reactions = [c[0] for c in self.mock_bot.rpc.send_reaction.call_args_list]
+                self.assertIn((self.accid, 207, ["⏳\u00a0queued..."]), reactions)
 
             # Release lock so worker thread can proceed and finish
             state._vt_global_lock.release()

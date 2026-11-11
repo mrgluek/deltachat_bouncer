@@ -326,6 +326,30 @@ def _react(bot, accid, msg_id, reaction, priority=PRIO_REPLY):
     outbox.submit(job, priority=priority, key=("reaction", msg_id), label=f"reaction {reaction} on {msg_id}")
 
 
+def reaction_text(icon: str, text: str) -> str:
+    """Reaction that reads "<icon> text". The core accepts any string of under 30 bytes without
+    ASCII whitespace as a reaction, so the space is a no-break space (U+00A0) and the text is cut."""
+    out = icon + "\u00a0"
+    for ch in text:
+        if len((out + ch).encode("utf-8")) >= 30:
+            break
+        out += ch
+    return out.rstrip("\u00a0")
+
+
+def _react_or_send(bot, accid, chat_id, msg_id, icon, text, fallback_text, reply_to_id=None, priority=PRIO_REPLY):
+    """Says "<icon> text" as a reaction on the user's message instead of a reply; when the
+    reaction cannot be sent, sends fallback_text as before. Keyed by message like _react, so a
+    later reaction (the final ☑️) replaces one still waiting."""
+    def job():
+        try:
+            bot.rpc.send_reaction(accid, msg_id, [reaction_text(icon, text)])
+        except Exception as e:
+            logger.warning(f"Reaction \"{icon} {text}\" on {msg_id} failed, replying instead: {e}")
+            _send(bot, accid, chat_id, fallback_text, reply_to_id=reply_to_id)  # inline: we are in the outbox thread
+    outbox.submit(job, priority=priority, key=("reaction", msg_id), label=f"reaction {icon} on {msg_id}")
+
+
 def _queue_delayed_command(bot, accid, msg, command_key: str, remaining_sec: float, handler_fn, *args, **kwargs) -> bool:
     """React with ⏳ and queue the command to execute once remaining_sec expires.
     When execution finishes, changes reaction to ☑️ on all queued messages.

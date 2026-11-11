@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.52.0] - 2026-11-11
+
+### Changed
+- **Queue Notices as a Reaction**: when `/cmping`, `/cmcall` or `/virus` has to wait for another run of the same test, the bot puts a reaction "⏳ queued..." on your message instead of sending "⏳ Another … test is running, your request is queued..." as a message. The core accepts any reaction string under 30 bytes without ASCII whitespace, so the text uses a no-break space. A result still replaces it with ☑️ / ❌ as before. If the reaction cannot be sent, the old text message is sent.
+
 ## [2.51.2] - 2026-11-11
 
 ### Changed

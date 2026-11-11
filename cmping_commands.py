@@ -25,7 +25,8 @@ import state
 def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers):
     # Acquire global lock — only one cmping test at a time
     if not state._cmping_global_lock.acquire(blocking=False):
-        dc_helpers._send(bot, accid, chat_id, "⏳ Another CMPing test is running, your request is queued...")
+        dc_helpers._react_or_send(bot, accid, chat_id, msg_id, "⏳", "queued...",
+                                  "⏳ Another CMPing test is running, your request is queued...")
         state._cmping_global_lock.acquire()  # block until available
 
     try:

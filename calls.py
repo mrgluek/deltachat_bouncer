@@ -564,7 +564,8 @@ def run_cmcall(servers: list[str], duration: int = 6, timeout: int = 240) -> dic
 
 def bg_cmcall_worker(bot, accid, chat_id, msg_id, s1, s2):
     if not state._cmcall_global_lock.acquire(blocking=False):
-        dc_helpers._send(bot, accid, chat_id, "⏳ Another CMCall test is running, your request is queued...")
+        dc_helpers._react_or_send(bot, accid, chat_id, msg_id, "⏳", "queued...",
+                                  "⏳ Another CMCall test is running, your request is queued...")
         state._cmcall_global_lock.acquire()
     try:
         servers = [s1] if s1 == s2 else [s1, s2]

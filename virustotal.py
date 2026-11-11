@@ -461,7 +461,8 @@ def _scan_file_virustotal(bot, accid, chat_id, msg_id, file_info: dict, vt_key: 
 def bg_virus_worker(bot, accid, chat_id, msg_id, target_type, target_data, vt_key, msg=None, payload=None):
     """Background worker for VirusTotal checks with global lock and FIFO queueing."""
     if not state._vt_global_lock.acquire(blocking=False):
-        dc_helpers._send(bot, accid, chat_id, "⏳ Another VirusTotal check is in progress, your request is queued...", reply_to_id=msg_id)
+        dc_helpers._react_or_send(bot, accid, chat_id, msg_id, "⏳", "queued...",
+                                  "⏳ Another VirusTotal check is in progress, your request is queued...", reply_to_id=msg_id)
         state._vt_global_lock.acquire()
 
     try:
