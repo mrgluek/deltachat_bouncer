@@ -124,9 +124,12 @@ class TestInitAdmin(unittest.TestCase):
         database.set_config("admin_dc_email", "alice@example.org")
         self.assertIn("already set", self.run_command())
         self.assertFalse(database.get_admin_fingerprint())
+        dc_helpers._legacy_admin_warned = False
         with self.assertLogs(dc_helpers.logger, level="WARNING") as logs:
             self.assertTrue(dc_helpers._is_dc_admin(self.bot, 1, 10))
+            self.assertTrue(dc_helpers._is_dc_admin(self.bot, 1, 10))
         self.assertIn("fingerprint", " ".join(logs.output))
+        self.assertEqual(len(logs.output), 1)   # warned once, not on every admin check
         self.assertEqual(database.get_config("admin_dc_email"), "alice@example.org")
 
     def test_key_bound_admin_authorization_unchanged(self):

@@ -222,6 +222,9 @@ def admin_key_contact_id(bot, accid):
         return None
 
 
+_legacy_admin_warned = False
+
+
 def _is_dc_admin(bot, accid, contact_id, contact=None):
     """Check if the given contact is the bot administrator (by email or fingerprint)."""
     try:
@@ -257,7 +260,9 @@ def _is_dc_admin(bot, accid, contact_id, contact=None):
         admin_email = database.get_config("admin_dc_email")
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"Admin check (Email) for {contact_id}: stored={admin_email}, contact={sender_email}")
-        if admin_email:
+        global _legacy_admin_warned
+        if admin_email and not _legacy_admin_warned:
+            _legacy_admin_warned = True  # once per run: this check is made for every contact in a list
             logger.warning("Legacy admin has no fingerprint; authorization uses email only. "
                            "Use set_admin.py to configure the admin fingerprint.")
         if admin_email and sender_email and admin_email.lower().strip() == sender_email.lower().strip():
