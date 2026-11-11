@@ -303,6 +303,17 @@ def init_db():
             )
         ''')
 
+        # Banned people (/ban): by key fingerprint, as an address can change
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS banned_fingerprints (
+                fingerprint TEXT PRIMARY KEY,
+                contact_id INTEGER,
+                name TEXT,
+                addr TEXT,
+                banned_at REAL
+            )
+        ''')
+
         # Transport statistics
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS transport_stats (
@@ -882,6 +893,56 @@ def get_all_autokick_ignored_fingerprints(limit: int = 1000) -> list[tuple[str, 
         cursor.execute("SELECT fingerprint, note, added_at FROM autokick_ignored_fingerprints ORDER BY added_at ASC LIMIT ?", (limit,))
         rows = cursor.fetchall()
         return [(r[0], r[1] or "", float(r[2])) for r in rows]
+
+def _clean_fp(fingerprint: str) -> str:
+    return (fingerprint or "").strip().replace(" ", "").replace(":", "").upper()
+
+
+def add_banned_fingerprint(fingerprint: str, contact_id: int | None = None, name: str = "", addr: str = "") -> bool:
+    """Ban a key fingerprint (keeps the first ban's date). False if it was banned already or empty."""
+    fp = _clean_fp(fingerprint)
+    if not fp:
+        return False
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM banned_fingerprints WHERE fingerprint = ?", (fp,))
+        if cursor.fetchone():
+            cursor.execute("UPDATE banned_fingerprints SET contact_id = COALESCE(?, contact_id) WHERE fingerprint = ?",
+                           (contact_id, fp))
+            return False
+        cursor.execute(
+            "INSERT INTO banned_fingerprints (fingerprint, contact_id, name, addr, banned_at) VALUES (?, ?, ?, ?, ?)",
+            (fp, contact_id, name.strip(), addr.strip(), time.time()))
+    return True
+
+
+def remove_banned_fingerprint(fingerprint: str) -> bool:
+    fp = _clean_fp(fingerprint)
+    with _writer_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM banned_fingerprints WHERE fingerprint = ?", (fp,))
+        return cursor.rowcount > 0
+
+
+def is_fingerprint_banned(fingerprint: str) -> bool:
+    fp = _clean_fp(fingerprint)
+    if not fp:
+        return False
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM banned_fingerprints WHERE fingerprint = ?", (fp,))
+        return cursor.fetchone() is not None
+
+
+def get_all_banned(limit: int = 1000) -> list[dict]:
+    """[{fingerprint, contact_id, name, addr, banned_at}, ...], oldest first."""
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT fingerprint, contact_id, name, addr, banned_at FROM banned_fingerprints "
+                       "ORDER BY banned_at ASC LIMIT ?", (limit,))
+        return [{"fingerprint": r[0], "contact_id": r[1], "name": r[2] or "", "addr": r[3] or "",
+                 "banned_at": float(r[4] or 0)} for r in cursor.fetchall()]
+
 
 def get_admin_fingerprint():
     """Get the saved admin DC fingerprint."""

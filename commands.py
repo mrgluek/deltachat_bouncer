@@ -678,6 +678,7 @@ def help_command(bot, accid, event):
         help_text += "/rmtransport <addr> — Remove a mail relay\n"
         help_text += "/autokick [on/off/days/ignore/unignore] — Auto-kick inactive members with warnings & fingerprint ignore\n"
         help_text += "/kick <user_id> — Remove a member from the current group\n"
+        help_text += "/ban <user|ID|fingerprint> / /unban <...> — Remove someone from all groups the bot is in and keep them out (reply works too; /ban alone lists)\n"
         help_text += "/chatadd [desc] — Add current chat to catalog\n"
         help_text += "/chatremove — Remove current chat from catalog\n"
         help_text += "/chatdesc<ID> <text> — Update chat description\n"

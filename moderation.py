@@ -435,6 +435,12 @@ def _background_monitor_loop(bot, accid):
                 except Exception as e:
                     config.logger.error(f"Error checking chat {chat_id} in background monitor: {e}")
             
+            # Banned people that got back into a group (known by contact id; /ban did the deep scan)
+            try:
+                ban_sweep(bot, accid)
+            except Exception as ban_err:
+                config.logger.warning(f"Ban sweep failed: {ban_err}")
+
             # Refresh member counts for all catalog chats and channels
             _refresh_catalog_member_counts(bot, accid)
 
@@ -834,6 +840,236 @@ def kick_command(bot, accid, event):
         reply_parts.append(f"⚠️ **Could not kick:**\n" + "\n".join(kicked_failed))
 
     dc_helpers._send(bot, accid, msg.chat_id, "\n\n".join(reply_parts))
+
+
+# ── /ban, /unban: people kept out of every group the bot is in ──
+
+BAN_CHAT_TYPES = {"Group"}
+_FP_TOKEN_RE = re.compile(r"^(?:[0-9A-F]{40}|[0-9A-F]{64})$")
+
+
+def _fingerprints(bot, accid, contact_id) -> list[str]:
+    """The contact's key fingerprints (normally one), upper case; [] without a key."""
+    try:
+        fp = dc_helpers._get_contact_fingerprint(bot, accid, contact_id)
+    except Exception as e:
+        config.logger.debug(f"No fingerprint for contact {contact_id}: {e}")
+        return []
+    return [x.strip() for x in (fp or "").upper().split(",") if x.strip()]
+
+
+def _group_chat_ids(bot, accid) -> list[int]:
+    try:
+        chats = bot.rpc.get_chatlist_entries(accid, None, None, None)
+    except Exception as e:
+        config.logger.error(f"get_chatlist_entries failed in ban sweep: {e}")
+        return []
+    ids = []
+    for chat_id in chats:
+        if not isinstance(chat_id, int):
+            continue
+        try:
+            info = bot.rpc.get_basic_chat_info(accid, chat_id)
+            ctype = info.get("chat_type", "Single") if isinstance(info, dict) else getattr(info, "chat_type", "Single")
+        except Exception:
+            continue
+        if str(ctype) in BAN_CHAT_TYPES:
+            ids.append(chat_id)
+    return ids
+
+
+def _remove_from(bot, accid, chat_id, contact_id) -> bool:
+    try:
+        bot.rpc.remove_contact_from_chat(accid, chat_id, contact_id)
+        return True
+    except Exception as e:
+        config.logger.error(f"Could not remove banned contact {contact_id} from chat {chat_id}: {e}")
+        return False
+
+
+def ban_sweep(bot, accid, deep_fps: set | None = None) -> int:
+    """Remove banned people from every group; returns how many removals were made.
+
+    Without ``deep_fps`` only contacts remembered by id are checked (cheap, for the hourly
+    run). With a set of fingerprints, every member of every group is looked up and compared,
+    and the id of each match is remembered. A group where the bot cannot remove is skipped.
+    """
+    banned = database.get_all_banned()
+    if not banned:
+        return 0
+    known_ids = {b["contact_id"] for b in banned if b["contact_id"]}
+    cache: dict[int, list[str]] = {}
+    removed = 0
+    for chat_id in _group_chat_ids(bot, accid):
+        try:
+            members = bot.rpc.get_chat_contacts(accid, chat_id)
+        except Exception:
+            continue
+        for cid in members:
+            if cid <= 9 or cid == config.DC_CONTACT_ID_SELF:
+                continue
+            hit = cid in known_ids
+            if not hit and deep_fps:
+                if cid not in cache:
+                    cache[cid] = _fingerprints(bot, accid, cid)
+                for fp in cache[cid]:
+                    if fp in deep_fps:
+                        hit = True
+                        database.add_banned_fingerprint(fp, contact_id=cid)
+                        known_ids.add(cid)
+            if hit and not dc_helpers._is_dc_admin(bot, accid, cid) and _remove_from(bot, accid, chat_id, cid):
+                removed += 1
+    return removed
+
+
+def enforce_ban_on_join(bot, accid, chat_id, contact_id) -> bool:
+    """Called when a member was added: remove them again if their key is banned."""
+    if not contact_id or contact_id <= 9 or contact_id == config.DC_CONTACT_ID_SELF:
+        return False
+    if not database.get_all_banned(1):
+        return False
+    for fp in _fingerprints(bot, accid, contact_id):
+        if database.is_fingerprint_banned(fp):
+            if dc_helpers._is_dc_admin(bot, accid, contact_id):
+                return False
+            database.add_banned_fingerprint(fp, contact_id=contact_id)  # remembers the id
+            config.logger.info(f"Banned contact {contact_id} joined chat {chat_id}: removing")
+            return _remove_from(bot, accid, chat_id, contact_id)
+    return False
+
+
+def _describe(bot, accid, contact_id) -> tuple[str, str]:
+    try:
+        c = bot.rpc.get_contact(accid, contact_id)
+        return (c.name or c.display_name or "Unknown"), (c.address or "")
+    except Exception:
+        return "Unknown", ""
+
+
+def _ban_targets(bot, accid, msg, payload):
+    """-> ([(fingerprint, contact_id | None, name, addr)], [problem lines]) for the /ban arguments."""
+    found, problems = [], []
+
+    def add_contact(cid):
+        if cid <= 9 or cid == config.DC_CONTACT_ID_SELF:
+            problems.append(f"• ID {cid}: not a person the bot can ban.")
+            return
+        name, addr = _describe(bot, accid, cid)
+        if dc_helpers._is_dc_admin(bot, accid, cid):
+            problems.append(f"• {name} ({addr}): cannot ban the bot administrator.")
+            return
+        fps = _fingerprints(bot, accid, cid)
+        if not fps:
+            problems.append(f"• {name} ({addr}): no key fingerprint known (no end-to-end encrypted contact yet).")
+            return
+        for fp in fps:
+            found.append((fp, cid, name, addr))
+
+    quote = getattr(msg, "quote", None)
+    if quote and isinstance(quote, dict) and quote.get("message_id"):
+        try:
+            add_contact(bot.rpc.get_message(accid, quote["message_id"]).from_id)
+        except Exception as e:
+            config.logger.error(f"Failed to read the quoted message for /ban: {e}")
+
+    try:
+        members = [c for c in bot.rpc.get_chat_contacts(accid, msg.chat_id) if c > 9]
+    except Exception:
+        members = []
+    for tok in payload.split():
+        clean = tok.replace(":", "").upper()
+        cid_match = re.match(r"^(?:/?contact|c)?(\d+)$", tok, re.IGNORECASE)
+        if _FP_TOKEN_RE.match(clean):
+            found.append((clean, None, "", ""))
+        elif cid_match:
+            add_contact(int(cid_match.group(1)))
+        else:
+            q = tok.lstrip("@").lower()
+            hits = []
+            for cid in members:
+                name, addr = _describe(bot, accid, cid)
+                if q in name.lower() or q in addr.lower():
+                    hits.append(cid)
+            if not hits:
+                try:
+                    hits = [c for c in bot.rpc.get_contact_ids(accid, 0, tok.lstrip("@")) if c > 9]
+                except Exception:
+                    hits = []
+            if len(hits) == 1:
+                add_contact(hits[0])
+            elif hits:
+                problems.append(f"• `{tok[:40]}` matches {len(hits)} contacts; use a contact ID or the address.")
+            else:
+                problems.append(f"• `{tok[:40]}`: nobody found.")
+    return found, problems
+
+
+def _ban_list_text() -> str:
+    banned = database.get_all_banned()
+    if not banned:
+        return "🚫 The ban list is empty."
+    lines = []
+    for b in banned:
+        who = f"**{b['name']}** ({b['addr']}) " if (b["name"] or b["addr"]) else ""
+        lines.append(f"• {who}`{b['fingerprint'][:8]}…{b['fingerprint'][-8:]}`")
+    return f"🚫 **Banned ({len(banned)}):**\n" + "\n".join(lines) + "\n\n`/unban <address|ID|fingerprint start>` lifts a ban."
+
+
+@config.dc_cli.on(events.NewMessage(command="/ban"))
+def ban_command(bot, accid, event):
+    msg = event.msg
+    if not dc_helpers._is_dc_admin(bot, accid, msg.from_id):
+        dc_helpers._send(bot, accid, msg.chat_id, "⚠️ Only the bot administrator can use /ban.")
+        return
+    payload = (event.payload or "").strip()
+    if payload.lower() in ("", "list") and not getattr(msg, "quote", None):
+        dc_helpers._send(bot, accid, msg.chat_id,
+                         _ban_list_text() + "\n\nUsage: `/ban <user|address|contact ID|fingerprint>` or reply with `/ban`. "
+                         "The person is removed from every group the bot is in and cannot join "
+                         "through the bot's invites again.")
+        return
+
+    found, problems = _ban_targets(bot, accid, msg, payload)
+    new, fps = [], set()
+    for fp, cid, name, addr in found:
+        fps.add(fp)
+        if database.add_banned_fingerprint(fp, contact_id=cid, name=name, addr=addr):
+            new.append((fp, name, addr))
+    removed = ban_sweep(bot, accid, deep_fps=fps) if fps else 0
+
+    parts = []
+    if fps:
+        who = ", ".join(f"**{n or 'fingerprint'}**" + (f" ({a})" if a else "") if (n or a) else f"`{fp[:8]}…`"
+                        for fp, n, a in new) or "already on the list"
+        parts.append(f"🚫 Banned: {who}. Removed from {removed} group(s); they cannot join the groups the bot invites to.")
+    if problems:
+        parts.append("⚠️ **Not banned:**\n" + "\n".join(problems))
+    dc_helpers._send(bot, accid, msg.chat_id, "\n\n".join(parts) or "ℹ️ Nobody to ban.")
+
+
+@config.dc_cli.on(events.NewMessage(command="/unban"))
+def unban_command(bot, accid, event):
+    msg = event.msg
+    if not dc_helpers._is_dc_admin(bot, accid, msg.from_id):
+        dc_helpers._send(bot, accid, msg.chat_id, "⚠️ Only the bot administrator can use /unban.")
+        return
+    q = (event.payload or "").strip().lower().lstrip("@")
+    if not q:
+        dc_helpers._send(bot, accid, msg.chat_id, "Usage: `/unban <address|contact ID|fingerprint start>`; `/ban` shows the list.")
+        return
+    qfp = q.replace(":", "").upper()
+    matches = [b for b in database.get_all_banned()
+               if (len(qfp) >= 8 and b["fingerprint"].startswith(qfp))
+               or q == b["addr"].lower() or q == str(b["contact_id"]) or (len(q) >= 3 and q in b["name"].lower())]
+    if not matches:
+        dc_helpers._send(bot, accid, msg.chat_id, f"🔍 No ban matches `{q[:60]}`.")
+        return
+    if len(matches) > 1:
+        dc_helpers._send(bot, accid, msg.chat_id, f"⚠️ {len(matches)} bans match `{q[:60]}`; be more specific (address or longer fingerprint).")
+        return
+    b = matches[0]
+    database.remove_banned_fingerprint(b["fingerprint"])
+    dc_helpers._send(bot, accid, msg.chat_id, f"✅ Unbanned {b['name'] or b['addr'] or b['fingerprint'][:8] + '…'}. They are not added back to any group.")
 
 
 @config.dc_cli.on(events.NewMessage(command="/top"))

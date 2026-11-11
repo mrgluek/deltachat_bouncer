@@ -25,6 +25,7 @@ import config
 import database
 import dc_helpers
 import mentions
+import moderation
 import web.routes
 
 
@@ -103,6 +104,14 @@ def handle_dc_info_message(bot, accid, event):
                     is_self_removed = True
             except Exception:
                 is_self_removed = True
+
+    # A banned person was added (by the bot's invite link or by a member): remove them again
+    if is_join_event and info_contact_id:
+        try:
+            if moderation.enforce_ban_on_join(bot, accid, dc_chat_id, info_contact_id):
+                return
+        except Exception as e:
+            config.logger.error(f"Ban check failed for contact {info_contact_id} in chat {dc_chat_id}: {e}")
 
     if is_member_event:
         catalog_channel = database.get_catalog_channel_by_chat_id(dc_chat_id)
