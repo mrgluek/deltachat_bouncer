@@ -112,11 +112,17 @@ class EchoCallManager:
         rpc = self.bot.rpc
         with self._lock:
             active = len(self.sessions)
-            if active >= config.CALL_ECHO_MAX_CONCURRENT or msg_id in self.sessions:
+            duplicate = msg_id in self.sessions
+            if duplicate or active >= config.CALL_ECHO_MAX_CONCURRENT:
                 session = None
             else:
                 session = EchoSession(accid, msg_id, chat_id, 0, None)
                 self.sessions[msg_id] = session
+        if session is None and duplicate:
+            # The same call event twice: the first one is being answered. Declining here
+            # would hang up that call.
+            config.logger.info(f"Echo call {msg_id}: duplicate event ignored")
+            return
         if session is None:
             config.logger.info(f"Echo call {msg_id}: declined, {active} calls active")
             _end_call(rpc, accid, msg_id)

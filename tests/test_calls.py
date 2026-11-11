@@ -353,6 +353,15 @@ class TestEchoCallLifecycle(unittest.TestCase):
         self.bot.rpc.end_call.assert_called_once_with(1, 500)
         calls.dc_helpers._send.assert_called_once()
 
+    def test_duplicate_event_does_not_hang_up_the_running_call(self):
+        session = calls.EchoSession(1, 500, 42, 10, self.make_peer())
+        self.manager.sessions[500] = session
+        self.manager._answer_safe(1, self.incoming(500))   # the same call event again
+        self.bot.rpc.end_call.assert_not_called()
+        calls.dc_helpers._send.assert_not_called()
+        self.assertIs(self.manager.sessions[500], session)
+        self.assertFalse(session.finished)
+
     def test_closing_session_keeps_capacity_reserved(self):
         peer = self.make_peer()
         peer.close_release = threading.Event()
