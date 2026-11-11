@@ -73,8 +73,11 @@ def parse_key_fingerprints(info) -> list[str]:
     if not isinstance(info, str):
         return []
     fps = []
-    for block in re.split(r"\n\s*\n", info.strip()):
-        lines = [line.strip() for line in block.strip().splitlines()]
+    # Split on "\n" only: the core removes \n and \r from names, but not U+2028, U+0085 or \x1c-\x1e,
+    # which str.splitlines() / "\s" treat as line breaks. A contact with such a character in the
+    # name would break its own block and have no readable fingerprint (no ban, no admin match).
+    for block in re.split(r"\n[ \t]*\n", info.strip()):
+        lines = [line.strip() for line in block.strip().split("\n")]
         if len(lines) < 2 or not lines[0].endswith(":"):
             continue
         # lines[0] is the header with the contact-chosen name; never read it as key material

@@ -126,5 +126,20 @@ class TestContactFingerprint(unittest.TestCase):
         rpc.get_chat_securejoin_qr_code.assert_not_called()
 
 
+    def test_unicode_line_breaks_in_a_name_do_not_hide_the_key(self):
+        # The core strips \n and \r from names but not these; splitlines() would cut the block
+        for ch in ("\u2028", "\u2029", "\x85", "\x1c", "\x0b", "\x0c"):
+            with self.subTest(char=hex(ord(ch))):
+                rpc = make_rpc(encinfo([("Me", SELF_FP), (f"Pe{ch}er", PEER_FP)]))
+                self.assertEqual(dc_fingerprint.get_contact_fingerprint(rpc, 1, 10), PEER_FP)
+
+    def test_name_cannot_forge_a_key_block(self):
+        admin = "C" * 40
+        for name in (f"x:\u2028{admin}", f"x:\x85{admin}\x85"):
+            with self.subTest(name=repr(name)):
+                rpc = make_rpc(encinfo([("Me", SELF_FP), (name, PEER_FP)]))
+                self.assertEqual(dc_fingerprint.get_contact_fingerprint(rpc, 1, 10), PEER_FP)
+
+
 if __name__ == "__main__":
     unittest.main()
