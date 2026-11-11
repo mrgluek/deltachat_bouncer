@@ -950,6 +950,21 @@ def count_banned() -> int:
         return conn.execute("SELECT COUNT(*) FROM banned_fingerprints").fetchone()[0]
 
 
+def claim_admin(email: str, fingerprint: str) -> bool:
+    """Atomically bind both admin fields only while neither is configured."""
+    if not email or not fingerprint:
+        raise ValueError("Admin email and fingerprint are required")
+    with _writer_transaction() as conn:
+        # Acquire SQLite's write lock before checking, including across processes.
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM config WHERE key IN ('admin_dc_email', 'admin_dc_fingerprint') "
+                        "AND COALESCE(value, '') != '' LIMIT 1").fetchone():
+            return False
+        conn.executemany("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                         (("admin_dc_email", email), ("admin_dc_fingerprint", fingerprint)))
+        return True
+
+
 def get_admin_fingerprint():
     """Get the saved admin DC fingerprint."""
     return get_config("admin_dc_fingerprint")

@@ -30,19 +30,31 @@ def initadmin_command(bot, accid, event):
         dc_helpers._send(bot, accid, msg.chat_id, "❌ Admin is already set. Use `set_admin.py` on the server to change.")
         return
 
-    contact = bot.rpc.get_contact(accid, msg.from_id)
-    email = contact.address
-    database.set_config("admin_dc_email", email)
+    private_chat_message = "❌ The bot needs an end-to-end encrypted private chat first. Send /initadmin there."
+    try:
+        chat = bot.rpc.get_basic_chat_info(accid, msg.chat_id)
+        chat_type = chat.get("chat_type") if isinstance(chat, dict) else getattr(chat, "chat_type", None)
+        if str(chat_type) != "Single":
+            dc_helpers._send(bot, accid, msg.chat_id, private_chat_message)
+            return
+        contact = bot.rpc.get_contact(accid, msg.from_id)
+        email = contact.address
+        fp = dc_fingerprint.get_contact_fingerprint(bot.rpc, accid, msg.from_id)
+    except Exception as e:
+        config.logger.warning(f"Could not read admin registration identity: {e}")
+        dc_helpers._send(bot, accid, msg.chat_id, private_chat_message)
+        return
 
-    fp = dc_helpers._get_contact_fingerprint(bot, accid, msg.from_id, contact=contact)
-    if fp:
-        first_fp = fp.split(',')[0]
-        database.set_admin_fingerprint(first_fp)
-        dc_helpers._send(bot, accid, msg.chat_id,
-              f"✅ You are now the admin!\n\nEmail: `{email}`\nFingerprint: `{first_fp[-8:]}`")
-    else:
-        dc_helpers._send(bot, accid, msg.chat_id,
-              f"✅ You are now the admin!\n\nEmail: `{email}`\n⚠️ Fingerprint not available yet.")
+    if not email or not fp:
+        dc_helpers._send(bot, accid, msg.chat_id, private_chat_message)
+        return
+
+    if not database.claim_admin(email, fp):
+        dc_helpers._send(bot, accid, msg.chat_id, "❌ Admin is already set. Use `set_admin.py` on the server to change.")
+        return
+
+    dc_helpers._send(bot, accid, msg.chat_id,
+          f"✅ You are now the admin!\n\nEmail: `{email}`\nFingerprint: `{fp[-8:]}`")
 
 @config.dc_cli.on(events.NewMessage(command="/bounce"))
 def bounce_command(bot, accid, event, skip_cooldown: bool = False):
