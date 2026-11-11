@@ -17,6 +17,7 @@ import cmping
 import config
 import database
 import dc_helpers
+import iplookup
 import relaygeo
 import state
 
@@ -385,6 +386,16 @@ def cmpingdel_command(bot, accid, event):
 def cmpinglist_command(bot, accid, event):
     msg = event.msg
 
+    # /cmpinglist 🇷🇺 or /cmpinglist ru: only the servers in that country
+    wanted = None
+    arg = (event.payload or "").strip()
+    if arg:
+        wanted = relaygeo.parse_country(arg)
+        if not wanted:
+            dc_helpers._send(bot, accid, msg.chat_id,
+                             "❌ Give a country flag or a two-letter code: `/cmpinglist 🇷🇺` or `/cmpinglist ru`.")
+            return
+
     bot_domains = dc_helpers._get_bot_domains(bot, accid)
     monitor_domains = database.get_all_cmping_monitors()
 
@@ -393,7 +404,7 @@ def cmpinglist_command(bot, accid, event):
         if d not in all_servers:
             all_servers.append(d)
 
-    lines = ["📡 **CMPing Monitor Servers:**\n"]
+    lines = ["📡 **CMPing Monitor Servers" + (f" {iplookup._flag(wanted)}" if wanted else "") + ":**\n"]
 
     def format_server_entry(idx, domain):
         return _format_ping_entry(idx, domain) + f" · {cmcall_monitor.server_badge(domain)}"
@@ -420,32 +431,51 @@ def cmpinglist_command(bot, accid, event):
             return f"  {idx}. {label}: ⚪️ no data"
 
 
-    if bot_domains:
-        lines.append("**Transport servers (auto):**")
-        for i, d in enumerate(bot_domains, 1):
-            lines.append(format_server_entry(i, d))
+    if wanted:
+        # Numbers stay those of the full list. A server whose country is not known yet
+        # (first lookup still running) cannot match, and is counted separately.
+        unknown = [d for d in all_servers if not relaygeo.country(d)]
+        shown = 0
+        for title, domains, start in (("Transport servers (auto)", bot_domains, 1),
+                                      ("Monitored servers (manual)", monitor_domains, len(bot_domains) + 1)):
+            rows = [format_server_entry(i, d) for i, d in enumerate(domains, start)
+                    if relaygeo.country(d) == wanted]
+            if rows:
+                lines.append(f"**{title}:**")
+                lines += rows
+                lines.append("")
+                shown += len(rows)
+        if not shown:
+            lines.append(f"_No servers in {wanted} {iplookup._flag(wanted)}._")
+        lines.append(f"Showing {shown} of {len(all_servers)} servers")
+        if unknown:
+            lines.append(f"ℹ️ Country not known yet for {len(unknown)} (looked up in the background, try again soon)")
     else:
-        lines.append("_No transport servers detected._")
+        if bot_domains:
+            lines.append("**Transport servers (auto):**")
+            for i, d in enumerate(bot_domains, 1):
+                lines.append(format_server_entry(i, d))
+        else:
+            lines.append("_No transport servers detected._")
 
-    if monitor_domains:
-        lines.append("\n**Monitored servers (manual):**")
-        offset = len(bot_domains)
-        for i, d in enumerate(monitor_domains, offset + 1):
-            lines.append(format_server_entry(i, d))
-    else:
-        lines.append("\n_No manually added servers._")
+        if monitor_domains:
+            lines.append("\n**Monitored servers (manual):**")
+            offset = len(bot_domains)
+            for i, d in enumerate(monitor_domains, offset + 1):
+                lines.append(format_server_entry(i, d))
+        else:
+            lines.append("\n_No manually added servers._")
 
+        n = len(all_servers)
+        pairs = n * (n - 1) // 2
+        lines.append(f"\nTotal: {n} servers, {pairs} unique pairs")
 
-    n = len(all_servers)
-    pairs = n * (n - 1) // 2
-    lines.append(f"\nTotal: {n} servers, {pairs} unique pairs")
-
-    if n >= 2:
-        source_idx = state._cmping_monitor_index % n
-        next_source = all_servers[source_idx]
-        interval_min = config.CMPING_MONITOR_INTERVAL // 60
-        lines.append(f"Next check source: {next_source}")
-        lines.append(f"Interval: {interval_min} min | Full rotation: ~{n * interval_min} min")
+        if n >= 2:
+            source_idx = state._cmping_monitor_index % n
+            next_source = all_servers[source_idx]
+            interval_min = config.CMPING_MONITOR_INTERVAL // 60
+            lines.append(f"Next check source: {next_source}")
+            lines.append(f"Interval: {interval_min} min | Full rotation: ~{n * interval_min} min")
 
     if config.CMCALL_MONITOR_INTERVAL > 0:
         lines.append(

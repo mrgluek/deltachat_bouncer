@@ -274,6 +274,7 @@ class TestCommands(MonitorTestBase):
     def test_cmpinglist_shows_call_badges(self, _domains, send, _flag):
         self.cycle({("a.example", "c.example"): fail(stage="setup", callee_turn="none")})
         event = MagicMock()
+        event.payload = ""
         cmping_commands.cmpinglist_command(self.bot, 1, event)
         text = send.call_args[0][3]
         self.assertIn("a.example: ⚪️ no data · 📞✅", text)
@@ -287,13 +288,36 @@ class TestCommands(MonitorTestBase):
         averages = {"a.example": (1439.7, 100), "b.example": (870.0, 37), "c.example": (None, 0)}
         with patch("cmping_commands.relaygeo.flag", side_effect=flags.get), \
                 patch("cmping_commands.database.get_average_ping_for_server", side_effect=lambda d, limit: averages[d]):
-            cmping_commands.cmpinglist_command(self.bot, 1, MagicMock())
+            cmping_commands.cmpinglist_command(self.bot, 1, MagicMock(payload=""))
         text = send.call_args[0][3]
         self.assertIn("1. 🇷🇺 a.example: 🟢 1.4s · ", text)    # flag before the name, seconds, no count at 100
         self.assertNotIn("🏓 100", text)
         self.assertIn("2. 🇩🇪 b.example: 🟢 0.9s (🏓 37) · ", text)  # fewer than 100 pings: count stays
         self.assertIn("3. c.example: ⚪️ no data", text)
         self.assertNotIn(" ms", text)
+
+    @patch("cmping_commands.dc_helpers._send")
+    @patch("cmping_commands.dc_helpers._get_bot_domains", return_value=["a.example", "b.example", "d.example"])
+    def test_cmpinglist_country_filter(self, _domains, send):
+        countries = {"a.example": "RU", "b.example": "DE", "c.example": "RU", "d.example": ""}
+        with patch("cmping_commands.relaygeo.country", side_effect=lambda d: countries.get(d, "")), \
+                patch("cmping_commands.relaygeo.flag", side_effect=lambda d: {"RU": "🇷🇺", "DE": "🇩🇪"}.get(countries.get(d), "")), \
+                patch("cmping_commands.database.get_average_ping_for_server", return_value=(1700.0, 100)):
+            self.cycle({})  # c.example is a manual monitor
+            for arg in ("🇷🇺", "ru", " RU "):
+                cmping_commands.cmpinglist_command(self.bot, 1, MagicMock(payload=arg))
+                text = send.call_args[0][3]
+                self.assertIn("CMPing Monitor Servers 🇷🇺", text)
+                self.assertIn("1. 🇷🇺 a.example: 🟢 1.7s", text)
+                self.assertIn("🇷🇺 c.example", text)          # a monitored server qualifies too
+                self.assertNotIn("b.example", text)
+                self.assertNotIn("d.example", text)
+                self.assertIn("Showing 2 of ", text)
+                self.assertIn("Country not known yet for 1", text)
+            cmping_commands.cmpinglist_command(self.bot, 1, MagicMock(payload="fr"))
+            self.assertIn("No servers in FR", send.call_args[0][3])
+            cmping_commands.cmpinglist_command(self.bot, 1, MagicMock(payload="russia"))
+            self.assertIn("Give a country flag", send.call_args[0][3])
 
 
 if __name__ == "__main__":

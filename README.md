@@ -153,7 +153,7 @@ Delta Chat bot designed to maintain group quality by monitoring inactivity and s
 - `/rmtransport <addr>` — Remove a mail relay (Admin only).
 - `/cmpingadd <server>` — Add a server to connectivity monitoring rotation (Admin only).
 - `/cmpingdel <server>` — Remove a server from monitoring (Admin only).
-- `/cmpinglist` — Show all monitored servers, pair count, and rotation info; each server shows the flag of its country before its name (from the first IP address, via ipinfo.io; cached for a day in the database and refreshed in the background, so a new server gets its flag on the next call) and its average ping in seconds (`🇩🇪 chat.example: 🟢 1.7s`, with the ping count only while under 100 pings are recorded) and its call-monitoring badge (📞✅ / ⚠️ / 🚨 / ➖ no TURN / ⏭ skipped).
+- `/cmpinglist [🇷🇺|ru]` — Show all monitored servers (with a country flag or a two-letter code only those in that country, numbered as in the full list), pair count, and rotation info; each server shows the flag of its country before its name (from the first IP address, via ipinfo.io; cached for a day in the database and refreshed in the background, so a new server gets its flag on the next call) and its average ping in seconds (`🇩🇪 chat.example: 🟢 1.7s`, with the ping count only while under 100 pings are recorded) and its call-monitoring badge (📞✅ / ⚠️ / 🚨 / ➖ no TURN / ⏭ skipped).
 - `/cmpingstatus [server]` — Show full monitoring results sorted from newest to oldest, with an optional server filter.
 - `/cmpingfail [server]` — Show currently failed links with an optional server filter.
 - `/cmpingevents [id]` — Show CMPing incident log or detailed incident breakdown (aliases: `/cmpingincidents`, `/cmevents`).

@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.50.0] - 2026-11-11
+
+### Added
+- **Country Filter for `/cmpinglist`**: `/cmpinglist 🇷🇺` or `/cmpinglist ru` lists only the servers in that country (transport and manual ones, numbered as in the full list) and how many of all servers that is. Servers whose country is not known yet (first background lookup still running) are counted in a note instead of being left out silently.
+
 ## [2.49.1] - 2026-11-11
 
 ### Changed

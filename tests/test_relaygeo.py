@@ -129,5 +129,17 @@ class TestFlag(Base):
         self.assertNotIn("a.example", relaygeo._busy)
 
 
+class TestParseCountry(unittest.TestCase):
+    def test_forms(self):
+        for text in ("🇷🇺", "ru", "RU", " Ru "):
+            self.assertEqual(relaygeo.parse_country(text), "RU")
+        for text in ("", "russia", "r", "🇷", "1a", "🇷🇺🇩🇪", "ру"):
+            self.assertIsNone(relaygeo.parse_country(text))
+
+    def test_country_code_without_flag(self):
+        relaygeo._cache = {"a.example": {"cc": "DE", "at": time.time()}}
+        self.assertEqual(relaygeo.country("A.example"), "DE")
+
+
 if __name__ == "__main__":
     unittest.main()

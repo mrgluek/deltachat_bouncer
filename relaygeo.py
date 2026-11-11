@@ -73,8 +73,8 @@ def _refresh(domain: str) -> None:
             _busy.discard(domain)
 
 
-def flag(domain: str) -> str:
-    """Flag emoji for the relay's country, "" while unknown; starts a refresh when stale."""
+def country(domain: str) -> str:
+    """Two-letter country code of the relay, "" while unknown; starts a refresh when stale."""
     domain = domain.strip().lower()
     now = time.time()
     with _lock:
@@ -86,4 +86,19 @@ def flag(domain: str) -> str:
         cc = entry.get("cc") if entry else ""
     if start:
         threading.Thread(target=_refresh, args=(domain,), name="relay-geo", daemon=True).start()
-    return iplookup._flag(cc)
+    return cc or ""
+
+
+def flag(domain: str) -> str:
+    """Flag emoji for the relay's country, "" while unknown."""
+    return iplookup._flag(country(domain))
+
+
+def parse_country(text: str) -> str | None:
+    """"🇷🇺", "ru" or "RU" -> "RU"; None for anything else."""
+    text = (text or "").strip()
+    if len(text) == 2 and text.isascii() and text.isalpha():
+        return text.upper()
+    if len(text) == 2 and all(0x1F1E6 <= ord(c) <= 0x1F1FF for c in text):
+        return "".join(chr(ord(c) - 0x1F1E6 + ord("A")) for c in text)
+    return None

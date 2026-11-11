@@ -639,7 +639,7 @@ def help_command(bot, accid, event):
         f"/chatadd [desc] — Submit this group to the chat catalog (reviewed by the admin).\n"
         f"/dchanneladd <link> — Submit a channel to the channel catalog (reviewed by the admin).\n"
         f"/chatreport<ID> / /dchannelreport<ID> <reason> — Report a catalog entry as spam or scam.\n"
-        f"/cmpinglist — Show monitored servers.\n"
+        f"/cmpinglist [🇷🇺|ru] — Show monitored servers, optionally only those in one country.\n"
         f"/cmpingstatus [server] — Show monitoring results (optional filter).\n"
         f"/cmpingfail [server] — Show currently failed links (optional filter).\n"
         f"/cmpingevents [id] — Show CMPing incident log or incident details.\n"
