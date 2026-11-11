@@ -310,10 +310,10 @@ class TestCommands(MonitorTestBase):
     def test_cmpinglist_colors_relative_to_median(self):
         avgs = {"a.example": (1500.0, 100), "b.example": (1600.0, 100), "c.example": (1700.0, 100),
                 "d.example": (2500.0, 100), "e.example": (4000.0, 100)}
-        text = self._list(list(avgs), avgs)       # median 1.7 s: 🟢 ≤ 2.1, 🟡 ≤ 3.4, 🟠 ≤ 5.1
-        for line, circle in (("a.example", "🟢"), ("c.example", "🟢"), ("d.example", "🟡"), ("e.example", "🟠")):
+        text = self._list(list(avgs), avgs)       # median 1.7 s: 🟢 ≤ 1.87, 🟡 ≤ 2.38, 🟠 ≤ 3.4
+        for line, circle in (("a.example", "🟢"), ("c.example", "🟢"), ("d.example", "🟠"), ("e.example", "🔴")):
             self.assertIn(f"{line}: {circle}", text)
-        self.assertIn("🟢 ≤ 2.1s · 🟡 ≤ 3.4s · 🟠 ≤ 5.1s · 🔴 slower (relative to the median of all servers)", text)
+        self.assertIn("🟢 ≤ 1.9s · 🟡 ≤ 2.4s · 🟠 ≤ 3.4s · 🔴 slower (relative to the median of all servers)", text)
 
     def test_cmpinglist_whitelisted_is_white_whatever_the_speed(self):
         avgs = {"a.example": (800.0, 100), "b.example": (900.0, 100), "c.example": (7000.0, 100)}
@@ -347,7 +347,7 @@ class TestCommands(MonitorTestBase):
     def test_filter_keeps_colors_of_the_full_list(self):
         avgs = {"a.example": (3000.0, 100), "b.example": (1500.0, 100), "c.example": (1500.0, 100)}
         text = self._list(list(avgs), avgs, flags={"a.example": "🇷🇺"}, payload="ru")  # median 1.5 s of ALL
-        self.assertIn("a.example: 🟡 3.0s", text)
+        self.assertIn("a.example: 🟠 3.0s", text)
 
 
 class TestPingScale(unittest.TestCase):
@@ -355,18 +355,20 @@ class TestPingScale(unittest.TestCase):
         self.assertEqual(cmping_commands.ping_scale([2000.0, 3000.0]), cmping_commands.FIXED_LIMITS_MS)
         self.assertEqual(cmping_commands.ping_scale([]), cmping_commands.FIXED_LIMITS_MS)
         limits = cmping_commands.ping_scale([2000.0, 2000.0, 8000.0])  # median 2 s
-        self.assertEqual(limits, (2500.0, 4000.0, 6000.0))
+        for got, want in zip(limits, (2200.0, 2800.0, 4000.0)):
+            self.assertAlmostEqual(got, want)
 
     def test_circles_and_guards(self):
-        limits = cmping_commands.ping_scale([2000.0, 2000.0, 2000.0])  # 🟢 ≤ 2.5s, 🟡 ≤ 4s, 🟠 ≤ 6s
+        limits = cmping_commands.ping_scale([2000.0, 2000.0, 2000.0])  # 🟢 ≤ 2.2s, 🟡 ≤ 2.8s, 🟠 ≤ 4s
         c = cmping_commands.ping_circle
-        self.assertEqual([c(x, limits) for x in (2400, 3900, 5900, 6100)], ["🟢", "🟡", "🟠", "🔴"])
+        self.assertEqual([c(x, limits) for x in (2100, 2700, 3900, 4100)], ["🟢", "🟡", "🟠", "🔴"])
         self.assertEqual(c(9000, limits), "🔴")
         slow = cmping_commands.ping_scale([9000.0, 9000.0, 9000.0])
         self.assertEqual(c(9000, slow), "🟠")        # all slow: never green or yellow
         fast = cmping_commands.ping_scale([200.0, 200.0, 200.0])  # 🟢 ≤ 250 ms
         self.assertEqual(c(900, fast), "🟢")         # under a second is always green
         self.assertEqual(c(1100, fast), "🔴")
+        self.assertEqual(c(6100, limits), "🔴")
 
 
 if __name__ == "__main__":

@@ -386,7 +386,7 @@ def cmpingdel_command(bot, accid, event):
 # /cmpinglist colors: relative to the median of all servers with data (3 or more of them), so that
 # the spread between the relays shows, with absolute guards; fewer servers: fixed limits.
 FAST_MS, SLOW_MS = 1000, 6000                # below: always green; above: never better than orange
-MEDIAN_FACTORS = (1.25, 2.0, 3.0)            # green / yellow / orange up to this many medians
+MEDIAN_FACTORS = (1.1, 1.4, 2.0)            # green / yellow / orange up to this many medians
 FIXED_LIMITS_MS = (2000, 4000, 6000)
 CIRCLES = ("🟢", "🟡", "🟠", "🔴")
 MIN_FOR_MEDIAN = 3
