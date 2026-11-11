@@ -248,18 +248,23 @@ def _publish(bot, accid, event: dict, report_chats: list[int], now: float) -> No
 
 
 def cmcall_monitor_cycle(bot, accid, run=run_monitor_single) -> None:
-    if state._cmcall_monitor_running:
+    with state._monitor_lock:
+        running = state._cmcall_monitor_running
+        if not running:
+            state._cmcall_monitor_running = True
+    if running:
         config.logger.warning("CMCall monitor: previous cycle still running, skipping.")
         return
-    state._cmcall_monitor_running = True
     try:
         servers = monitored_servers(bot, accid)
         if not servers:
             return
-        idx = state._cmcall_monitor_index % len(servers)
-        source = servers[idx]
-        state._cmcall_monitor_index = (idx + 1) % len(servers)
-        database.set_config("cmcall_monitor_index", str(state._cmcall_monitor_index))
+        with state._monitor_lock:
+            idx = state._cmcall_monitor_index % len(servers)
+            source = servers[idx]
+            state._cmcall_monitor_index = (idx + 1) % len(servers)
+            next_index = state._cmcall_monitor_index
+        database.set_config("cmcall_monitor_index", str(next_index))
         cycle_no = int(database.get_config("cmcall_monitor_cycle") or 0)
         database.set_config("cmcall_monitor_cycle", str(cycle_no + 1))
 
@@ -275,7 +280,8 @@ def cmcall_monitor_cycle(bot, accid, run=run_monitor_single) -> None:
         evaluate_cycle(source, results)
         sync_alerts(bot, accid, servers)
     finally:
-        state._cmcall_monitor_running = False
+        with state._monitor_lock:
+            state._cmcall_monitor_running = False
 
 
 def cmcall_monitor_loop(bot, accid) -> None:

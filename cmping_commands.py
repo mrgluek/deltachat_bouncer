@@ -380,11 +380,12 @@ def cmpingdel_command(bot, accid, event):
     removed = database.remove_cmping_monitor(domain)
     if removed:
         # Clean up last results for this domain
-        keys_to_remove = [k for k in state._cmping_last_results if domain in k]
-        for k in keys_to_remove:
-            state._cmping_last_results.pop(k, None)
-        state._cmping_server_status.pop(domain, None)
-        state._cmping_server_errors.pop(domain, None)
+        with state._monitor_lock:
+            keys_to_remove = [k for k in state._cmping_last_results if domain in k]
+            for k in keys_to_remove:
+                state._cmping_last_results.pop(k, None)
+            state._cmping_server_status.pop(domain, None)
+            state._cmping_server_errors.pop(domain, None)
         database.delete_cmping_results_for_domain(domain)
         database.delete_cmping_history_for_domain(domain)
         dc_helpers._send(bot, accid, msg.chat_id, f"✅ {domain} removed from monitoring.")
@@ -430,6 +431,7 @@ def _legend(limits: tuple[float, ...], any_listed: bool) -> str:
 
 @config.dc_cli.on(events.NewMessage(command="/cmpinglist"))
 def cmpinglist_command(bot, accid, event):
+    monitor = state._snapshot_cmping_state()
     msg = event.msg
 
     # /cmpinglist 🇷🇺 or /cmpinglist ru: only the servers in that country
@@ -511,7 +513,7 @@ def cmpinglist_command(bot, accid, event):
         lines.append(f"\nTotal: {n} servers, {pairs} unique pairs")
 
         if n >= 2:
-            source_idx = state._cmping_monitor_index % n
+            source_idx = monitor["index"] % n
             next_source = all_servers[source_idx]
             interval_min = config.CMPING_MONITOR_INTERVAL // 60
             lines.append(f"Next check source: {next_source}")
@@ -564,6 +566,7 @@ def cmreport_command(bot, accid, event):
 
 @config.dc_cli.on(events.NewMessage(command="/cmpingstatus"))
 def cmpingstatus_command(bot, accid, event):
+    monitor = state._snapshot_cmping_state()
     msg = event.msg
 
     from datetime import datetime, timezone
@@ -598,7 +601,7 @@ def cmpingstatus_command(bot, accid, event):
 
     # Collect relevant results
     results_to_show = []
-    for (src, dst), result in state._cmping_last_results.items():
+    for (src, dst), result in monitor["results"].items():
         if src not in all_servers or dst not in all_servers or src == dst:
             continue
         if matched_servers is not None:
@@ -640,7 +643,7 @@ def cmpingstatus_command(bot, accid, event):
 
     # Add rotation info
     n = len(all_servers)
-    source_idx = state._cmping_monitor_index % n
+    source_idx = monitor["index"] % n
     next_source = all_servers[source_idx]
     interval_min = config.CMPING_MONITOR_INTERVAL // 60
     lines.append(f"\nSource rotation: {source_idx + 1}/{n} (next: {next_source})")
@@ -664,17 +667,19 @@ def _cmpingfail_impl(bot, accid, event, cmd_name="/cmpingfail"):
 
     now = time.time()
     
-    if not state._cmping_server_status:
-        for srv in all_servers:
-            state._set_cmping_server_status(srv, True)
-        for (src, dst), res in state._cmping_last_results.items():
-            if not res.get("success"):
-                if src in all_servers:
-                    state._set_cmping_server_status(src, False)
-                if dst in all_servers:
-                    state._set_cmping_server_status(dst, False)
+    with state._monitor_lock:
+        if not state._cmping_server_status:
+            for srv in all_servers:
+                state._set_cmping_server_status(srv, True)
+            for (src, dst), res in state._cmping_last_results.items():
+                if not res.get("success"):
+                    if src in all_servers:
+                        state._set_cmping_server_status(src, False)
+                    if dst in all_servers:
+                        state._set_cmping_server_status(dst, False)
+    monitor = state._snapshot_cmping_state()
 
-    unhealthy_servers = [srv for srv in all_servers if not state._cmping_server_status.get(srv, True)]
+    unhealthy_servers = [srv for srv in all_servers if not monitor["status"].get(srv, True)]
 
     # Parse optional filter argument
     text = (msg.text or "").strip()
@@ -707,7 +712,7 @@ def _cmpingfail_impl(bot, accid, event, cmd_name="/cmpingfail"):
         # Collect incoming failures (src -> srv)
         in_fails = []
         
-        for (src, dst), res in state._cmping_last_results.items():
+        for (src, dst), res in monitor["results"].items():
             if not res.get("success"):
                 checked_at = res.get("checked_at", 0)
                 age_min = int((now - checked_at) / 60) if checked_at else 0
@@ -745,6 +750,7 @@ def cmfaillist_command(bot, accid, event):
 @config.dc_cli.on(events.NewMessage(command="/cmpingincidents"))
 @config.dc_cli.on(events.NewMessage(command="/cmevents"))
 def cmpingevents_command(bot, accid, event):
+    monitor = state._snapshot_cmping_state()
     from datetime import datetime, timezone
     msg = event.msg
     text = (msg.text or "").strip()
@@ -769,8 +775,8 @@ def cmpingevents_command(bot, accid, event):
 
         if inc["status"] == "ongoing":
             unhealthy_servers = {
-                srv: state._cmping_server_errors.get(srv, "Connectivity check failed")
-                for srv, is_healthy in state._cmping_server_status.items()
+                srv: monitor["errors"].get(srv, "Connectivity check failed")
+                for srv, is_healthy in monitor["status"].items()
                 if not is_healthy and srv in all_servers
             }
             msg_text = cmping._format_cmping_incident_message(
@@ -832,8 +838,8 @@ def cmpingevents_command(bot, accid, event):
         if status == "ongoing":
             duration_str = cmping._format_duration(int(time.time()) - started_at)
             unhealthy_servers = {
-                srv: state._cmping_server_errors.get(srv, "Connectivity check failed")
-                for srv, is_healthy in state._cmping_server_status.items()
+                srv: monitor["errors"].get(srv, "Connectivity check failed")
+                for srv, is_healthy in monitor["status"].items()
                 if not is_healthy and srv in all_servers
             }
             unhealthy_count = len(unhealthy_servers)
@@ -865,6 +871,7 @@ def cmpingevents_command(bot, accid, event):
 @config.dc_cli.on(events.NewMessage(command="/cmpinghistory"))
 @config.dc_cli.on(events.NewMessage(command="/cmhistory"))
 def cmpinghistory_command(bot, accid, event):
+    monitor = state._snapshot_cmping_state()
     from datetime import datetime, timezone
     msg = event.msg
     text = (msg.text or "").strip()
@@ -889,7 +896,7 @@ def cmpinghistory_command(bot, accid, event):
             "**Monitored servers:**"
         ]
         for srv in all_servers:
-            is_healthy = state._cmping_server_status.get(srv, True)
+            is_healthy = monitor["status"].get(srv, True)
             icon = "🟢" if is_healthy else "🔴"
             status_txt = "HEALTHY" if is_healthy else "UNHEALTHY"
             lines.append(f"• {icon} **{srv}** — `{status_txt}`")
@@ -906,7 +913,7 @@ def cmpinghistory_command(bot, accid, event):
     target_server = matching_server or server_arg
     events_list = database.get_server_cmping_downtime_events(target_server, limit=10)
 
-    is_healthy = state._cmping_server_status.get(target_server, True)
+    is_healthy = monitor["status"].get(target_server, True)
     icon = "🟢" if is_healthy else "🔴"
     status_txt = "HEALTHY" if is_healthy else "UNHEALTHY"
 

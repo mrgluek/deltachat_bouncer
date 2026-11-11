@@ -45,6 +45,9 @@ echo_call_manager = None
 # Voice meetings (meet.MeetManager), created on first /meet or /join
 meet_manager = None
 
+# Protect related monitoring state; never hold across database/RPC/network calls.
+_monitor_lock = threading.RLock()
+
 # CMCall monitoring state
 _cmcall_monitor_idx_db = database.get_config("cmcall_monitor_index")
 _cmcall_monitor_index = int(_cmcall_monitor_idx_db) if _cmcall_monitor_idx_db is not None else 0
@@ -105,15 +108,28 @@ _cmping_incident_last_edit_state = {}
 
 def _set_cmping_server_status(server: str, is_healthy: bool, error: str | None = None):
     global _cmping_server_status, _cmping_server_errors
-    _cmping_server_status[server] = is_healthy
-    while len(_cmping_server_status) > 500:
-        _cmping_server_status.pop(next(iter(_cmping_server_status)), None)
-    if error:
-        _cmping_server_errors[server] = error
-        while len(_cmping_server_errors) > 500:
-            _cmping_server_errors.pop(next(iter(_cmping_server_errors)), None)
-    elif error is not None or is_healthy:
-        _cmping_server_errors.pop(server, None)
+    with _monitor_lock:
+        _cmping_server_status[server] = is_healthy
+        while len(_cmping_server_status) > 500:
+            _cmping_server_status.pop(next(iter(_cmping_server_status)), None)
+        if error:
+            _cmping_server_errors[server] = error
+            while len(_cmping_server_errors) > 500:
+                _cmping_server_errors.pop(next(iter(_cmping_server_errors)), None)
+        elif error is not None or is_healthy:
+            _cmping_server_errors.pop(server, None)
+
+
+def _snapshot_cmping_state():
+    """Copy a consistent monitoring view for formatting outside the lock."""
+    with _monitor_lock:
+        return {
+            "results": {key: dict(result) for key, result in _cmping_last_results.items()},
+            "status": dict(_cmping_server_status),
+            "errors": dict(_cmping_server_errors),
+            "index": _cmping_monitor_index,
+            "incident_edits": dict(_cmping_incident_last_edit_state),
+        }
 
 
 # Delayed-command debouncing (e.g. /bounce retried before its cooldown queue fires)

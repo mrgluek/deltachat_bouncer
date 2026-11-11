@@ -168,17 +168,21 @@ def _cmping_monitor_loop(bot, accid):
         except Exception as e:
             config.logger.error(f"CMPing monitor cycle error: {e}")
         finally:
-            state._cmping_monitor_running = False
+            with state._monitor_lock:
+                state._cmping_monitor_running = False
 
         time.sleep(config.CMPING_MONITOR_INTERVAL)
 
 
 def _cmping_monitor_cycle(bot, accid, cmping_path):
     """Execute one monitoring cycle: pick source, check all pairs, report changes."""
-    if state._cmping_monitor_running:
+    with state._monitor_lock:
+        running = state._cmping_monitor_running
+        if not running:
+            state._cmping_monitor_running = True
+    if running:
         config.logger.warning("CMPing monitor: previous cycle still running, skipping.")
         return
-    state._cmping_monitor_running = True
 
     # Build server list: bot transports + manually monitored
     bot_domains = dc_helpers._get_bot_domains(bot, accid)
@@ -190,26 +194,29 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
 
     if len(all_servers) < 2:
         config.logger.debug("CMPing monitor: fewer than 2 servers, skipping cycle.")
-        state._cmping_monitor_running = False
+        with state._monitor_lock:
+            state._cmping_monitor_running = False
         return
 
     # Initialize server status map from DB if not done yet
-    if not state._cmping_server_status:
-        for srv in all_servers:
-            state._set_cmping_server_status(srv, True)
-        for (src, dst), res in state._cmping_last_results.items():
-            if not res.get("success"):
-                err = res.get("error", "Check failed")
-                if src in all_servers:
-                    state._set_cmping_server_status(src, False, f"Outgoing to {dst} failed: {err}")
-                if dst in all_servers:
-                    state._set_cmping_server_status(dst, False, f"Incoming from {src} failed: {err}")
+    with state._monitor_lock:
+        if not state._cmping_server_status:
+            for srv in all_servers:
+                state._set_cmping_server_status(srv, True)
+            for (src, dst), res in state._cmping_last_results.items():
+                if not res.get("success"):
+                    err = res.get("error", "Check failed")
+                    if src in all_servers:
+                        state._set_cmping_server_status(src, False, f"Outgoing to {dst} failed: {err}")
+                    if dst in all_servers:
+                        state._set_cmping_server_status(dst, False, f"Incoming from {src} failed: {err}")
 
-    # Pick source via round-robin
-    source_idx = state._cmping_monitor_index % len(all_servers)
-    source = all_servers[source_idx]
-    state._cmping_monitor_index = (state._cmping_monitor_index + 1) % len(all_servers)
-    database.set_config("cmping_monitor_index", str(state._cmping_monitor_index))
+        # Pick source via round-robin
+        source_idx = state._cmping_monitor_index % len(all_servers)
+        source = all_servers[source_idx]
+        state._cmping_monitor_index = (state._cmping_monitor_index + 1) % len(all_servers)
+        next_index = state._cmping_monitor_index
+    database.set_config("cmping_monitor_index", str(next_index))
     targets = [s for s in all_servers if s != source]
 
     config.logger.info(f"CMPing monitor cycle: source={source}, targets={targets}")
@@ -236,11 +243,12 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
             ("bwd", bwd_result, dst, source),
         ]:
             key = (src_d, dst_d)
-            state._cmping_last_results[key] = result
-            if len(state._cmping_last_results) > 500:
-                oldest_keys = sorted(state._cmping_last_results.keys(), key=lambda k: state._cmping_last_results[k].get("checked_at", 0))[:50]
-                for ok in oldest_keys:
-                    state._cmping_last_results.pop(ok, None)
+            with state._monitor_lock:
+                state._cmping_last_results[key] = result
+                if len(state._cmping_last_results) > 500:
+                    oldest_keys = sorted(state._cmping_last_results.keys(), key=lambda k: state._cmping_last_results[k].get("checked_at", 0))[:50]
+                    for ok in oldest_keys:
+                        state._cmping_last_results.pop(ok, None)
             database.save_cmping_result(
                 src=src_d,
                 dst=dst_d,
@@ -270,17 +278,19 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
 
     now = int(time.time())
 
+    monitor = state._snapshot_cmping_state()
+
     # Did source fail with ALL targets? (and we checked at least 2 targets)
     if not any_source_success and len(targets) >= 2:
         # The source itself is the failing node (e.g. host down, broken mail/dns, network partition)
-        old_source_healthy = state._cmping_server_status.get(source, True)
+        old_source_healthy = monitor["status"].get(source, True)
         sample_err = "All peer checks failed (node unreachable or broken mail delivery)"
         state._set_cmping_server_status(source, False, sample_err)
         if old_source_healthy:
             database.record_cmping_server_down(source, now, sample_err)
     else:
         # Source has at least one working connection or there's only 1 target
-        old_source_healthy = state._cmping_server_status.get(source, True)
+        old_source_healthy = monitor["status"].get(source, True)
         source_healthy = True if (any_source_success or not targets) else False
         if source_healthy:
             state._set_cmping_server_status(source, True)
@@ -299,7 +309,7 @@ def _cmping_monitor_cycle(bot, accid, cmping_path):
             if fwd_thread_err or bwd_thread_err:
                 continue
 
-            old_dst_healthy = state._cmping_server_status.get(dst, True)
+            old_dst_healthy = monitor["status"].get(dst, True)
             dst_is_healthy = bool(fwd_ok and bwd_ok)
 
             if dst_is_healthy:
@@ -366,15 +376,17 @@ def _run_monitor_pair(cmping_path, src, dst):
 
 def _clear_all_errors_for_server(server: str):
     """Clear all errors involving this server from results."""
-    keys_to_remove = []
-    for (src, dst), res in state._cmping_last_results.items():
-        if src == server or dst == server:
-            if not res.get("success"):
-                keys_to_remove.append((src, dst))
+    with state._monitor_lock:
+        keys_to_remove = []
+        for (src, dst), res in state._cmping_last_results.items():
+            if src == server or dst == server:
+                if not res.get("success"):
+                    keys_to_remove.append((src, dst))
                 
-    for key in keys_to_remove:
-        src, dst = key
-        state._cmping_last_results.pop(key, None)
+        for key in keys_to_remove:
+            src, dst = key
+            state._cmping_last_results.pop(key, None)
+    for src, dst in keys_to_remove:
         database.delete_cmping_result(src, dst)
 
 
@@ -460,9 +472,6 @@ def _format_cmping_incident_message(
         return "\n".join(lines)
 
 
-state._cmping_incident_last_edit_state = {}
-
-
 def _get_cmping_incident_update_interval(duration_seconds: int) -> int:
     """Return the minimum seconds required between live ticker edits based on CMPing incident age."""
     if duration_seconds < 60:
@@ -495,9 +504,10 @@ def _sync_cmping_incident_alerts(bot, accid, all_servers, force_update: bool = F
         return
 
     now = int(time.time())
-    for srv, is_healthy in state._cmping_server_status.items():
+    monitor = state._snapshot_cmping_state()
+    for srv, is_healthy in monitor["status"].items():
         if not is_healthy and srv in all_servers:
-            err = state._cmping_server_errors.get(srv, "Connectivity check failed")
+            err = monitor["errors"].get(srv, "Connectivity check failed")
             database.record_cmping_server_down(srv, now, err)
 
     active_incidents = database.get_all_active_cmping_incidents()
@@ -515,12 +525,12 @@ def _sync_cmping_incident_alerts(bot, accid, all_servers, force_update: bool = F
             duration = max(0, now - started_at)
             
             inc_unhealthy = {
-                ev["server"]: ev.get("error_msg") or state._cmping_server_errors.get(ev["server"], "Connectivity check failed")
+                ev["server"]: ev.get("error_msg") or monitor["errors"].get(ev["server"], "Connectivity check failed")
                 for ev in open_events
             }
 
             status_sig = tuple(sorted(inc_unhealthy.items()))
-            last_edit_time, last_sig = state._cmping_incident_last_edit_state.get(inc_id, (0.0, None))
+            last_edit_time, last_sig = monitor["incident_edits"].get(inc_id, (0.0, None))
             throttle_interval = _get_cmping_incident_update_interval(duration)
 
             chat_msg_ids = database.get_cmping_incident_msg_ids(inc_id)
@@ -538,13 +548,15 @@ def _sync_cmping_incident_alerts(bot, accid, all_servers, force_update: bool = F
                 is_resolved=False
             )
 
-            state._cmping_incident_last_edit_state[inc_id] = (now, status_sig)
+            with state._monitor_lock:
+                state._cmping_incident_last_edit_state[inc_id] = (now, status_sig)
             for chat_id in report_chats:
                 _queue_cmping_incident_message(bot, accid, inc_id, chat_id, msg_text, store_new_id=True)
 
         else:
             # Resolved incident
-            state._cmping_incident_last_edit_state.pop(inc_id, None)
+            with state._monitor_lock:
+                state._cmping_incident_last_edit_state.pop(inc_id, None)
 
             affected_srvs = database.get_cmping_incident_affected_servers(inc_id, fallback_started_at=inc["started_at"])
             if affected_srvs:
