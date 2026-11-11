@@ -153,7 +153,7 @@ class TestBanCommand(Base):
     def test_ambiguous_and_unknown(self):
         self.people[13] = ("Bobby", "bobby@example.org", "D" * 40)
         self.chats[100].append(13)
-        text = self._run(moderation.ban_command, "bob nobody")
+        text = self._run(moderation.ban_command, "bo nobody")   # "bo": Bob and Bobby, neither exactly
         self.assertIn("matches 2 contacts", text)
         self.assertIn("nobody found", text)
         self.assertEqual(database.get_all_banned(), [])
@@ -206,6 +206,54 @@ class TestEnforcement(Base):
         database.remove_banned_fingerprint(FP_B)
         self.assertEqual(moderation.ban_sweep(self.bot, 1), 0)
         self.bot.rpc.get_chat_contacts.assert_not_called()  # nothing banned: no scan
+
+
+class TestKickByName(Base):
+    """/kick faq bot removes FAQ Bot only: "bot" alone would match every bot in the group."""
+
+    def setUp(self):
+        super().setUp()
+        self.people.update({20: ("FAQ Bot", "faqbot@example.org", "1" * 40),
+                            21: ("Ntfy Bot", "ntfybot@example.org", "2" * 40),
+                            22: ("Uptime Bot", "uptimebot@example.org", "3" * 40),
+                            23: ("Uptime Bot", "ruptimebot@example.org", "4" * 40)})
+        self.chats[100] = [1, 10, 11, 12, 20, 21, 22, 23]
+
+    def test_two_word_name_is_one_query(self):
+        text = self._run(moderation.kick_command, "faq bot")
+        self.assertEqual(self.removed, [(100, 20)])
+        self.assertIn("Kicked 1 member", text)
+
+    def test_single_word_matching_several_kicks_nobody(self):
+        text = self._run(moderation.kick_command, "bot")
+        self.assertEqual(self.removed, [])
+        self.assertIn("matches 4 members", text)
+
+    def test_ambiguous_name_is_refused_but_the_address_works(self):
+        text = self._run(moderation.kick_command, "uptime bot")
+        self.assertEqual(self.removed, [])
+        self.assertIn("matches 2 members", text)
+        self._run(moderation.kick_command, "ruptimebot@example.org")
+        self.assertEqual(self.removed, [(100, 23)])
+
+    def test_several_names_each_on_its_own(self):
+        self._run(moderation.kick_command, "alice bob")   # no member called "alice bob": word by word
+        self.assertEqual(sorted(self.removed), [(100, 10), (100, 11)])
+
+    def test_exact_name_beats_partial(self):
+        self.people[24] = ("Alice Cooper", "cooper@example.org", "5" * 40)
+        self.chats[100].append(24)
+        self._run(moderation.kick_command, "alice")        # "Alice" exactly, not "Alice Cooper"
+        self.assertEqual(self.removed, [(100, 10)])
+
+    def test_ids_still_work_and_admin_is_safe(self):
+        self._run(moderation.kick_command, "21 12")
+        self.assertEqual(self.removed, [(100, 21)])
+
+    def test_ban_uses_the_whole_phrase_too(self):
+        self._run(moderation.ban_command, "faq bot")
+        self.assertTrue(database.is_fingerprint_banned("1" * 40))
+        self.assertEqual(len(database.get_all_banned()), 1)
 
 
 if __name__ == "__main__":

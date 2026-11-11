@@ -732,6 +732,52 @@ def autokick_command(bot, accid, event):
           "• `/autokick off` — Disable auto-kick")
 
 
+def _match_members(bot, accid, member_ids, query: str) -> list[int]:
+    """Members whose name, display name or address is `query`; if none is exactly that, the
+    members that contain it. Case-insensitive; the bot and special contacts are skipped."""
+    query = query.strip().lstrip("@").lower()
+    if not query:
+        return []
+    exact, partial = [], []
+    for cid in member_ids:
+        if cid <= 9 or cid == config.DC_CONTACT_ID_SELF:
+            continue
+        try:
+            c = bot.rpc.get_contact(accid, cid)
+        except Exception:
+            continue
+        name, disp, addr = (c.name or "").lower(), (c.display_name or "").lower(), (c.address or "").lower()
+        if query in (name, disp, addr, addr.split("@")[0]):
+            exact.append(cid)
+        elif query in name or query in disp or query in addr:
+            partial.append(cid)
+    return exact or partial
+
+
+def _resolve_name_words(bot, accid, member_ids, words: list[str]):
+    """Names typed after /kick or /ban -> ([(query, [matching contact ids])]).
+
+    "faq bot" is one name, not "faq" and "bot" (the second would match every bot in the group):
+    the words are tried together first, and only when no member matches the whole phrase is each
+    word looked up on its own, for "/kick alice bob"."""
+    if not words:
+        return []
+    if len(words) > 1:
+        phrase = " ".join(words)
+        hits = _match_members(bot, accid, member_ids, phrase)
+        if hits:
+            return [(phrase, hits)]
+    return [(w, _match_members(bot, accid, member_ids, w)) for w in words]
+
+
+def _name_of(bot, accid, cid) -> str:
+    try:
+        c = bot.rpc.get_contact(accid, cid)
+        return f"{c.name or c.display_name or 'Unknown'} ({c.address})"
+    except Exception:
+        return f"ID {cid}"
+
+
 @config.dc_cli.on(events.NewMessage(command="/kick"))
 def kick_command(bot, accid, event):
     msg = event.msg
@@ -774,33 +820,32 @@ def kick_command(bot, accid, event):
             except Exception as e:
                 config.logger.error(f"Failed to get quote message for /kick: {e}")
 
-    # 2. Parse tokens from payload
+    # 2. Parse the payload: contact IDs, and names (a name may have several words)
+    name_problems = []
     if payload:
-        tokens = payload.split()
-        for token in tokens:
-            clean_token = token.strip()
-            cid_match = re.match(r'^(?:/?contact|c)?(\d+)$', clean_token, re.IGNORECASE)
+        words = []
+        for token in payload.split():
+            cid_match = re.match(r'^(?:/?contact|c)?(\d+)$', token.strip(), re.IGNORECASE)
             if cid_match:
                 cid = int(cid_match.group(1))
                 if cid not in target_contact_ids:
                     target_contact_ids.append(cid)
             else:
-                # Search by username / email query in group contacts
-                query = clean_token.lstrip('@').lower()
-                for contact_id in chat_contacts:
-                    if contact_id <= 9 or contact_id == config.DC_CONTACT_ID_SELF:
-                        continue
-                    try:
-                        contact = bot.rpc.get_contact(accid, contact_id)
-                        c_name = (contact.name or "").lower()
-                        c_disp = (contact.display_name or "").lower()
-                        c_addr = (contact.address or "").lower()
-                        if (query in c_name or query in c_disp or query in c_addr.split('@')[0] or query in c_addr):
-                            if contact_id not in target_contact_ids:
-                                target_contact_ids.append(contact_id)
-                    except Exception:
-                        continue
+                words.append(token.strip())
+        # One match kicks; several are refused, nobody is removed on a guess
+        for query, hits in _resolve_name_words(bot, accid, chat_contacts, words):
+            if len(hits) == 1:
+                if hits[0] not in target_contact_ids:
+                    target_contact_ids.append(hits[0])
+            elif hits:
+                names = ", ".join(_name_of(bot, accid, h) for h in hits[:5])
+                name_problems.append(f"• `{query[:40]}` matches {len(hits)} members ({names}); use the contact ID or the address.")
+            else:
+                name_problems.append(f"• `{query[:40]}`: nobody in this group.")
 
+    if not target_contact_ids and name_problems:
+        dc_helpers._send(bot, accid, msg.chat_id, "⚠️ **Could not kick:**\n" + "\n".join(name_problems))
+        return
     if not target_contact_ids:
         dc_helpers._send(bot, accid, msg.chat_id,
               "ℹ️ **Usage:**\n"
@@ -810,7 +855,7 @@ def kick_command(bot, accid, event):
         return
 
     kicked_success = []
-    kicked_failed = []
+    kicked_failed = list(name_problems)
 
     for cid in target_contact_ids:
         if cid == config.DC_CONTACT_ID_SELF or cid <= 9:
@@ -976,6 +1021,7 @@ def _ban_targets(bot, accid, msg, payload):
         members = [c for c in bot.rpc.get_chat_contacts(accid, msg.chat_id) if c > 9]
     except Exception:
         members = []
+    words = []
     for tok in payload.split():
         clean = tok.replace(":", "").upper()
         cid_match = re.match(r"^(?:/?contact|c)?(\d+)$", tok, re.IGNORECASE)
@@ -984,23 +1030,19 @@ def _ban_targets(bot, accid, msg, payload):
         elif cid_match:
             add_contact(int(cid_match.group(1)))
         else:
-            q = tok.lstrip("@").lower()
-            hits = []
-            for cid in members:
-                name, addr = _describe(bot, accid, cid)
-                if q in name.lower() or q in addr.lower():
-                    hits.append(cid)
-            if not hits:
-                try:
-                    hits = [c for c in bot.rpc.get_contact_ids(accid, 0, tok.lstrip("@")) if c > 9]
-                except Exception:
-                    hits = []
-            if len(hits) == 1:
-                add_contact(hits[0])
-            elif hits:
-                problems.append(f"• `{tok[:40]}` matches {len(hits)} contacts; use a contact ID or the address.")
-            else:
-                problems.append(f"• `{tok[:40]}`: nobody found.")
+            words.append(tok)
+    for query, hits in _resolve_name_words(bot, accid, members, words):
+        if not hits:  # not in this chat: the core's contact search
+            try:
+                hits = [c for c in bot.rpc.get_contact_ids(accid, 0, query.lstrip("@")) if c > 9]
+            except Exception:
+                hits = []
+        if len(hits) == 1:
+            add_contact(hits[0])
+        elif hits:
+            problems.append(f"• `{query[:40]}` matches {len(hits)} contacts; use a contact ID or the address.")
+        else:
+            problems.append(f"• `{query[:40]}`: nobody found.")
     return found, problems
 
 
