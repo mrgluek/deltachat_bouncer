@@ -282,6 +282,8 @@ class TestCommands(MonitorTestBase):
         self.assertIn("c.example · 📞➖ no TURN", text)
         self.assertNotIn("no data", text)
         self.assertIn("📞 Calls: checked every 60 min", text)
+        self.assertIn("❓ not checked yet", text)
+        self.assertNotIn("📞⚪️", text)
 
     def _list(self, domains, averages, flags=None, listed=(), payload=""):
         flags = flags or {}

@@ -35,7 +35,7 @@ STATUS_ICONS = {
     "degraded": "⚠️",
     "down": "🚨",
     "n/a": "➖",
-    None: "⚪️",
+    None: "❓",
 }
 
 
@@ -309,7 +309,7 @@ def server_badge(server: str) -> str:
     status = database.get_cmcall_server(server).get("status")
     if status == "n/a":
         return "📞➖ no TURN"
-    return f"📞{STATUS_ICONS.get(status, '⚪️')}"
+    return f"📞{STATUS_ICONS.get(status, '❓')}"
 
 
 def format_result_line(row: dict) -> str:
@@ -335,7 +335,7 @@ def format_status(servers: list[str], skipped: list[str], results: list[dict], s
     for s in shown:
         info = database.get_cmcall_server(s)
         status = info.get("status")
-        line = f"{STATUS_ICONS.get(status, '⚪️')} {s}: {status or 'not checked yet'}"
+        line = f"{STATUS_ICONS.get(status, '❓')} {s}: {status or 'not checked yet'}"
         if status in ("down", "degraded") and info.get("since"):
             line += f" for {cmping._format_duration(now - info['since'])}"
         if info.get("error") and status != "ok":

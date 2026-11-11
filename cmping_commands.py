@@ -513,7 +513,7 @@ def cmpinglist_command(bot, accid, event):
     if config.CMCALL_MONITOR_INTERVAL > 0:
         lines.append(
             f"📞 Calls: checked every {config.CMCALL_MONITOR_INTERVAL // 60} min "
-            f"(✅ ok, ⚠️ degraded, 🚨 failing, ➖ no TURN, ⏭ skipped) — /cmcallstatus"
+            f"(✅ ok, ⚠️ degraded, 🚨 failing, ➖ no TURN, ⏭ skipped, ❓ not checked yet) — /cmcallstatus"
         )
 
     dc_helpers._send(bot, accid, msg.chat_id, "\n".join(lines))
