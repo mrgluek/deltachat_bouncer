@@ -341,12 +341,15 @@ def _perform_autokick_warnings_for_chat(bot, accid, chat_id: int, days: int, for
                     f"You will be removed in approximately **{remaining} day(s)**. "
                     f"If you wish to remain in **{chat_name}**, please post a message in the group!"
                 )
-                dc_helpers._send(bot, accid, private_chat_id, dm_text)
+                msg_id = dc_helpers._send(bot, accid, private_chat_id, dm_text, priority=dc_helpers.PRIO_LOW, wait=True)
+                if msg_id is None:
+                    config.logger.error(f"Failed to send private autokick warning to contact {c['id']}: no message ID returned")
+                    continue
+                # The private warning starts the grace period once accepted by the core.
+                database.record_autokick_warning(chat_id, c["id"], time.time())
                 config.logger.info(f"Sent autokick DM warning to {c['name']} ({c['address']}, id={c['id']}) for chat {chat_id}")
             except Exception as dm_err:
                 config.logger.error(f"Failed to send private autokick warning to contact {c['id']}: {dm_err}")
-
-            database.record_autokick_warning(chat_id, c["id"], now)
 
     # 2. Daily broadcast in the group chat (at most once every 24h)
     last_warn_at = database.get_chat_last_autokick_warn_at(chat_id)
@@ -362,8 +365,11 @@ def _perform_autokick_warnings_for_chat(bot, accid, chat_id: int, days: int, for
                 f"The following member(s) will be automatically removed due to inactivity (threshold: {days}d). "
                 f"To remain in the group, please post a message here:\n\n" + "\n".join(lines)
             )
-            dc_helpers._send(bot, accid, chat_id, group_msg, priority=dc_helpers.PRIO_LOW)
-            database.set_chat_last_autokick_warn_at(chat_id, now)
+            msg_id = dc_helpers._send(bot, accid, chat_id, group_msg, priority=dc_helpers.PRIO_LOW, wait=True)
+            if msg_id is None:
+                config.logger.error(f"Failed to send daily autokick warning broadcast in chat {chat_id}: no message ID returned")
+            else:
+                database.set_chat_last_autokick_warn_at(chat_id, time.time())
         except Exception as e:
             config.logger.error(f"Failed to send daily autokick warning broadcast in chat {chat_id}: {e}")
 
