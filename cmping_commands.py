@@ -17,6 +17,7 @@ import cmping
 import config
 import database
 import dc_helpers
+import relaygeo
 import state
 
 def bg_cmping_worker(bot, accid, chat_id, msg_id, bot_domains, specified_servers):
@@ -398,6 +399,8 @@ def cmpinglist_command(bot, accid, event):
         return _format_ping_entry(idx, domain) + f" · {cmcall_monitor.server_badge(domain)}"
 
     def _format_ping_entry(idx, domain):
+        fl = relaygeo.flag(domain)
+        label = f"{domain} {fl}" if fl else domain
         avg_ping, count = database.get_average_ping_for_server(domain, limit=100)
         if avg_ping is not None:
             if avg_ping < 2000:
@@ -409,10 +412,10 @@ def cmpinglist_command(bot, accid, event):
             else:
                 circle = "🔴"
 
-            return f"  {idx}. {domain}: {circle} {avg_ping:.1f} ms (🏓 {count})"
+            return f"  {idx}. {label}: {circle} {avg_ping:.1f} ms (🏓 {count})"
 
         else:
-            return f"  {idx}. {domain}: ⚪️ no data"
+            return f"  {idx}. {label}: ⚪️ no data"
 
 
     if bot_domains:

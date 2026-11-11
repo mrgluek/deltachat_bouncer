@@ -268,9 +268,10 @@ class TestCommands(MonitorTestBase):
             mon.cmcallunskip_command(self.bot, 1, event)
         self.assertEqual(database.get_cmcall_skipped(), [])
 
+    @patch("cmping_commands.relaygeo.flag", return_value="")
     @patch("cmping_commands.dc_helpers._send")
     @patch("cmping_commands.dc_helpers._get_bot_domains", return_value=["a.example"])
-    def test_cmpinglist_shows_call_badges(self, _domains, send):
+    def test_cmpinglist_shows_call_badges(self, _domains, send, _flag):
         self.cycle({("a.example", "c.example"): fail(stage="setup", callee_turn="none")})
         event = MagicMock()
         cmping_commands.cmpinglist_command(self.bot, 1, event)

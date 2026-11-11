@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.49.0] - 2026-11-11
+
+### Added
+- **Country Flags in `/cmpinglist`**: each server shows the flag of the country of its first IP address (ipinfo.io, RIPEstat as a fallback). The answer never waits for the network: flags come from a cache kept in the database for a day; a missing or older entry starts one background lookup (a stale flag stays visible meanwhile, a failed lookup is retried after an hour), so a newly added server shows its flag from the next `/cmpinglist`.
+
 ## [2.48.0] - 2026-11-11
 
 ### Added
