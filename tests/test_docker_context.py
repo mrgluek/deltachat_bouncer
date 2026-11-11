@@ -43,7 +43,8 @@ class TestDockerContext(unittest.TestCase):
         paths.extend(str(path.relative_to(ROOT)) for path in ROOT.glob("*.py"))
         for directory in ("web", "static"):
             paths.extend(str(path.relative_to(ROOT)) for path in (ROOT / directory).rglob("*")
-                         if path.is_file())
+                         if path.is_file() and "__pycache__" not in path.parts
+                         and path.suffix not in (".pyc", ".pyo"))  # compiled files are excluded on purpose
         for path in paths:
             with self.subTest(path=path):
                 self.assertFalse(self.excluded(path), path)
