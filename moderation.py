@@ -4,6 +4,7 @@ and their /autokick, /kick and /top command handlers.
 """
 import re
 import time
+import threading
 from datetime import datetime
 
 from deltachat2 import events
@@ -404,6 +405,12 @@ def _background_monitor_loop(bot, accid):
     time.sleep(10) # Wait for bot to connect and sync
     while True:
         try:
+            # Reconcile bans on startup (after sync) and each hour, including unknown contact IDs.
+            try:
+                ban_sweep(bot, accid)
+            except Exception as ban_err:
+                config.logger.warning(f"Ban sweep failed: {ban_err}")
+
             try:
                 chats = bot.rpc.get_chatlist_entries(accid, None, None, None)
                 config.logger.info(f"Background check: tracking {len(chats)} chats")
@@ -435,12 +442,6 @@ def _background_monitor_loop(bot, accid):
                 except Exception as e:
                     config.logger.error(f"Error checking chat {chat_id} in background monitor: {e}")
             
-            # Banned people that got back into a group (known by contact id; /ban did the deep scan)
-            try:
-                ban_sweep(bot, accid)
-            except Exception as ban_err:
-                config.logger.warning(f"Ban sweep failed: {ban_err}")
-
             # Refresh member counts for all catalog chats and channels
             _refresh_catalog_member_counts(bot, accid)
 
@@ -890,6 +891,12 @@ def kick_command(bot, accid, event):
 # ── /ban, /unban: people kept out of every group the bot is in ──
 
 BAN_CHAT_TYPES = {"Group"}
+BAN_RESOLVE_LIMIT = 64
+BAN_JOIN_RETRY_SECONDS = 5
+_ban_fingerprint_cache: dict[tuple[int, int], list[str]] = {}
+_ban_scan_offset: dict[int, int] = {}
+_ban_retry_pending: set[tuple[int, int, int | None]] = set()
+_ban_lock = threading.RLock()
 _FP_TOKEN_RE = re.compile(r"^(?:[0-9A-F]{40}|[0-9A-F]{64})$")
 
 
@@ -903,9 +910,9 @@ def _fingerprints(bot, accid, contact_id) -> list[str]:
     return [x.strip() for x in (fp or "").upper().split(",") if x.strip()]
 
 
-def _group_chat_ids(bot, accid) -> list[int]:
+def _group_chat_ids(bot, accid, chat_ids=None) -> list[int]:
     try:
-        chats = bot.rpc.get_chatlist_entries(accid, None, None, None)
+        chats = chat_ids if chat_ids is not None else bot.rpc.get_chatlist_entries(accid, None, None, None)
     except Exception as e:
         config.logger.error(f"get_chatlist_entries failed in ban sweep: {e}")
         return []
@@ -932,52 +939,107 @@ def _remove_from(bot, accid, chat_id, contact_id) -> bool:
         return False
 
 
-def ban_sweep(bot, accid, deep_fps: set | None = None) -> int:
-    """Remove banned people from every group; returns how many removals were made.
+def ban_sweep(bot, accid, deep_fps: set | None = None, chat_ids=None) -> int:
+    """Reconcile group members, caching resolved keys for the process lifetime.
 
-    Without ``deep_fps`` only contacts remembered by id are checked (cheap, for the hourly
-    run). With a set of fingerprints, every member of every group is looked up and compared,
-    and the id of each match is remembered. A group where the bot cannot remove is skipped.
+    Periodic scans resolve at most BAN_RESOLVE_LIMIT uncached contacts per run, rotating
+    past unresolved contacts. Explicit /ban and bot-join scans check the whole group.
     """
     banned = database.get_all_banned()
     if not banned:
         return 0
     known_ids = {b["contact_id"] for b in banned if b["contact_id"]}
-    cache: dict[int, list[str]] = {}
-    removed = 0
-    for chat_id in _group_chat_ids(bot, accid):
+    fps = deep_fps if deep_fps is not None else {b["fingerprint"] for b in banned}
+    groups = _group_chat_ids(bot, accid, chat_ids)
+    memberships = {}
+    for chat_id in groups:
         try:
-            members = bot.rpc.get_chat_contacts(accid, chat_id)
+            memberships[chat_id] = list(bot.rpc.get_chat_contacts(accid, chat_id))
         except Exception:
             continue
+    contacts = list(dict.fromkeys(cid for members in memberships.values() for cid in members
+                                 if cid > 9 and cid != config.DC_CONTACT_ID_SELF))
+    with _ban_lock:
+        pending = [cid for cid in contacts if cid not in known_ids and (accid, cid) not in _ban_fingerprint_cache]
+        offset = _ban_scan_offset.get(accid, 0) % len(pending) if pending else 0
+        pending = pending[offset:] + pending[:offset]
+        limit = len(pending) if deep_fps is not None else BAN_RESOLVE_LIMIT
+        selected = pending[:limit]
+        _ban_scan_offset[accid] = offset + len(selected)
+    for cid in selected:
+        resolved = _fingerprints(bot, accid, cid)
+        if resolved:
+            with _ban_lock:
+                _ban_fingerprint_cache[accid, cid] = resolved
+    with _ban_lock:
+        cached = {cid: _ban_fingerprint_cache.get((accid, cid), []) for cid in contacts}
+    for cid, resolved in cached.items():
+        for fp in resolved:
+            if fp in fps:
+                database.add_banned_fingerprint(fp, contact_id=cid)
+                known_ids.add(cid)
+    removed = 0
+    for chat_id, members in memberships.items():
         for cid in members:
-            if cid <= 9 or cid == config.DC_CONTACT_ID_SELF:
-                continue
-            hit = cid in known_ids
-            if not hit and deep_fps:
-                if cid not in cache:
-                    cache[cid] = _fingerprints(bot, accid, cid)
-                for fp in cache[cid]:
-                    if fp in deep_fps:
-                        hit = True
-                        database.add_banned_fingerprint(fp, contact_id=cid)
-                        known_ids.add(cid)
-            if hit and not dc_helpers._is_dc_admin(bot, accid, cid) and _remove_from(bot, accid, chat_id, cid):
-                removed += 1
+            if cid > 9 and cid != config.DC_CONTACT_ID_SELF and cid in known_ids:
+                if not dc_helpers._is_dc_admin(bot, accid, cid) and _remove_from(bot, accid, chat_id, cid):
+                    removed += 1
     return removed
 
 
-def enforce_ban_on_join(bot, accid, chat_id, contact_id) -> bool:
-    """Called when a member was added: remove them again if their key is banned."""
-    if not contact_id or contact_id <= 9 or contact_id == config.DC_CONTACT_ID_SELF:
+def _retry_ban_join(bot, accid, chat_id, contact_id):
+    key = (accid, chat_id, contact_id)
+    with _ban_lock:
+        if key in _ban_retry_pending:
+            return
+        _ban_retry_pending.add(key)
+
+    def retry():
+        try:
+            enforce_ban_on_join(bot, accid, chat_id, contact_id, _retry=False)
+        except Exception as e:
+            config.logger.warning(f"Delayed ban check failed in chat {chat_id}: {e}")
+        finally:
+            with _ban_lock:
+                _ban_retry_pending.discard(key)
+
+    timer = threading.Timer(BAN_JOIN_RETRY_SECONDS, retry)
+    timer.daemon = True
+    timer.start()
+
+
+def enforce_ban_on_join(bot, accid, chat_id, contact_id, _retry=True) -> bool:
+    """Check joins (including the bot's own), retrying a missing identity once."""
+    if not database.count_banned():
         return False
-    if not database.get_all_banned(1):
+    info = bot.rpc.get_basic_chat_info(accid, chat_id)
+    ctype = info.get("chat_type", "Single") if isinstance(info, dict) else getattr(info, "chat_type", "Single")
+    if str(ctype) not in BAN_CHAT_TYPES:
         return False
-    for fp in _fingerprints(bot, accid, contact_id):
+    if contact_id == config.DC_CONTACT_ID_SELF:
+        fps = {b["fingerprint"] for b in database.get_all_banned()}
+        ban_sweep(bot, accid, deep_fps=fps, chat_ids=[chat_id])
+        return False
+    if not contact_id:
+        if _retry:
+            _retry_ban_join(bot, accid, chat_id, None)
+        else:
+            ban_sweep(bot, accid, chat_ids=[chat_id])
+        return False
+    if contact_id <= 9:
+        return False
+    fps = _fingerprints(bot, accid, contact_id)
+    if not fps:
+        if _retry:
+            _retry_ban_join(bot, accid, chat_id, contact_id)
+        return False
+    with _ban_lock:
+        _ban_fingerprint_cache[accid, contact_id] = fps
+    for fp in fps:
         if database.is_fingerprint_banned(fp):
             if dc_helpers._is_dc_admin(bot, accid, contact_id):
                 return False
-            database.add_banned_fingerprint(fp, contact_id=contact_id)  # remembers the id
+            database.add_banned_fingerprint(fp, contact_id=contact_id)
             config.logger.info(f"Banned contact {contact_id} joined chat {chat_id}: removing")
             return _remove_from(bot, accid, chat_id, contact_id)
     return False
@@ -1047,14 +1109,17 @@ def _ban_targets(bot, accid, msg, payload):
 
 
 def _ban_list_text() -> str:
-    banned = database.get_all_banned()
+    banned = database.get_all_banned(1000)
+    total = database.count_banned()
     if not banned:
         return "🚫 The ban list is empty."
     lines = []
     for b in banned:
         who = f"**{b['name']}** ({b['addr']}) " if (b["name"] or b["addr"]) else ""
         lines.append(f"• {who}`{b['fingerprint'][:8]}…{b['fingerprint'][-8:]}`")
-    return f"🚫 **Banned ({len(banned)}):**\n" + "\n".join(lines) + "\n\n`/unban <address|ID|fingerprint start>` lifts a ban."
+    if total > len(banned):
+        lines.append(f"… and {total - len(banned)} more")
+    return f"🚫 **Banned ({total}):**\n" + "\n".join(lines) + "\n\n`/unban <address|ID|fingerprint start>` lifts a ban."
 
 
 @config.dc_cli.on(events.NewMessage(command="/ban"))

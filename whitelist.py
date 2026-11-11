@@ -63,10 +63,17 @@ LABEL = "📶 RU mobile whitelist"
 _lock = threading.Lock()   # guards the dicts below
 # kind -> parsed list: "ip" {"nets": {prefixlen: {network int}}, "starts", "ends", "count"},
 # "domain" {"names": set, "count"}
+_generation = 0
 _data: dict[str, dict] = {}
 _loaded_at: dict[str, float] = {}
 _next_try: dict[str, float] = {}
 _loading: dict[str, threading.Thread] = {}   # kind -> its running download
+
+
+def generation() -> int:
+    """Changes whenever a whitelist is loaded or its switch is changed."""
+    with _lock:
+        return _generation
 
 
 def _env(kind: str) -> str:
@@ -161,6 +168,7 @@ def parse_domains(text: str) -> dict:
 
 def _load(kind: str):
     """Download and parse one list (in its own thread)."""
+    global _generation
     started = time.time()
     url = _url(kind)
     config.logger.info(f"RU whitelist: downloading {url}")
@@ -169,6 +177,7 @@ def _load(kind: str):
     with _lock:
         if new and new["count"]:
             _data[kind], _loaded_at[kind] = new, started
+            _generation += 1
         else:
             _next_try[kind] = time.time() + RETRY_SECONDS
         _loading.pop(kind, None)
@@ -381,6 +390,7 @@ def _status_line(kind: str) -> str:
 
 def command_reply(payload: str) -> str:
     """Apply ``/ruwhitelist [ip|domains] [on|off]`` and describe the state."""
+    global _generation
     words = (payload or "").lower().split()
     usage = "Usage: /ruwhitelist [ip|domains] [on|off]"
     kinds = list(LISTS)
@@ -390,7 +400,11 @@ def command_reply(payload: str) -> str:
         return usage
     if words:
         for kind in kinds:
+            previous = setting(kind)
             database.set_config(f"ru_whitelist_{kind}", words[0])
+            if previous != words[0]:
+                with _lock:
+                    _generation += 1
         _clear_report_caches()
     lines = ["📶 **RU mobile whitelist checks** (/ip, /dns)"]
     lines += [_status_line(k) for k in LISTS]
