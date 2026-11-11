@@ -140,6 +140,13 @@ async def handle_ap_inbox(request):
     # Fetch remote public key with Authorized Fetch support
     pub_pem, key_doc = await activitypub.resolve_public_key(key_id, sign_as_token=token, base_url=base_url)
     if not pub_pem:
+        # A deleted or suspended account sends its Delete signed with a key that is gone too.
+        # Followers are removed only when the actor's own server confirms it with 410 Gone.
+        if act_type == "Delete" and await activitypub.is_actor_gone(activity_actor, activity.get("object")):
+            removed = database.remove_ap_followers_by_actor(activity_actor)
+            config.logger.info(f"Delete from gone AP actor {activity_actor} (HTTP 410), "
+                               f"removed {removed} follower record(s)")
+            return web.Response(status=202, text="Accepted")
         config.logger.warning(f"Could not resolve remote actor public key for {key_id}")
         return web.Response(status=401, text="Could not resolve remote actor public key")
 

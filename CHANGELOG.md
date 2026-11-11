@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.53.1] - 2026-11-11
+
+### Fixed
+- **Delete from deleted or suspended Fediverse accounts**: since 2.53.0 such a `Delete` (its key is gone, so no signature can be checked) was answered with 401 and the account's followers stayed in the database. Now the bot asks the actor's own server about the actor, and when that answers HTTP 410 Gone for a self-delete, the followers are removed and the Delete is accepted. The status of the sender's key URL is still ignored, so a forged Delete cannot remove a living actor's followers (a live actor answers 200, 403, 404 or an error and nothing is removed).
+
 ## [2.53.0] - 2026-11-11
 
 Security and reliability release: the fixes of a full code audit.

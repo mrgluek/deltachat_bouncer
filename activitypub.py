@@ -1010,6 +1010,23 @@ async def _fetch_remote_actor(actor_id: str, use_cache: bool = True,
         return None
 
 
+async def is_actor_gone(actor_id: str, deleted_object=None) -> bool:
+    """True when the actor deleted itself and its own server answers HTTP 410 Gone for it.
+
+    A Delete from a deleted or suspended account cannot be verified by signature (its key is
+    gone too). So that nobody can remove another actor's followers with a forged Delete, the
+    answer is not taken from the sender's key URL but from our own request for the actor URL:
+    a live actor answers 200 (or 403 / 404 / 5xx), and then nothing is removed."""
+    if isinstance(deleted_object, dict):
+        deleted_object = deleted_object.get('id') or deleted_object.get('url')
+    if deleted_object not in (None, '', actor_id):
+        return False  # a Delete of some other object proves nothing about the actor
+    actor_id = actor_id.split('#')[0]
+    _last_fetch_status.pop(actor_id, None)  # only the answer to this very request counts
+    await fetch_remote_actor(actor_id, use_cache=False)
+    return _last_fetch_status.get(actor_id) == 410
+
+
 async def resolve_public_key(key_id: str, sign_as_token: str | None = None,
                              base_url: str | None = None) -> tuple[str | None, dict | None]:
     """Resolve public key PEM from a keyId URL.

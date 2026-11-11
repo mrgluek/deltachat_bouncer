@@ -934,16 +934,61 @@ class TestActivityPub(unittest.TestCase):
         }
         req.read = AsyncMock(return_value=body_bytes)
 
+        def actor_answers(status):
+            async def fetch(actor, use_cache=True, **kwargs):
+                activitypub._last_fetch_status[actor] = status
+                return None
+            return fetch
+
+        # The sender's key URL says "gone": that alone proves nothing
         for status in (403, 404, 410):
-            with self.subTest(status=status):
+            with self.subTest(key_status=status):
                 activitypub.reset_signature_replay_cache()
                 activitypub._last_fetch_status[key_id] = status
-                activitypub._last_fetch_status[actor_id] = status
-                with patch("activitypub.resolve_public_key", new_callable=AsyncMock) as mock_resolve:
+                with patch("activitypub.resolve_public_key", new_callable=AsyncMock) as mock_resolve, \
+                        patch("activitypub.fetch_remote_actor", new=actor_answers(200)):
                     mock_resolve.return_value = (None, None)
                     resp = asyncio.run(pw_ap_routes.handle_ap_inbox(req))
                     self.assertEqual(resp.status, 401)
                     self.assertEqual(database.get_ap_followers_count(token), 1)
+
+        # Our own request for the actor: only 410 Gone from the actor's server counts
+        for status in (200, 403, 404, 500):
+            with self.subTest(actor_status=status):
+                activitypub.reset_signature_replay_cache()
+                with patch("activitypub.resolve_public_key", new_callable=AsyncMock) as mock_resolve, \
+                        patch("activitypub.fetch_remote_actor", new=actor_answers(status)):
+                    mock_resolve.return_value = (None, None)
+                    resp = asyncio.run(pw_ap_routes.handle_ap_inbox(req))
+                    self.assertEqual(resp.status, 401)
+                    self.assertEqual(database.get_ap_followers_count(token), 1)
+
+        # No answer at all (unsafe URL, no session, timeout): a stale status must not count
+        activitypub._last_fetch_status[actor_id] = 410
+        activitypub.reset_signature_replay_cache()
+        with patch("activitypub.resolve_public_key", new_callable=AsyncMock) as mock_resolve, \
+                patch("activitypub.fetch_remote_actor", new_callable=AsyncMock) as mock_fetch:
+            mock_resolve.return_value = (None, None)
+            mock_fetch.return_value = None
+            resp = asyncio.run(pw_ap_routes.handle_ap_inbox(req))
+            self.assertEqual(resp.status, 401)
+            self.assertEqual(database.get_ap_followers_count(token), 1)
+
+        # 410 Gone from the actor's own server: its followers are removed
+        activitypub.reset_signature_replay_cache()
+        with patch("activitypub.resolve_public_key", new_callable=AsyncMock) as mock_resolve, \
+                patch("activitypub.fetch_remote_actor", new=actor_answers(410)):
+            mock_resolve.return_value = (None, None)
+            resp = asyncio.run(pw_ap_routes.handle_ap_inbox(req))
+            self.assertEqual(resp.status, 202)
+            self.assertEqual(database.get_ap_followers_count(token), 0)
+
+    def test_delete_of_another_object_never_removes_followers(self):
+        actor_id = "https://remote.social/ap/users/1"
+        with patch("activitypub.fetch_remote_actor", new_callable=AsyncMock) as mock_fetch:
+            self.assertFalse(asyncio.run(activitypub.is_actor_gone(actor_id, "https://remote.social/ap/users/2")))
+            self.assertFalse(asyncio.run(activitypub.is_actor_gone(actor_id, {"id": "https://remote.social/notes/1"})))
+            mock_fetch.assert_not_called()
 
     def test_signature_requires_signed_target_and_body_digest(self):
         from cryptography.hazmat.primitives import serialization, hashes
