@@ -12,6 +12,7 @@ import os
 import threading
 
 import database
+from ttl_cache import TTLCache
 
 dc_bot_instance = None
 dc_accid = None
@@ -137,8 +138,8 @@ _pending_delayed_commands: dict[str, tuple[threading.Timer, list[int]]] = {}
 _pending_delayed_lock = threading.Lock()
 
 # Channel web-preview caches
-_channel_preview_cache: dict[str, tuple[float, str, str]] = {}  # key -> (expires_at, etag, html)
-_channel_rss_cache: dict[str, tuple[float, str, str]] = {}  # key -> (expires_at, etag, rss_xml)
+_channel_preview_cache = TTLCache()  # key -> (expires_at, etag, html)
+_channel_rss_cache = TTLCache()  # key -> (expires_at, etag, rss_xml)
 _qr_cache: dict[str, tuple[bytes, str]] = {}  # key -> (bytes, content_type)
 
 

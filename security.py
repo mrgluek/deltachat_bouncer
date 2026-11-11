@@ -120,6 +120,18 @@ def _guess_media_content_type(filepath: str) -> str:
 SAFE_HOST_REGEX = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9.\-]*[a-zA-Z0-9])?(:\d{1,5})?$')
 
 
+_INGRESS_PATH_REGEX = re.compile(r"/[A-Za-z0-9._~/-]{0,200}")
+
+
+def _get_ingress_path(request) -> str:
+    """Accept only a short absolute path, including Home Assistant ingress paths."""
+    path = request.headers.get("X-Ingress-Path", "")
+    if (not isinstance(path, str) or not _INGRESS_PATH_REGEX.fullmatch(path)
+            or "//" in path or any(part in (".", "..") for part in path.split("/"))):
+        return ""
+    return path
+
+
 def _get_base_url(request) -> str:
     """Resolve the base URL for web handlers with safe host and scheme validation."""
     base_url = database.get_config("base_url") or os.getenv("BASE_URL") or ""

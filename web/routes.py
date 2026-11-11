@@ -56,12 +56,8 @@ def invalidate_channel_cache(chat_id: int = None, token: str = None) -> None:
 
     for t in target_tokens:
         prefix = f"{t}:"
-        for k in list(state._channel_preview_cache.keys()):
-            if k.startswith(prefix):
-                state._channel_preview_cache.pop(k, None)
-        for k in list(state._channel_rss_cache.keys()):
-            if k.startswith(prefix):
-                state._channel_rss_cache.pop(k, None)
+        state._channel_preview_cache.remove_prefix(prefix)
+        state._channel_rss_cache.remove_prefix(prefix)
 
 
 def _generate_qr_bytes(link: str, fmt: str = "png", box_size: int = 6) -> tuple[bytes, str]:
@@ -332,7 +328,7 @@ async def handle_health(request):
 
 @security.rate_limited("index", max_requests=60, window_seconds=60)
 async def handle_index(request):
-    ingress_path = request.headers.get("X-Ingress-Path", "")
+    ingress_path = security._get_ingress_path(request)
     content = tpl_landing.get_landing_page_html(ingress_path=ingress_path)
     return web.Response(text=content, content_type="text/html", headers={"Cache-Control": "public, max-age=300"})
 
@@ -372,7 +368,7 @@ async def handle_channel_preview(request):
     if "application/activity+json" in accept or 'profile="https://www.w3.org/ns/activitystreams"' in accept:
         return await ap_routes.handle_ap_actor(request)
 
-    ingress_path = request.headers.get("X-Ingress-Path", "")
+    ingress_path = security._get_ingress_path(request)
     token = request.match_info.get('token')
 
     cache_key = f"{token}:{ingress_path}"
@@ -564,7 +560,7 @@ async def handle_channel_rss(request):
 @security.rate_limited("rss", max_requests=60, window_seconds=60)
 async def handle_channel_rss_redirect(request):
     token = request.match_info.get('token')
-    ingress_path = request.headers.get("X-Ingress-Path", "")
+    ingress_path = security._get_ingress_path(request)
     base_path = ingress_path.rstrip("/")
     raise web.HTTPFound(f"{base_path}/c/{token}/rss.xml")
 
@@ -672,7 +668,7 @@ async def handle_turn_test(request):
         "password": turn_names.FALLBACK_TURN_PASSWORD,
     }
     content = tpl_turn_test.get_turn_test_html(
-        ingress_path=request.headers.get("X-Ingress-Path", ""),
+        ingress_path=security._get_ingress_path(request),
         fallback=fallback, relays=relays, instance_domain=_instance_domain(),
     )
     return web.Response(text=content, content_type="text/html", headers={"Cache-Control": "no-store"})
