@@ -280,6 +280,21 @@ class TestCommands(MonitorTestBase):
         self.assertIn("c.example: ⚪️ no data · 📞➖ no TURN", text)
         self.assertIn("📞 Calls: checked every 60 min", text)
 
+    @patch("cmping_commands.dc_helpers._send")
+    @patch("cmping_commands.dc_helpers._get_bot_domains", return_value=["a.example", "b.example", "c.example"])
+    def test_cmpinglist_entry_format(self, _domains, send):
+        flags = {"a.example": "🇷🇺", "b.example": "🇩🇪", "c.example": ""}
+        averages = {"a.example": (1439.7, 100), "b.example": (870.0, 37), "c.example": (None, 0)}
+        with patch("cmping_commands.relaygeo.flag", side_effect=flags.get), \
+                patch("cmping_commands.database.get_average_ping_for_server", side_effect=lambda d, limit: averages[d]):
+            cmping_commands.cmpinglist_command(self.bot, 1, MagicMock())
+        text = send.call_args[0][3]
+        self.assertIn("1. 🇷🇺 a.example: 🟢 1.4s · ", text)    # flag before the name, seconds, no count at 100
+        self.assertNotIn("🏓 100", text)
+        self.assertIn("2. 🇩🇪 b.example: 🟢 0.9s (🏓 37) · ", text)  # fewer than 100 pings: count stays
+        self.assertIn("3. c.example: ⚪️ no data", text)
+        self.assertNotIn(" ms", text)
+
 
 if __name__ == "__main__":
     unittest.main()

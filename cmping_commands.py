@@ -400,7 +400,7 @@ def cmpinglist_command(bot, accid, event):
 
     def _format_ping_entry(idx, domain):
         fl = relaygeo.flag(domain)
-        label = f"{domain} {fl}" if fl else domain
+        label = f"{fl} {domain}" if fl else domain
         avg_ping, count = database.get_average_ping_for_server(domain, limit=100)
         if avg_ping is not None:
             if avg_ping < 2000:
@@ -412,7 +412,9 @@ def cmpinglist_command(bot, accid, event):
             else:
                 circle = "🔴"
 
-            return f"  {idx}. {label}: {circle} {avg_ping:.1f} ms (🏓 {count})"
+            # The average covers the last 100 pings; the count is only worth showing below that
+            seen = f" (🏓 {count})" if count < 100 else ""
+            return f"  {idx}. {label}: {circle} {avg_ping / 1000:.1f}s{seen}"
 
         else:
             return f"  {idx}. {label}: ⚪️ no data"
