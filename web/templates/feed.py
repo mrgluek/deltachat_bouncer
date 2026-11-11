@@ -84,6 +84,9 @@ def get_channel_rss_xml(channel: dict, posts: list[dict], base_url: str) -> str:
                 desc_parts.append(f'<p><a href="{media_url}">📎 Download {html.escape(media_fn)}</a></p>')
                 enclosure_tag = f'<enclosure url="{media_url}" length="{length_attr}" type="application/octet-stream" />'
 
+        if media_type == "skipped":
+            desc_parts.append("<p>📎 Attachment not stored</p>")
+
         full_desc = "\n".join(desc_parts)
         safe_post_title = _escape_cdata(post_title)
         safe_full_desc = _escape_cdata(full_desc)

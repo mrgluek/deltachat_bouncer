@@ -101,6 +101,9 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
                 elif media_type == "file":
                     media_html = f'<div class="post-media"><a href="{media_url}" download class="post-media-file">📎 Download {html.escape(media_fn)}</a></div>'
 
+            if media_type == "skipped":  # too large, over the storage limit, or the channel was removed
+                media_html = '<div class="post-media">📎 Attachment not stored</div>'
+
             msg_anchor_attr = f'id="post-{p.get("msg_id")}" ' if p.get("msg_id") else ''
             post_card = f"""
             <article {msg_anchor_attr}class="post-bubble post-card">

@@ -1230,6 +1230,17 @@ class TestWebPreview(unittest.TestCase):
         self.assertEqual(asyncio.run(pw_routes.handle_media_file(request)).status, 404)
         self.assertEqual(asyncio.run(pw_routes.handle_channel_avatar(request)).status, 404)
 
+    def test_skipped_attachment_is_noted_in_preview_and_rss(self):
+        token = database.add_catalog_channel(9407, 'Skipped', '', 1, '')
+        channel = database.get_catalog_channel_by_token(token)
+        posts = [{"msg_id": 5, "text": "", "from_name": "Owner", "timestamp": 1700000000.0,
+                  "media_type": "skipped", "media_filename": None, "media_path": None}]
+        html_out = pw_tpl_channel.get_channel_preview_html(channel, posts, "https://channels.example.com")
+        self.assertIn("Attachment not stored", html_out)
+        rss_xml = pw_tpl_feed.get_channel_rss_xml(channel, posts, "https://channels.example.com")
+        self.assertIn("Attachment not stored", rss_xml)
+        self.assertNotIn("<enclosure", rss_xml)
+
     def test_uploaded_active_content_is_downloaded_with_sandbox_headers(self):
         import asyncio
         token = database.add_catalog_channel(9406, 'Content', '', 1, '')
