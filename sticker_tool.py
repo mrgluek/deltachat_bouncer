@@ -10,6 +10,8 @@ import os
 import sys
 import argparse
 
+from image_limits import open_image
+
 
 def lower_priority() -> str:
     """Drop to idle CPU priority (Linux SCHED_IDLE, else nice 19).
@@ -51,7 +53,7 @@ def main():
         sys.exit(2)
 
     try:
-        with Image.open(args.src) as raw_img:
+        with open_image(args.src) as raw_img:
             try:
                 img = ImageOps.exif_transpose(raw_img)
             except Exception:

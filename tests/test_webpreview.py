@@ -131,6 +131,35 @@ def _file_response_path(resp) -> str:
 
 
 class TestWebPreview(unittest.TestCase):
+    def test_invite_links_escape_attributes_and_javascript(self):
+        import json
+        from html.parser import HTMLParser
+
+        class Attributes(HTMLParser):
+            def __init__(self, document):
+                super().__init__()
+                self.attrs = []
+                self.feed(document)
+            def handle_starttag(self, tag, attrs):
+                self.attrs.append(dict(attrs))
+
+        hostile = 'https://example.org/#\" onclick=\"alert(1)\"><script>alert(2)</script>\'&'
+        for link in (hostile, "dc:test", "openpgp4fpr:ABC", "OPEN-CHAT:ABC", "OPEN:ABC", "dcqr://ABC", "javascript:alert(1)", "data:text/html,<script>"):
+            with self.subTest(link=link), patch.object(state, "get_bot_invite_link", return_value=link):
+                pages = [pw_tpl_channel.get_channel_preview_html({"invite_link": link}, [], ""),
+                         pw_tpl_landing.get_landing_page_html(ingress_path="/test")]
+                from web.templates.invite import invite_url
+                safe = invite_url(link)
+                for page in pages:
+                    attrs = Attributes(page).attrs
+                    if safe:
+                        self.assertIn(safe, [a.get("href") for a in attrs])
+                        self.assertIn("copyJoinLink(this, " + json.dumps(safe) + ")", [a.get("onclick") for a in attrs])
+                    else:
+                        self.assertNotIn(link, page)
+                        self.assertFalse(any(a.get("onclick", "").startswith("copyJoinLink(") for a in attrs))
+                    self.assertNotIn('<script>alert(2)</script>', page)
+
     def setUp(self):
         database.close_db()
         database.DB_PATH = TEST_DB

@@ -4,6 +4,7 @@ import sys
 import tempfile
 import time
 import unittest
+from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -78,10 +79,10 @@ def _event(msg):
     return SimpleNamespace(msg=msg, command=parts[0] if parts else "", payload=parts[1] if len(parts) > 1 else "")
 
 
-def _sync_thread(target, args=(), daemon=True):
-    t = MagicMock()
-    t.start.side_effect = lambda: target(*args)
-    return t
+def _sync_submit(target, *args):
+    future = Future()
+    future.set_result(target(*args))
+    return future
 
 
 class FaqTestBase(unittest.TestCase):
@@ -98,6 +99,11 @@ class FaqTestBase(unittest.TestCase):
         self.media_dir = tempfile.mkdtemp(prefix="dc_test_faq_")
         self._orig_media = state.FAQ_MEDIA_DIR
         state.FAQ_MEDIA_DIR = os.path.join(self.media_dir, "faq")
+        faq._save_times.clear()
+        self.cooldown_patch = patch("faq.FAQ_SAVE_COOLDOWN_SECONDS", 0)
+        self.cooldown_patch.start()
+        self.addr_patch = patch("config.FAQ_BOT_ADDR", "faqbot@example.org")
+        self.addr_patch.start()
         state._faq_anti_spam.clear()
         state._faq_bot_cache.clear()
 
@@ -116,6 +122,8 @@ class FaqTestBase(unittest.TestCase):
 
     def tearDown(self):
         self.admin_patch.stop()
+        self.cooldown_patch.stop()
+        self.addr_patch.stop()
         state.FAQ_MEDIA_DIR = self._orig_media
         shutil.rmtree(self.media_dir, ignore_errors=True)
         database.close_db()
@@ -151,10 +159,12 @@ class TestTopics(unittest.TestCase):
         self.assertIsNotNone(faq.validate_tag("/rules"))
         self.assertIsNotNone(faq.validate_tag("x" * 101))
 
-    def test_faq_bot_needs_bot_flag(self):
-        self.assertTrue(faq._is_faq_bot_contact(_contact("FAQ Bot", is_bot=True)))
-        self.assertFalse(faq._is_faq_bot_contact(_contact("FAQ Bot", is_bot=False)))
-        self.assertFalse(faq._is_faq_bot_contact(_contact("Bouncer", is_bot=True)))
+    @patch("config.FAQ_BOT_ADDR", "faqbot@example.org")
+    def test_faq_bot_requires_configured_address(self):
+        self.assertTrue(faq._is_faq_bot_contact(SimpleNamespace(address="FAQBOT@EXAMPLE.ORG")))
+        self.assertFalse(faq._is_faq_bot_contact(_contact("FAQ Impostor", is_bot=True)))
+        with patch("config.FAQ_BOT_ADDR", ""):
+            self.assertFalse(faq._is_faq_bot_contact(_contact("FAQ Bot", is_bot=True)))
 
 
 class TestFaqDatabase(FaqTestBase):
@@ -184,6 +194,71 @@ class TestFaqDatabase(FaqTestBase):
 
 
 class TestSave(FaqTestBase):
+    def test_impersonator_cannot_enable_shadow_mode(self):
+        self.contacts[FAQ_BOT] = _contact("FAQ Impostor", is_bot=True)
+        self.members.append(FAQ_BOT)
+        self.save("rules", "original")
+        self.save("rules", "stolen", from_id=BOB)
+        self.assertEqual(database.get_faq_entry(CHAT, "rules")["text"], "original")
+        faq.remove_command(self.bot, 1, _event(_msg(300, "/remove rules", from_id=BOB)))
+        self.assertIsNotNone(database.get_faq_entry(CHAT, "rules"))
+
+    def test_topic_and_byte_quotas_allow_replacement(self):
+        with patch("faq.FAQ_MAX_TOPICS", 1):
+            self.save("one", "first")
+            self.save("two", "second")
+            self.assertIsNone(database.get_faq_entry(CHAT, "two"))
+            self.assertIn("topic limit", self.sent()[-1][0])
+            self.save("one", "updated")
+            self.assertEqual(database.get_faq_entry(CHAT, "one")["text"], "updated")
+        with patch("faq.FAQ_MAX_CHAT_BYTES", 15):
+            self.save("two", "éééé")
+            self.assertIsNone(database.get_faq_entry(CHAT, "two"))
+            self.assertIn("storage limit", self.sent()[-1][0])
+        self.save("two", "ok", from_id=BOB)
+        self.assertIsNotNone(database.get_faq_entry(CHAT, "two"))
+
+    def test_save_cooldown_per_sender(self):
+        with patch("faq.FAQ_SAVE_COOLDOWN_SECONDS", 3), patch("faq.time.monotonic", return_value=10):
+            self.save("one", "first")
+            self.save("two", "second")
+            self.assertIsNone(database.get_faq_entry(CHAT, "two"))
+            self.assertIn("wait", self.sent()[-1][0])
+            self.save("two", "second", from_id=BOB)
+            self.assertIsNotNone(database.get_faq_entry(CHAT, "two"))
+        with patch("faq.time.monotonic", return_value=14):
+            self.save("three", "third")
+            self.assertIsNotNone(database.get_faq_entry(CHAT, "three"))
+
+    def test_attachment_queue_is_bounded(self):
+        self.messages[100] = _msg(100, "", view_type="Image")
+        futures = []
+        def submit(*args):
+            future = Future()
+            futures.append(future)
+            return future
+        with patch("faq._save_executor.submit", side_effect=submit):
+            try:
+                for i in range(faq.FAQ_SAVE_WORKERS + faq.FAQ_SAVE_QUEUE_SIZE + 1):
+                    faq.save_command(self.bot, 1, _event(_msg(200+i, f"/save item{i}", quote_id=100)))
+                self.assertEqual(len(futures), faq.FAQ_SAVE_WORKERS + faq.FAQ_SAVE_QUEUE_SIZE)
+                self.assertIn("workers are busy", self.sent()[-1][0])
+            finally:
+                for future in futures:
+                    future.set_result(None)
+
+    @patch("faq._save_executor.submit", side_effect=_sync_submit)
+    def test_attachment_quota_cleans_copied_file(self, _submit):
+        src = os.path.join(self.media_dir, "source")
+        with open(src, "wb") as stream:
+            stream.write(b"x" * 20)
+        self.messages[100] = _msg(100, "", view_type="Image")
+        with patch("faq.FAQ_MAX_CHAT_BYTES", 10), patch("dc_helpers._get_msg_file_info", return_value={"path": src}):
+            faq.save_command(self.bot, 1, _event(_msg(200, "/save logo", quote_id=100)))
+        self.assertIsNone(database.get_faq_entry(CHAT, "logo"))
+        self.assertIn("storage limit", self.sent()[-1][0])
+        self.assertFalse(any(files for root, dirs, files in os.walk(state.FAQ_MEDIA_DIR)))
+
     def test_save_text(self):
         self.save("Rules", "Be nice, {name}")
         entry = database.get_faq_entry(CHAT, "rules")
@@ -214,7 +289,7 @@ class TestSave(FaqTestBase):
         self.save("rules", "v4", from_id=BOB, msg_id=203, answer_id=103)
         self.assertEqual(database.get_faq_entry(CHAT, "rules")["text"], "v4")
 
-    @patch("faq.threading.Thread", side_effect=_sync_thread)
+    @patch("faq._save_executor.submit", side_effect=_sync_submit)
     def test_save_attachment_copies_file(self, _thread):
         src_dir = tempfile.mkdtemp(dir=self.media_dir)
         src = os.path.join(src_dir, "blob123.png")
@@ -236,7 +311,7 @@ class TestSave(FaqTestBase):
         self.assertFalse(os.path.exists(entry["file_path"]))
         self.assertIsNone(database.get_faq_entry(CHAT, "logo")["file_path"])
 
-    @patch("faq.threading.Thread", side_effect=_sync_thread)
+    @patch("faq._save_executor.submit", side_effect=_sync_submit)
     def test_save_attachment_download_failure(self, _thread):
         self.messages[100] = _msg(100, "", from_id=BOB, view_type="Image")
         with patch("dc_helpers._get_msg_file_info", return_value=None):

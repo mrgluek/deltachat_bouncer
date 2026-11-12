@@ -118,8 +118,8 @@ def _is_public(obj) -> bool:
     if isinstance(obj, (ipaddress.IPv4Network, ipaddress.IPv6Network)):
         return obj.network_address.is_global and obj.broadcast_address.is_global
     if getattr(obj, "ipv4_mapped", None):  # ::ffff:1.2.3.4
-        return obj.ipv4_mapped.is_global
-    return obj.is_global
+        return _is_public(obj.ipv4_mapped)
+    return obj.is_global and not obj.is_multicast and not obj.is_reserved
 
 
 def parse_host(text: str) -> str | None:
@@ -634,8 +634,7 @@ def _format_host(host: str) -> str:
         return f"❌ {shown_host} does not resolve (no A / AAAA records, or DNS did not answer)."
     public = [a for a in addrs if _is_public(a)]
     if not public:
-        listed = ", ".join(a.compressed for a in addrs[:5])
-        return f"🔤 **{shown_host}** → {listed}\n❌ Only private or reserved addresses, nothing to look up."
+        return f"❌ **{shown_host}** resolves only to non-public addresses, nothing to look up."
     return (_format_ip(public[0], host=shown_host, others=public[1:])
             + f"\n💡 `/dns {shown_host}` — its DNS records · `/whois {shown_host}` — registration")
 

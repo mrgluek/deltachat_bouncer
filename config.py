@@ -175,6 +175,7 @@ NEWGROUP_COOLDOWN_SECONDS = 60  # /newgroup: at most one new group per minute pe
 FAQ_COOLDOWN_SECONDS = 30      # same FAQ topic (or the /faq list) at most once per 30s per chat
 FAQ_MAX_TAG_LENGTH = 100       # longer messages are never checked against FAQ topics
 FAQ_MAX_FILE_BYTES = 25 * 1024 * 1024  # largest attachment /save keeps a copy of
+FAQ_BOT_ADDR = os.getenv("FAQ_BOT_ADDR", "").strip()  # empty disables FAQ Bot recognition
 FAQ_BOT_CHECK_TTL = 60         # seconds to cache "is a FAQ Bot in this group"
 
 

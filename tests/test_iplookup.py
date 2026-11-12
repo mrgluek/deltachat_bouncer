@@ -369,11 +369,27 @@ class TestHostLookup(unittest.TestCase):
             text = iplookup.lookup("host", "example.org")
         self.assertIn("behind a CDN (Cloudflare)", text)
 
+    def test_mixed_host_hides_non_public_addresses(self):
+        addrs = [ipaddress.ip_address(a) for a in ("8.8.8.8", "10.1.2.3", "127.0.0.1", "169.254.1.2", "::1", "fe80::1", "224.0.0.1", "ff02::1", "::ffff:10.1.2.3", "::ffff:224.0.0.1")]
+        with patch.object(iplookup, "resolve", return_value=addrs), patch.object(iplookup, "_format_ip", return_value="public result") as render:
+            text = iplookup._format_host("example.org")
+        self.assertEqual(render.call_args.kwargs["others"], [])
+        self.assertEqual(render.call_args.args[0], addrs[0])
+        for address in addrs[1:]:
+            self.assertNotIn(str(address), text)
+        with patch.object(iplookup, "resolve", return_value=addrs[1:]):
+            text = iplookup._format_host("example.org")
+        self.assertIn("only to non-public", text)
+        for address in addrs[1:]:
+            self.assertNotIn(str(address), text)
+
     def test_host_not_resolving_or_private(self):
         with patch.object(iplookup.socket, "getaddrinfo", side_effect=socket.gaierror):
             self.assertIn("does not resolve", iplookup.lookup("host", "nope.invalid"))
         with patch.object(iplookup.socket, "getaddrinfo", return_value=[(0, 0, 0, "", ("10.1.2.3", 0))]):
-            self.assertIn("Only private or reserved", iplookup.lookup("host", "intranet.example.org"))
+            text = iplookup.lookup("host", "intranet.example.org")
+            self.assertIn("only to non-public addresses", text)
+            self.assertNotIn("10.1.2.3", text)
 
 
 class TestIpCommand(unittest.TestCase):

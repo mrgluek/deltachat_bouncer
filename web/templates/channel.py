@@ -1,10 +1,12 @@
 """Channel web-preview page HTML (the /c/<token> route)."""
 import html
+import json
 import time
 import urllib.parse
 
 import formatting
 from web.templates import theme
+from web.templates.invite import invite_url
 from config import VERSION
 
 def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, ingress_path: str = "") -> str:
@@ -18,13 +20,9 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
         subscribers_pill = '<div class="subscribers-pill">📢 Channel</div>'
     invite_link = channel.get("invite_link") or ""
 
-    join_link = invite_link
-    if invite_link.startswith("OPEN-CHAT:"):
-        join_link = "https://i.delta.chat/#" + invite_link[10:]
-    elif invite_link.startswith("OPEN:"):
-        join_link = "https://i.delta.chat/#" + invite_link[5:]
-    elif invite_link.startswith("dcqr://"):
-        join_link = "https://i.delta.chat/#" + invite_link[7:]
+    join_link = invite_url(invite_link)
+    join_attr = html.escape(join_link, quote=True)
+    join_js = html.escape(json.dumps(join_link), quote=True)
 
     base_path = ingress_path.rstrip("/")
     ch_name_esc = html.escape(ch_name)
@@ -37,7 +35,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
     home_url = f"{base_path}/" if base_path else "/"
 
     if join_link:
-        actions_buttons_html = f"""<a href="{join_link}" class="btn btn-primary"><span>🗨️</span> Open in Delta Chat</a>
+        actions_buttons_html = f"""<a href="{join_attr}" class="btn btn-primary"><span>🗨️</span> Open in Delta Chat</a>
                 <button onclick="openQrModal()" class="btn btn-secondary"><span>📱</span> Show QR Code</button>"""
         qr_modal_html = f"""
     <div id="qr-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="qr-modal-title" onclick="if(event.target === this) closeQrModal()">
@@ -46,7 +44,7 @@ def get_channel_preview_html(channel: dict, posts: list[dict], base_url: str, in
             <p style="font-size: 0.9rem; color: var(--text-muted);">Scan this QR code with the Delta Chat camera to join <strong>{ch_name_esc}</strong>.</p>
             <img src="{qr_img_url}" alt="Channel Join QR Code" />
             <div style="display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap;">
-                <button class="close-btn" id="qr-copy-btn" onclick="copyJoinLink(this, '{join_link}')">Copy Link</button>
+                <button class="close-btn" id="qr-copy-btn" onclick="copyJoinLink(this, {join_js})">Copy Link</button>
                 <button class="close-btn" id="qr-close-btn" onclick="closeQrModal()">Close</button>
             </div>
         </div>

@@ -333,6 +333,39 @@ class TestStickerCommands(unittest.TestCase):
             mock_queue.assert_called_once()
             self.assertEqual(mock_queue.call_args[0][3], "sticker")
 
+    def test_image_limits_before_decoding(self):
+        import warnings
+        import image_limits
+        image = MagicMock()
+        image.size = (6000, 5000)
+        pil = MagicMock()
+        pil.Image.DecompressionBombWarning = type("DecompressionBombWarning", (Warning,), {})
+        pil.Image.DecompressionBombError = type("DecompressionBombError", (Exception,), {})
+        pil.Image.open.return_value.__enter__.return_value = image
+        with patch.dict(sys.modules, {"PIL": pil}), patch("image_limits.os.path.getsize", return_value=1):
+            ok, error = stickers.convert_to_sticker_webp("image", "out.webp")
+            self.assertFalse(ok)
+            self.assertIn("dimensions", error)
+            image.load.assert_not_called()
+            self.assertFalse(stickers._optimize_image_to_webp("image", "out.webp"))
+            with patch("image_limits.os.path.getsize", return_value=image_limits.MAX_IMAGE_BYTES+1):
+                pil.Image.open.reset_mock()
+                ok, error = stickers.convert_to_sticker_webp("image", "out.webp")
+                self.assertFalse(ok)
+                self.assertIn("too large", error)
+                pil.Image.open.assert_not_called()
+            for bomb in (pil.Image.DecompressionBombWarning, pil.Image.DecompressionBombError):
+                with self.subTest(bomb=bomb):
+                    if issubclass(bomb, Warning):
+                        def warn(*args):
+                            warnings.warn("Image too large", bomb)
+                        pil.Image.open.side_effect = warn
+                    else:
+                        pil.Image.open.side_effect = bomb("Image too large")
+                    ok, error = stickers.convert_to_sticker_webp("image", "out.webp")
+                    self.assertFalse(ok)
+                    self.assertIn("Image too large", error)
+
     def test_convert_to_sticker_webp_resizing(self):
         """Test proportional resize logic and WebP output with PIL mock."""
         mock_raw_img = MagicMock()
@@ -347,6 +380,7 @@ class TestStickerCommands(unittest.TestCase):
 
         mock_pil = MagicMock()
         mock_pil_image = MagicMock()
+        mock_pil_image.DecompressionBombWarning = type("DecompressionBombWarning", (Warning,), {})
         mock_pil_imageops = MagicMock()
         mock_pil_imageops.exif_transpose.side_effect = lambda im: im
         mock_pil.Image = mock_pil_image
@@ -354,7 +388,7 @@ class TestStickerCommands(unittest.TestCase):
 
         mock_pil_image.open.return_value.__enter__.return_value = mock_raw_img
 
-        with patch.dict("sys.modules", {"PIL": mock_pil, "PIL.Image": mock_pil_image, "PIL.ImageOps": mock_pil_imageops}):
+        with patch("image_limits.os.path.getsize", return_value=100), patch.dict("sys.modules", {"PIL": mock_pil, "PIL.Image": mock_pil_image, "PIL.ImageOps": mock_pil_imageops}):
             dest_file = os.path.join(self.temp_test_dir, "out.webp")
             success, err = stickers.convert_to_sticker_webp("dummy.jpg", dest_file, remove_bg=False, max_dim=512)
 
@@ -465,6 +499,7 @@ class TestStickerCommands(unittest.TestCase):
 
         mock_pil = MagicMock()
         mock_pil_image = MagicMock()
+        mock_pil_image.DecompressionBombWarning = type("DecompressionBombWarning", (Warning,), {})
         mock_pil_imageops = MagicMock()
         mock_pil_imageops.exif_transpose.side_effect = lambda im: im
         mock_pil.Image = mock_pil_image
@@ -486,7 +521,7 @@ class TestStickerCommands(unittest.TestCase):
             "PIL.ImageOps": mock_pil_imageops,
             "rembg": mock_rembg,
             "onnxruntime": mock_ort,
-        }), patch.object(sys, "argv", ["sticker_tool.py", "in.jpg", "out.webp", "--nobg", "--max-dim=512"]), \
+        }), patch("image_limits.os.path.getsize", return_value=100), patch.object(sys, "argv", ["sticker_tool.py", "in.jpg", "out.webp", "--nobg", "--max-dim=512"]), \
                 patch.object(sticker_tool, "lower_priority") as mock_prio:  # don't idle the test process
             with self.assertRaises(SystemExit) as cm:
                 sticker_tool.main()

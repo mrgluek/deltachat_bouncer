@@ -8,6 +8,8 @@ import tempfile
 import threading
 import time
 
+from image_limits import open_image
+
 from deltachat2 import events, MsgData
 
 import config
@@ -19,7 +21,7 @@ def _optimize_image_to_webp(src_path: str, dest_path: str, max_dim: int = 1600, 
     """Optimize image to WebP with dimension scaling. Returns True on success, False on failure."""
     try:
         from PIL import Image, ImageOps
-        with Image.open(src_path) as img:
+        with open_image(src_path) as img:
             try:
                 img = ImageOps.exif_transpose(img)
             except Exception:
@@ -85,7 +87,7 @@ def convert_to_sticker_webp(src_path: str, dest_path: str, remove_bg: bool = Fal
         return False, "Pillow library is not installed."
 
     try:
-        with Image.open(src_path) as raw_img:
+        with open_image(src_path) as raw_img:
             try:
                 img = ImageOps.exif_transpose(raw_img)
             except Exception:

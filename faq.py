@@ -22,6 +22,7 @@ import shutil
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from deltachat2 import events
 
@@ -29,6 +30,17 @@ import config
 import database
 import dc_helpers
 import state
+
+FAQ_MAX_TOPICS = 100
+FAQ_MAX_CHAT_BYTES = 100 * 1024 * 1024
+FAQ_SAVE_COOLDOWN_SECONDS = 3
+FAQ_SAVE_WORKERS = 2
+FAQ_SAVE_QUEUE_SIZE = 4
+
+_save_executor = ThreadPoolExecutor(max_workers=FAQ_SAVE_WORKERS, thread_name_prefix="faq-save")
+_save_slots = threading.BoundedSemaphore(FAQ_SAVE_WORKERS + FAQ_SAVE_QUEUE_SIZE)
+_save_lock = threading.RLock()
+_save_times = {}
 
 SAVE_USAGE = (
     "Reply to a message with `/save <topic>` to save it as the answer to that topic.\n"
@@ -88,15 +100,9 @@ def render_answer(text: str, chat_id: int, name: str) -> str:
 # ── FAQ Bot detection ──
 
 def _is_faq_bot_contact(contact) -> bool:
-    # Require the bot flag: a human renaming themselves "FAQ Bot" must not be
-    # able to switch our FAQ off.
-    if getattr(contact, "is_bot", False) is not True:
-        return False
-    for attr in ("display_name", "name", "auth_name"):
-        value = getattr(contact, attr, None)
-        if isinstance(value, str) and "faq" in value.lower():
-            return True
-    return False
+    address = getattr(contact, "address", None)
+    return bool(config.FAQ_BOT_ADDR and isinstance(address, str)
+                and address.casefold() == config.FAQ_BOT_ADDR.casefold())
 
 
 def faq_bot_in_chat(bot, accid, chat_id) -> bool:
@@ -295,6 +301,7 @@ def _save_worker(bot, accid, msg, quoted, tag, shown_tag, shadow):
             dc_helpers._send(bot, accid, msg.chat_id, f"❌ {text}", reply_to_id=msg.id)
 
     with_file = _has_attachment(quoted)
+    file_path = None
     try:
         text = quoted.text or ""
         file_path = viewtype = None
@@ -314,10 +321,17 @@ def _save_worker(bot, accid, msg, quoted, tag, shown_tag, shadow):
             fail("The quoted message is empty.")
             return
 
-        old = database.save_faq_entry(msg.chat_id, tag, shown_tag, text, file_path, viewtype, msg.from_id)
+        old = database.save_faq_entry(
+            msg.chat_id, tag, shown_tag, text, file_path, viewtype, msg.from_id,
+            max_topics=FAQ_MAX_TOPICS, max_bytes=FAQ_MAX_CHAT_BYTES)
         if old and old.get("file_path") != file_path:
             _delete_file(old.get("file_path"))
+    except ValueError as e:
+        _delete_file(file_path)
+        fail(str(e))
+        return
     except Exception as e:
+        _delete_file(file_path)
         config.logger.error(f"FAQ: saving topic {tag!r} in chat {msg.chat_id} failed: {e}", exc_info=True)
         if with_file and not shadow:
             dc_helpers._react(bot, accid, msg.id, "❌")
@@ -369,14 +383,30 @@ def save_command(bot, accid, event):
               f"Only its author or the bot admin can change it.")
         return
 
+    with _save_lock:
+        now = time.monotonic()
+        key = (msg.chat_id, msg.from_id)
+        # Keep only active cooldowns, rather than retaining every sender forever.
+        for old_key, saved_at in list(_save_times.items()):
+            if now - saved_at >= FAQ_SAVE_COOLDOWN_SECONDS:
+                del _save_times[old_key]
+        if key in _save_times:
+            reply("❌ Please wait a few seconds before saving another FAQ topic.")
+            return
+        _save_times[key] = now
+
     if _has_attachment(quoted):
+        if not _save_slots.acquire(blocking=False):
+            reply("❌ FAQ attachment workers are busy. Please try again later.")
+            return
         if not shadow:
             dc_helpers._react(bot, accid, msg.id, "⏳")
-        threading.Thread(
-            target=_save_worker,
-            args=(bot, accid, msg, quoted, tag, shown_tag, shadow),
-            daemon=True,
-        ).start()
+        try:
+            future = _save_executor.submit(_save_worker, bot, accid, msg, quoted, tag, shown_tag, shadow)
+            future.add_done_callback(lambda result: _save_slots.release())
+        except Exception:
+            _save_slots.release()
+            reply("❌ Could not queue the FAQ attachment. Please try again later.")
     else:
         _save_worker(bot, accid, msg, quoted, tag, shown_tag, shadow)
 

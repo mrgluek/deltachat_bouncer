@@ -2632,7 +2632,8 @@ _FAQ_COLUMNS = ("chat_id", "tag", "display_tag", "text", "file_path", "viewtype"
 
 
 def save_faq_entry(chat_id: int, tag: str, display_tag: str, text: str,
-                   file_path: str | None, viewtype: str | None, author_id: int) -> dict | None:
+                   file_path: str | None, viewtype: str | None, author_id: int,
+                   *, max_topics: int | None = None, max_bytes: int | None = None) -> dict | None:
     """Insert or replace the answer for a topic. Returns the entry it replaced
     (so the caller can delete its old file), or None if the topic is new.
     created_at survives an overwrite; author_id becomes the last saver."""
@@ -2643,6 +2644,20 @@ def save_faq_entry(chat_id: int, tag: str, display_tag: str, text: str,
                        (chat_id, tag))
         row = cursor.fetchone()
         old = dict(zip(_FAQ_COLUMNS, row)) if row else None
+        if max_topics is not None or max_bytes is not None:
+            cursor.execute("SELECT tag, display_tag, text, file_path FROM faq_entries WHERE chat_id = ?", (chat_id,))
+            entries = cursor.fetchall()
+            if old is None and max_topics is not None and len(entries) >= max_topics:
+                raise ValueError("This chat has reached its FAQ topic limit. Remove a topic first.")
+
+            def entry_bytes(key, shown, body, path):
+                size = sum(len((value or "").encode("utf-8")) for value in (key, shown, body))
+                return size + (os.path.getsize(path) if path and os.path.exists(path) else 0)
+
+            total = entry_bytes(tag, display_tag, text, file_path)
+            total += sum(entry_bytes(*entry) for entry in entries if entry[0] != tag)
+            if max_bytes is not None and total > max_bytes:
+                raise ValueError("This chat has reached its FAQ storage limit. Remove a topic first.")
         cursor.execute(
             "INSERT OR REPLACE INTO faq_entries "
             "(chat_id, tag, display_tag, text, file_path, viewtype, author_id, created_at, updated_at) "

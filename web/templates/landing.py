@@ -1,11 +1,13 @@
 """Landing page HTML: the public / route content."""
 import html
+import json
 import os
 import urllib.parse
 
 import database
 import state
 from web.templates import theme
+from web.templates.invite import invite_url
 from config import VERSION
 
 def get_landing_page_html(ingress_path: str = "") -> str:
@@ -13,9 +15,9 @@ def get_landing_page_html(ingress_path: str = "") -> str:
         return state.index_page_html_cache
 
     invite_link = state.get_bot_invite_link()
-    deep_link = invite_link or ""
-    if invite_link and invite_link.startswith("OPEN-CHAT:"):
-        deep_link = "https://i.delta.chat/#" + invite_link[10:]
+    deep_link = invite_url(invite_link or "")
+    deep_attr = html.escape(deep_link, quote=True)
+    deep_js = html.escape(json.dumps(deep_link), quote=True)
 
     base_path = ingress_path.rstrip("/")
     bg_url = f"{base_path}/background.jpg"
@@ -34,8 +36,8 @@ def get_landing_page_html(ingress_path: str = "") -> str:
     if not instance_domain:
         instance_domain = "dc.gluek.info"
 
-    if invite_link:
-        hero_btn_html = f"""<a href="{deep_link}" class="btn btn-primary">
+    if deep_link:
+        hero_btn_html = f"""<a href="{deep_attr}" class="btn btn-primary">
                 <span>🗨️</span> Add Bot to Delta Chat
             </a>"""
         qr_modal_html = f"""<div id="qr-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="qr-modal-title" onclick="if(event.target === this) closeQrModal()">
@@ -44,8 +46,8 @@ def get_landing_page_html(ingress_path: str = "") -> str:
             <p style="font-size: 0.9rem; color: var(--text-muted);">Scan this QR code with your Delta Chat mobile app or click the link below.</p>
             <img src="{base_path}/qr.png" alt="Bot QR Code" />
             <div style="display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap;">
-                <a href="{deep_link}" class="btn btn-primary" style="padding: 0.5rem 1rem; font-size: 0.9rem;"><span>🗨️</span> Open in Delta Chat</a>
-                <button class="close-btn" id="qr-copy-btn" onclick="copyJoinLink(this, '{deep_link}')">Copy Link</button>
+                <a href="{deep_attr}" class="btn btn-primary" style="padding: 0.5rem 1rem; font-size: 0.9rem;"><span>🗨️</span> Open in Delta Chat</a>
+                <button class="close-btn" id="qr-copy-btn" onclick="copyJoinLink(this, {deep_js})">Copy Link</button>
                 <button class="close-btn" id="qr-close-btn" onclick="closeQrModal()">Close</button>
             </div>
         </div>
