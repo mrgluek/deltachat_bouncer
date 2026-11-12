@@ -13,6 +13,7 @@ import time
 from deltachat2 import MsgData
 
 import database
+from netutil import is_public_ip
 import dc_fingerprint
 import state
 from config import logger
@@ -75,7 +76,7 @@ def _public_relay(host):
                 pass
     except (dns.exception.DNSException, ValueError):
         return False
-    return bool(addresses) and all(ip.is_global and not ip.is_multicast and not ip.is_reserved for ip in addresses)
+    return bool(addresses) and all(is_public_ip(ip) for ip in addresses)
 
 
 def _check_public_relays(bot, accid, chat_id, hosts):

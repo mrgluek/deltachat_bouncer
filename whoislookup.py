@@ -33,6 +33,7 @@ import config
 import dc_helpers
 import iplookup
 import state
+from netutil import urlopen
 
 IANA_RDAP = "https://data.iana.org/rdap/{}.json"  # dns, ipv4, ipv6, asn
 PSL_URL = "https://publicsuffix.org/list/public_suffix_list.dat"
@@ -93,7 +94,7 @@ def _get_json(url: str, timeout: int = 20) -> tuple[dict | None, int]:
         "Accept": "application/rdap+json, application/json",
     })
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read(2 * 1024 * 1024).decode("utf-8")), resp.status
     except urllib.error.HTTPError as e:
         return None, e.code
@@ -200,7 +201,7 @@ def _load_psl() -> set[str] | None:
     text = None
     try:
         req = urllib.request.Request(PSL_URL, headers={"User-Agent": f"BouncerBot/{config.VERSION}"})
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urlopen(req, timeout=20) as resp:
             text = resp.read().decode("utf-8")
         os.makedirs(os.path.dirname(PSL_FILE) or ".", exist_ok=True)
         with open(PSL_FILE, "w", encoding="utf-8") as f:

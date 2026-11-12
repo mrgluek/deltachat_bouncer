@@ -33,7 +33,7 @@ import socket
 import ssl
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 import dns.exception
 import dns.rdatatype
@@ -43,6 +43,7 @@ from deltachat2 import events
 
 import certs
 import config
+from netutil import is_public_ip
 import dc_helpers
 import state
 import whitelist
@@ -156,6 +157,50 @@ def query(res: dns.resolver.Resolver, name: str, rtype: str) -> Res:
     return Res("ok", [_rdata_text(r) for r in rdata], rrset.ttl, chain, rdata=rdata)
 
 
+REPORT_SECONDS = 20
+REPORT_LOOKUPS = 100
+
+
+class ReportBudget:
+    """Shared across the report's parallel queries and both resolvers."""
+    def __init__(self):
+        self.deadline = time.monotonic() + REPORT_SECONDS
+        self.lookups = 0
+        self.ptr_names = 0
+        self.reached = False
+        self.lock = threading.Lock()
+
+    def remaining(self):
+        return max(0, self.deadline - time.monotonic())
+
+    def take(self):
+        with self.lock:
+            if not self.remaining() or self.lookups >= REPORT_LOOKUPS:
+                self.reached = True
+                raise dns.exception.Timeout()
+            self.lookups += 1
+            return self.remaining()
+
+
+class BudgetResolver:
+    def __init__(self, resolver, budget):
+        self.resolver = resolver
+        self.budget = budget
+
+    def __getattr__(self, name):
+        return getattr(self.resolver, name)
+
+    def resolve(self, *args, **kwargs):
+        remaining = self.budget.take()
+        lifetime = kwargs.get("lifetime") or getattr(self.resolver, "lifetime", 6)
+        kwargs["lifetime"] = min(lifetime, remaining)
+        return self.resolver.resolve(*args, **kwargs)
+
+
+def _budget(resolver):
+    return resolver.budget if isinstance(resolver, BudgetResolver) else None
+
+
 def _norm_name(text: str) -> str | None:
     t = text.strip().rstrip(".").lower()
     try:
@@ -170,7 +215,7 @@ def _public_ip(text: str):
         ip = ipaddress.ip_address(text.strip("[]"))
     except ValueError:
         return None
-    return ip if ip.is_global and not ip.is_multicast and not ip.is_reserved else None
+    return ip if is_public_ip(ip) else None
 
 
 def parse_args(payload: str):
@@ -336,7 +381,7 @@ def fetch_mta_sts_policy(domain: str, sysres) -> tuple[dict | None, str | None]:
     ips = [ipaddress.ip_address(a) for a in addrs]
     if not ips:
         return None, f"{host} does not resolve"
-    if not all(ip.is_global for ip in ips):
+    if not all(is_public_ip(ip) for ip in ips):
         return None, f"{host} resolves to a private address"
     try:
         conn = _PinnedHTTPS(host, ips[0].compressed, timeout=10)
@@ -405,35 +450,75 @@ def _dkim_key_info(record: str) -> tuple[str, str]:
     return icon, f"RSA {bits} bit"
 
 
-def _spf_networks(spf: str, domain: str, results: dict, sysres) -> tuple[list, list[str]]:
-    """Networks an SPF record allows directly, and the mechanisms not expanded (include, exists ...)."""
+def _spf_networks(spf: str, domain: str, results: dict, sysres, _state=None, _depth=0) -> tuple[list, list[str]]:
+    """Expand at most ten DNS lookups and five include/redirect levels."""
+    state = _state if _state is not None else {"lookups": 0, "seen": set(), "domain": domain}
     nets, other = [], []
+
+    def lookup(host, rtype):
+        if state["lookups"] >= 10:
+            if "SPF lookup limit reached" not in other:
+                other.append("SPF lookup limit reached")
+            return Res("nodata")
+        state["lookups"] += 1
+        return query(sysres, host, rtype)
+
     for term in spf.split()[1:]:
-        q = term.lstrip("+")  # only pass terms authorize; -ip4: etc. do not
+        q = term.lstrip("+")
         if q[:1] in "-~?":
             continue
         mech, _, arg = q.partition(":")
-        mech = mech.lower().split("/")[0]  # "a/24": the prefix length widens the match
+        mech = mech.lower().split("/")[0]
         if mech in ("a", "mx"):
             arg = arg.split("/")[0]
         try:
             if mech in ("ip4", "ip6"):
                 nets.append(ipaddress.ip_network(arg, strict=False))
             elif mech == "a":
-                host = (arg or domain).rstrip(".")
                 for t in ("A", "AAAA"):
-                    nets += [ipaddress.ip_network(a) for a in query(sysres, host, t).records]
-            elif mech == "mx" and not arg:
-                for ip in results["mx_ips"]:
-                    nets.append(ipaddress.ip_network(ip))
-            elif mech in ("include", "exists", "ptr", "mx") or q.startswith("redirect="):
+                    nets += [ipaddress.ip_network(a) for a in lookup(arg or domain, t).records]
+            elif mech == "mx" and not arg and domain == state["domain"]:
+                nets += [ipaddress.ip_network(ip) for ip in results.get("mx_ips", [])]
+            elif mech == "include" or q.startswith("redirect="):
+                host = arg if mech == "include" else q.split("=", 1)[1]
+                if _depth >= 5 or host in state["seen"]:
+                    other.append("SPF depth limit reached")
+                    continue
+                state["seen"].add(host)
+                records = [record for record in lookup(host, "TXT").records
+                           if record.lower().startswith("v=spf1")]
+                if not records:
+                    other.append(q)
+                for record in records:
+                    more, notes = _spf_networks(record, host, results, sysres, state, _depth + 1)
+                    nets += more
+                    other += notes
+            elif mech in ("exists", "ptr", "mx"):
                 other.append(q)
         except ValueError:
             other.append(q)
-    return nets, other
+    return nets, list(dict.fromkeys(other))
 
 
-def build_report(domain: str, res: dns.resolver.Resolver, via: str, sysres) -> str:
+def build_report(domain: str, res: dns.resolver.Resolver, via: str, sysres, budget=None) -> str:
+    budget = budget or ReportBudget()
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dns-budget")
+    res = res if _budget(res) is budget else BudgetResolver(res, budget)
+    sysres = sysres if _budget(sysres) is budget else BudgetResolver(sysres, budget)
+    future = pool.submit(_build_report, domain, res, via, sysres)
+    try:
+        report = future.result(timeout=budget.remaining())
+        if budget.reached:
+            report += "\nℹ️ DNS report limit reached (lookups or time budget)."
+        return report
+    except TimeoutError:
+        budget.reached = True
+        return f"🌐 DNS report: **{_display(domain)}** · {via}\nℹ️ DNS report time limit reached."
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _build_report(domain: str, res: dns.resolver.Resolver, via: str, sysres) -> str:
     jobs = {
         "A": (domain, "A"), "AAAA": (domain, "AAAA"), "MX": (domain, "MX"), "TXT": (domain, "TXT"),
         "CAA": (domain, "CAA"), "DMARC": (f"_dmarc.{domain}", "TXT"),
@@ -495,7 +580,7 @@ def build_report(domain: str, res: dns.resolver.Resolver, via: str, sysres) -> s
     wl = [whitelist.addresses_line(addrs + r.get("mx_ips", [])), whitelist.domain_line(domain)]
     lines[wl_at:wl_at] = [line for line in wl if line]
     try:
-        ct = ct_fut.result(timeout=30)
+        ct = ct_fut.result(timeout=_budget(sysres).remaining() if _budget(sysres) else 20)
     except Exception as e:
         ct = {"error": f"CT lookup failed: {e}"}
     lines += certs.report_lines(domain, ct, _caa_groups(r["CAA"]))
@@ -545,11 +630,20 @@ def _zone_info(domain: str, sysres) -> tuple[str | None, list[str], bool]:
 def _reverse_many(addrs: list[str], sysres) -> dict[str, list[str]]:
     out = {}
     for a in addrs:
+        budget = _budget(sysres)
+        if budget and budget.ptr_names >= 5:
+            budget.reached = True
+            break
+        if budget:
+            budget.ptr_names += 1
         try:
             rev = dns.reversename.from_address(a).to_text()
         except Exception:
             continue
-        out[a] = [p.rstrip(".") for p in query(sysres, rev, "PTR").records]
+        records = query(sysres, rev, "PTR").records
+        if len(records) > 5 and budget:
+            budget.reached = True
+        out[a] = [p.rstrip(".") for p in records[:5]]
     return out
 
 
@@ -568,9 +662,9 @@ def _mail_section(domain: str, r: dict, sysres) -> tuple[list[str], list[str]]:
 
     # MX hosts, their addresses and reverse DNS (forward-confirmed)
     mx_ips = []
-    if len(mx_hosts) > 5:
-        lines.append(f"ℹ️ {len(mx_hosts)} MX hosts, checking the first 5")
-    for pref, host in mx_hosts[:5]:
+    if len(mx_hosts) > 10:
+        lines.append(f"ℹ️ {len(mx_hosts)} MX hosts: limit reached, checking the first 10")
+    for pref, host in mx_hosts[:10]:
         ips = [a for t in ("A", "AAAA") for a in query(sysres, host, t).records]
         mx_ips += ips
         lines.append(f"{'✅' if ips else '❌'} MX {pref} {_display(host)}" + (f" → {', '.join(ips)}" if ips else " — no address"))
@@ -593,6 +687,7 @@ def _mail_section(domain: str, r: dict, sysres) -> tuple[list[str], list[str]]:
             ("ℹ️", "") if "redirect=" in spf else ("⚠️", " — no `all` at the end")
         lines.append(f"{icon} SPF: `{spf}`{note}")
         nets, other = _spf_networks(spf, domain, r, sysres)
+        lines += [f"   ℹ️ {note}" for note in other if "limit reached" in note]
         missing = [ip for ip in mx_ips if not any(ipaddress.ip_address(ip) in n for n in nets
                                                   if n.version == ipaddress.ip_address(ip).version)]
         if mx_ips and not missing:
@@ -726,25 +821,31 @@ def _chatmail_section(domain: str, r: dict, mx_hosts, policy) -> list[str]:
 
 # ── Command, queue and cache ──
 
-def _pick_resolver(name, server):
+def _pick_resolver(name, server, budget=None):
     """(resolver, label, system resolver) for ``@server``, or an error text starting with ❌."""
     sysres = make_resolver()
+    if budget:
+        sysres = BudgetResolver(sysres, budget)
     if server == "auth" and not isinstance(name, str):
         return "❌ `@auth` works with domain names only."
     resolved = _resolve_server(server, name if isinstance(name, str) else "", sysres)
     if isinstance(resolved, str):
         return f"❌ {resolved}"
-    return resolved[0], resolved[1], sysres
+    res = resolved[0]
+    if budget and _budget(res) is not budget:
+        res = BudgetResolver(res, budget)
+    return res, resolved[1], sysres
 
 
 def run(name, rtype, server) -> str:
-    picked = _pick_resolver(name, server)
+    budget = ReportBudget()
+    picked = _pick_resolver(name, server, budget)
     if isinstance(picked, str):
-        return picked
+        return picked + ("\nℹ️ DNS report limit reached." if budget.reached else "")
     res, via, sysres = picked
     if rtype:
         return format_records(name, rtype, res, via)
-    return build_report(name, res, via, sysres)
+    return build_report(name, res, via, sysres, budget)
 
 
 def run_host(name, server) -> str:

@@ -898,6 +898,7 @@ def kick_command(bot, accid, event):
 
 BAN_CHAT_TYPES = {"Group"}
 BAN_RESOLVE_LIMIT = 64
+BAN_RESOLVE_PAUSE = 0.1
 BAN_JOIN_RETRY_SECONDS = 5
 _ban_fingerprint_cache: dict[tuple[int, int], list[str]] = {}
 _ban_scan_offset: dict[int, int] = {}
@@ -969,10 +970,12 @@ def ban_sweep(bot, accid, deep_fps: set | None = None, chat_ids=None) -> int:
         pending = [cid for cid in contacts if cid not in known_ids and (accid, cid) not in _ban_fingerprint_cache]
         offset = _ban_scan_offset.get(accid, 0) % len(pending) if pending else 0
         pending = pending[offset:] + pending[:offset]
-        limit = len(pending) if deep_fps is not None else BAN_RESOLVE_LIMIT
+        limit = len(pending) if deep_fps is not None or chat_ids is not None else BAN_RESOLVE_LIMIT
         selected = pending[:limit]
         _ban_scan_offset[accid] = offset + len(selected)
-    for cid in selected:
+    for index, cid in enumerate(selected):
+        if index and index % BAN_RESOLVE_LIMIT == 0:
+            time.sleep(BAN_RESOLVE_PAUSE)
         resolved = _fingerprints(bot, accid, cid)
         if resolved:
             with _ban_lock:
@@ -1030,7 +1033,8 @@ def enforce_ban_on_join(bot, accid, chat_id, contact_id, _retry=True) -> bool:
         if _retry:
             _retry_ban_join(bot, accid, chat_id, None)
         else:
-            ban_sweep(bot, accid, chat_ids=[chat_id])
+            ban_sweep(bot, accid, deep_fps={b["fingerprint"] for b in database.get_all_banned()},
+                      chat_ids=[chat_id])
         return False
     if contact_id <= 9:
         return False

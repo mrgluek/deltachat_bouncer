@@ -902,6 +902,10 @@ class TestActivityPub(unittest.TestCase):
             mock_fetch.assert_not_called()
 
     def test_handle_ap_inbox_delete_gone_or_suspended_actor(self):
+        for name in ("_last_fetch_status", "_recent_signatures"):
+            p = patch.object(activitypub, name, activitypub.TTLCache())
+            p.start()
+            self.addCleanup(p.stop)
         token = "deltok123456"
         database.add_catalog_channel(chat_id=115, name="Delete Chan", description="", member_count=1, invite_link="", token=token)
 
@@ -936,7 +940,7 @@ class TestActivityPub(unittest.TestCase):
 
         def actor_answers(status):
             async def fetch(actor, use_cache=True, **kwargs):
-                activitypub._last_fetch_status[actor] = status
+                activitypub._last_fetch_status[actor] = (time.time() + 3600, status)
                 return None
             return fetch
 
@@ -944,7 +948,7 @@ class TestActivityPub(unittest.TestCase):
         for status in (403, 404, 410):
             with self.subTest(key_status=status):
                 activitypub.reset_signature_replay_cache()
-                activitypub._last_fetch_status[key_id] = status
+                activitypub._last_fetch_status[key_id] = (time.time() + 3600, status)
                 with patch("activitypub.resolve_public_key", new_callable=AsyncMock) as mock_resolve, \
                         patch("activitypub.fetch_remote_actor", new=actor_answers(200)):
                     mock_resolve.return_value = (None, None)
@@ -964,7 +968,7 @@ class TestActivityPub(unittest.TestCase):
                     self.assertEqual(database.get_ap_followers_count(token), 1)
 
         # No answer at all (unsafe URL, no session, timeout): a stale status must not count
-        activitypub._last_fetch_status[actor_id] = 410
+        activitypub._last_fetch_status[actor_id] = (time.time() + 3600, 410)
         activitypub.reset_signature_replay_cache()
         with patch("activitypub.resolve_public_key", new_callable=AsyncMock) as mock_resolve, \
                 patch("activitypub.fetch_remote_actor", new_callable=AsyncMock) as mock_fetch:

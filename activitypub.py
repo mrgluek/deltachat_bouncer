@@ -31,6 +31,8 @@ except ImportError:
     _aiohttp = None
 
 import database
+from netutil import is_public_ip
+from ttl_cache import TTLCache
 from config import VERSION  # the bot's version in outgoing User-Agent headers
 
 logger = logging.getLogger("bouncer_bot.activitypub")
@@ -553,10 +555,7 @@ _dns_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ap-dns")
 
 
 def _is_public_address(address: str) -> bool:
-    ip = ipaddress.ip_address(address)
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
-        ip = ip.ipv4_mapped
-    return ip.is_global and not ip.is_multicast
+    return is_public_ip(address)
 
 
 class PublicResolver:
@@ -722,7 +721,7 @@ def queue_post_delivery(token: str, post_data: dict, base_url: str):
 # 6. Remote Actor Fetching
 # ==============================================================================
 
-_remote_actor_cache: dict[str, tuple[float, dict]] = {}  # actor_id -> (expires_at, actor_json)
+_remote_actor_cache = TTLCache(max_entries=1024)  # actor_id -> (expires_at, actor_json)
 REMOTE_ACTOR_CACHE_TTL = 3600  # 1 hour
 
 def _get_default_signing_info() -> tuple[str, str] | None:
@@ -885,7 +884,7 @@ def validate_signature_cheap(method: str, headers: dict, body: bytes) -> tuple[b
     return True, "OK"
 
 
-_recent_signatures: dict[str, float] = {}
+_recent_signatures = TTLCache(max_entries=8192)
 _replay_lock = threading.Lock()
 
 
@@ -896,14 +895,12 @@ def check_and_record_signature_replay(sig_identifier: str, window_seconds: float
     now = time.time()
     sig_hash = hashlib.sha256(sig_identifier.encode('utf-8')).hexdigest()
     with _replay_lock:
-        expired = [k for k, exp in _recent_signatures.items() if exp <= now]
-        for k in expired:
-            del _recent_signatures[k]
-
         if sig_hash in _recent_signatures:
             return False
-
-        _recent_signatures[sig_hash] = now + window_seconds
+        # The cache evicts the oldest marker when full: failing closed would let an
+        # unauthenticated flood of distinct signatures block all inbound traffic.
+        # A future-dated signature can remain acceptable for twice the skew window.
+        _recent_signatures[sig_hash] = (now + max(601.0, window_seconds),)
         return True
 
 
@@ -913,13 +910,14 @@ def reset_signature_replay_cache():
         _recent_signatures.clear()
 
 
-_last_fetch_status: dict[str, int] = {}
+_last_fetch_status = TTLCache(max_entries=2048)
 
 def get_last_fetch_status(url: str) -> int | None:
     """Return the HTTP status code of the most recent fetch attempt for this URL."""
     if not url:
         return None
-    return _last_fetch_status.get(url) or _last_fetch_status.get(url.split('#')[0])
+    hit = _last_fetch_status.get(url) or _last_fetch_status.get(url.split('#')[0])
+    return hit[1] if hit else None
 
 
 async def fetch_remote_actor(actor_id: str, use_cache: bool = True,
@@ -963,8 +961,8 @@ async def _fetch_remote_actor(actor_id: str, use_cache: bool = True,
     try:
         async with _http_session.get(actor_id, headers=headers, timeout=_aiohttp.ClientTimeout(total=10), allow_redirects=False) as resp:
             fetch_url = actor_id.split('#')[0]
-            _last_fetch_status[actor_id] = resp.status
-            _last_fetch_status[fetch_url] = resp.status
+            _last_fetch_status[actor_id] = (time.time() + 3600, resp.status)
+            _last_fetch_status[fetch_url] = (time.time() + 3600, resp.status)
 
             # Handle Authorized Fetch (401/403) by retrying with signature from default channel if not signed yet
             if resp.status in (401, 403) and not (sign_as_token and base_url):
@@ -980,8 +978,8 @@ async def _fetch_remote_actor(actor_id: str, use_cache: bool = True,
                         }
                         auth_headers.update(sign_headers('GET', actor_id, None, priv_pem, key_id))
                         async with _http_session.get(actor_id, headers=auth_headers, timeout=_aiohttp.ClientTimeout(total=10), allow_redirects=False) as resp2:
-                            _last_fetch_status[actor_id] = resp2.status
-                            _last_fetch_status[fetch_url] = resp2.status
+                            _last_fetch_status[actor_id] = (time.time() + 3600, resp2.status)
+                            _last_fetch_status[fetch_url] = (time.time() + 3600, resp2.status)
                             if resp2.status == 200:
                                 actor_data = await _read_remote_json(resp2)
                                 _remote_actor_cache[actor_id] = (time.time() + REMOTE_ACTOR_CACHE_TTL, actor_data)
@@ -1024,7 +1022,7 @@ async def is_actor_gone(actor_id: str, deleted_object=None) -> bool:
     actor_id = actor_id.split('#')[0]
     _last_fetch_status.pop(actor_id, None)  # only the answer to this very request counts
     await fetch_remote_actor(actor_id, use_cache=False)
-    return _last_fetch_status.get(actor_id) == 410
+    return get_last_fetch_status(actor_id) == 410
 
 
 async def resolve_public_key(key_id: str, sign_as_token: str | None = None,

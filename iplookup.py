@@ -45,6 +45,7 @@ import config
 import database
 import dc_helpers
 import state
+from netutil import is_public_ip, urlopen
 import whitelist
 
 IPINFO_URL = "https://ipinfo.io"
@@ -116,10 +117,8 @@ def _parse_candidate(token: str):
 
 def _is_public(obj) -> bool:
     if isinstance(obj, (ipaddress.IPv4Network, ipaddress.IPv6Network)):
-        return obj.network_address.is_global and obj.broadcast_address.is_global
-    if getattr(obj, "ipv4_mapped", None):  # ::ffff:1.2.3.4
-        return _is_public(obj.ipv4_mapped)
-    return obj.is_global and not obj.is_multicast and not obj.is_reserved
+        return is_public_ip(obj.network_address) and is_public_ip(obj.broadcast_address)
+    return is_public_ip(obj)
 
 
 def parse_host(text: str) -> str | None:
@@ -207,7 +206,7 @@ def _http_get_json(url: str, timeout: int = 20, headers: dict | None = None) -> 
         **(headers or {}),
     })
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8")), resp.status
     except urllib.error.HTTPError as e:
         return None, e.code
