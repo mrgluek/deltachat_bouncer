@@ -208,7 +208,8 @@ def format_event_message(event: dict, now: float) -> str:
 def sync_alerts(bot, accid, servers: list[str], now=None) -> None:
     """Open, update and resolve call incidents to match the relays' health."""
     now = time.time() if now is None else now
-    report_chats = database.get_all_cmping_report_chats()
+    # Incidents are always recorded (/cmcallhistory, /cmcallstatus, /cmpinglist); chat messages are opt-in.
+    report_chats = database.get_all_cmping_report_chats() if config.CMCALL_ALERTS else []
     open_events = {e["server"]: e for e in database.get_open_cmcall_events()}
     statuses = {s: database.get_cmcall_server(s) for s in set(servers) | set(open_events)}
 

@@ -543,11 +543,11 @@ def cmreport_command(bot, accid, event):
 
     if arg == "on":
         database.add_cmping_report_chat(msg.chat_id)
-        dc_helpers._send(bot, accid, msg.chat_id, "✅ Monitoring alerts (messages and 📞 calls) **enabled** for this chat.")
+        dc_helpers._send(bot, accid, msg.chat_id, "✅ Monitoring alerts **enabled** for this chat.")
     elif arg == "off":
         removed = database.remove_cmping_report_chat(msg.chat_id)
         if removed:
-            dc_helpers._send(bot, accid, msg.chat_id, "✅ Monitoring alerts (messages and 📞 calls) **disabled** for this chat.")
+            dc_helpers._send(bot, accid, msg.chat_id, "✅ Monitoring alerts **disabled** for this chat.")
         else:
             dc_helpers._send(bot, accid, msg.chat_id, "ℹ️ CMPing monitoring alerts were not enabled for this chat.")
     else:
