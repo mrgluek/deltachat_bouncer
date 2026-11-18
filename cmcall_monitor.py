@@ -15,14 +15,14 @@ Health per relay: ok / degraded / down / n/a (no TURN server announced).
   Quality is measured from the bot's host only, so it never counts as down.
 - Relays without TURN are "n/a" and never alert.
 
-Each down/degraded episode is one "📞" message per /cmreport chat, edited in
-place when the error changes and when it resolves.
+Call incidents send short service lines to /cmreport chats by default.
 """
 import time
 from datetime import datetime, timezone
 
 from deltachat2 import events
 
+import call_notices
 import calls
 import cmping
 import config
@@ -208,10 +208,17 @@ def format_event_message(event: dict, now: float) -> str:
 def sync_alerts(bot, accid, servers: list[str], now=None) -> None:
     """Open, update and resolve call incidents to match the relays' health."""
     now = time.time() if now is None else now
-    # Incidents are always recorded (/cmcallhistory, /cmcallstatus, /cmpinglist); chat messages are opt-in.
-    report_chats = database.get_all_cmping_report_chats() if config.CMCALL_ALERTS else []
+    notices = config.CMCALL_NOTICES
+    report_chats = database.get_all_cmping_report_chats() if notices or config.CMCALL_ALERTS else []
     open_events = {e["server"]: e for e in database.get_open_cmcall_events()}
     statuses = {s: database.get_cmcall_server(s) for s in set(servers) | set(open_events)}
+
+    def publish(event):
+        if notices:
+            for chat_id in report_chats:
+                call_notices.queue_notice(bot, accid, chat_id, event)
+        else:
+            _publish(bot, accid, event, report_chats, now)
 
     for server, info in statuses.items():
         status = info.get("status") if server in servers else None
@@ -220,18 +227,22 @@ def sync_alerts(bot, accid, servers: list[str], now=None) -> None:
 
         if event and (not alerting or event["kind"] != status):
             database.close_cmcall_event(event["id"], now)
-            event = dict(event, ended_at=now)
-            _publish(bot, accid, event, report_chats, now)
+            # A kind change opens a new episode. Only report the new kind in a service line.
+            if not notices or not alerting:
+                publish(dict(event, ended_at=now))
             event = None
         if alerting and event is None:
             event_id = database.open_cmcall_event(server, status, info.get("error"), now)
-            _publish(bot, accid, database.get_cmcall_event(event_id), report_chats, now)
+            publish(database.get_cmcall_event(event_id))
         elif alerting and event is not None and event.get("error") != info.get("error"):
             database.update_cmcall_event_error(event["id"], info.get("error"))
-            _publish(bot, accid, database.get_cmcall_event(event["id"]), report_chats, now)
+            if not notices:
+                publish(database.get_cmcall_event(event["id"]))
 
 
 def _publish(bot, accid, event: dict, report_chats: list[int], now: float) -> None:
+    if not report_chats:
+        return
     text = format_event_message(event, now)
     event_id = event["id"]
     for chat_id in report_chats:

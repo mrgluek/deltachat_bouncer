@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Call Notices</title>
+<style>
+  :root { color-scheme: light dark; font: 16px system-ui, sans-serif; }
+  body { margin: 1rem; }
+  h1 { font-size: 1.25rem; }
+  ul { padding: 0; list-style: none; }
+  li { padding: .5rem 0; overflow-wrap: anywhere; }
+</style>
+<h1>Call Notices</h1>
+<p id="empty">No incidents yet.</p>
+<ul id="notices"></ul>
+<script src="webxdc.js"></script>
+<script>
+  const notices = document.getElementById("notices");
+  const empty = document.getElementById("empty");
+  window.webxdc.setUpdateListener(({ payload }) => {
+    if (typeof payload !== "string" || !payload) return;
+    const item = document.createElement("li");
+    item.textContent = payload;
+    notices.prepend(item);
+    if (notices.children.length > 20) notices.lastElementChild.remove();
+    empty.hidden = true;
+  }, 0);
+</script>

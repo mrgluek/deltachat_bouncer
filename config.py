@@ -41,7 +41,7 @@ logger = logging.getLogger("bouncer_bot")
 if os.environ.get("CALL_DEBUG_LOG", "").strip().lower() not in ("1", "true", "yes", "on"):
     for _webrtc_logger in ("aioice", "aiortc"):
         logging.getLogger(_webrtc_logger).setLevel(logging.WARNING)
-VERSION = "2.54.1"
+VERSION = "2.55.0"
 # Attachments over 64 KB are not downloaded automatically. Not 1 byte: the core then also defers
 # every plain text message (commands, links) to a one-by-one "download later", which delays replies.
 DOWNLOAD_LIMIT = 65536
@@ -268,7 +268,8 @@ MEET_MUSIC_DUCK = float(os.environ.get("MEET_MUSIC_DUCK", "0.3"))
 CMCALL_MONITOR_INTERVAL = int(os.environ.get("CMCALL_MONITOR_INTERVAL", "3600"))  # 0 disables
 CMCALL_MONITOR_DURATION = int(os.environ.get("CMCALL_MONITOR_DURATION", "5"))  # seconds of beeps per call
 CMCALL_DEGRADED_LOSS_PCT = float(os.environ.get("CMCALL_DEGRADED_LOSS_PCT", "10"))
-CMCALL_ALERTS = os.environ.get("CMCALL_ALERTS", "0").strip().lower() in ("1", "true", "yes", "on")  # post call incidents to /cmreport chats (default: only in reports)
+CMCALL_NOTICES = os.environ.get("CMCALL_NOTICES", "1").strip().lower() in ("1", "true", "yes", "on")
+CMCALL_ALERTS = os.environ.get("CMCALL_ALERTS", "0").strip().lower() in ("1", "true", "yes", "on")
 
 DOMAIN_REGEX = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)+$')
 

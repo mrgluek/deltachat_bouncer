@@ -41,7 +41,7 @@ class TestDockerContext(unittest.TestCase):
         paths = ["requirements.txt", "icon.png", "background.jpg",
                  "background-light.jpg", "background-light.png"]
         paths.extend(str(path.relative_to(ROOT)) for path in ROOT.glob("*.py"))
-        for directory in ("web", "static"):
+        for directory in ("web", "static", "webxdc_calls"):
             paths.extend(str(path.relative_to(ROOT)) for path in (ROOT / directory).rglob("*")
                          if path.is_file() and "__pycache__" not in path.parts
                          and path.suffix not in (".pyc", ".pyo"))  # compiled files are excluded on purpose

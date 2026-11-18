@@ -97,6 +97,7 @@ class MonitorTestBase(unittest.TestCase):
             patch("cmcall_monitor.dc_helpers._get_bot_domains", side_effect=lambda b, a: [self.servers[0]]),
             # Alert messages are sent from inside the outbox job (_edit_or_send -> _send_now)
             patch("cmcall_monitor.dc_helpers._send_now", side_effect=fake_send),
+            patch("config.CMCALL_NOTICES", False),
             patch("config.CMCALL_ALERTS", True),
         ]
         for p in self.patches:
@@ -142,7 +143,7 @@ class TestCycle(MonitorTestBase):
         self.assertEqual(len(rows), 3)  # a->b stored once (latest), a->c, c->b
         self.assertEqual(database.get_cmcall_server("a.example")["turn"], "turn:1.1.1.1:3478")
 
-    def test_alerts_are_off_by_default_but_incidents_are_kept(self):
+    def test_incidents_are_kept_when_notices_and_alerts_are_off(self):
         with patch("config.CMCALL_ALERTS", False):
             self.cycle({("a.example", "b.example"): fail()})
         self.assertEqual(self.status("b.example"), "down")
