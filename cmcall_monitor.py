@@ -77,6 +77,13 @@ def _max_loss(result: dict):
     return max(losses) if losses else None
 
 
+def _source_offline(res: dict, source: str) -> bool:
+    """True when the call failed because the source relay's own test profile never came online."""
+    err = str(res.get("error") or "")
+    return (not res.get("ok") and res.get("stage") == "setup" and "to go online" in err
+            and f"@{source}" in err)
+
+
 def run_monitor_single(a: str, b: str, sleep=time.sleep) -> dict:
     """One monitored call a -> b, retried once on a hard failure."""
 
@@ -283,12 +290,18 @@ def cmcall_monitor_cycle(bot, accid, run=run_monitor_single) -> None:
         targets = [s for s in servers if s != source] or [source]
         config.logger.info(f"CMCall monitor cycle {cycle_no}: source={source}, targets={targets}")
         results = []
+        offline_streak = 0
         for dst in targets:
             a, b = (source, dst) if cycle_no % 2 == 0 else (dst, source)
             res = run(a, b)
             _remember_turn(res, a, b)
             database.save_cmcall_result(a, b, res)
             results.append((dst, a, b, res))
+            offline_streak = offline_streak + 1 if _source_offline(res, source) else 0
+            if offline_streak >= 2 and dst != targets[-1]:
+                config.logger.info(
+                    f"CMCall monitor: profile on {source} is not coming online, skipping the rest of this cycle")
+                break
         evaluate_cycle(source, results)
         sync_alerts(bot, accid, servers)
     finally:

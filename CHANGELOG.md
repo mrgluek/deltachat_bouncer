@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.55.1] - 2026-11-20
+
+### Fixed
+- The call monitor stops a cycle early when the source relay's own test profile never comes online (two setup timeouts in a row), instead of running and retrying every remaining target. This removes repeated CPU spikes from probes that could not measure anything.
+
 ## [2.55.0] - 2026-11-18
 
 ### Added

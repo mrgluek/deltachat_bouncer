@@ -177,6 +177,13 @@ class TestCycle(MonitorTestBase):
         self.assertEqual(len(self.sent), 1)
         self.assertIn("Calls failing: a.example", self.sent[0][2])
 
+    def test_offline_source_profile_stops_cycle_early(self):
+        state._cmcall_monitor_index = 0
+        self.servers = ["a.example", "b.example", "c.example", "d.example", "e.example"]
+        self.cycle(lambda a, b: fail(stage="setup", error="timeout (45s) waiting for x@a.example to go online"))
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.status("a.example"), "down")
+
     def test_relay_without_turn_is_na_without_alert(self):
         self.cycle({("a.example", "c.example"): fail(stage="setup", error="no TURN", callee_turn="none")})
         self.assertEqual(self.status("c.example"), "n/a")
