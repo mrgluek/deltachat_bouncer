@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.55.2] - 2026-11-23
+
+### Fixed
+- Relays that also publish a Yggdrasil (`200::/7`) AAAA record next to a public address are no longer rejected as "does not point to a public address". Such records are ignored when another address exists; a host with only Yggdrasil addresses is still refused.
+
 ## [2.55.1] - 2026-11-20
 
 ### Fixed

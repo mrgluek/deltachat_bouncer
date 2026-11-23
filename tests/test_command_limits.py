@@ -229,7 +229,10 @@ class TestCommandLimits(unittest.TestCase):
             for addresses, allowed in ((["127.0.0.1"], False), (["10.0.0.5"], False),
                                        (["8.8.8.8", "192.168.0.1"], False),
                                        (["224.0.0.1"], False), (["::1"], False),
-                                       (["8.8.8.8", "2606:4700:4700::1111"], True), ([], False)):
+                                       (["8.8.8.8", "2606:4700:4700::1111"], True), ([], False),
+                                       (["176.109.110.102", "200:d2ac:1e73:514f:1fae:84b:717c:e04d"], True),
+                                       (["200:d2ac:1e73:514f:1fae:84b:717c:e04d"], False),
+                                       (["200:d2ac:1e73:514f:1fae:84b:717c:e04d", "10.0.0.5"], False)):
                 resolver.resolve.side_effect = [[SimpleNamespace(to_text=lambda a=a: a)
                                                 for a in addresses], []]
                 self.assertEqual(dc_helpers._public_relay("relay.example"), allowed, addresses)

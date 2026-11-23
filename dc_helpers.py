@@ -76,6 +76,10 @@ def _public_relay(host):
                 pass
     except (dns.exception.DNSException, ValueError):
         return False
+    # Yggdrasil (200::/7) is an overlay network this host cannot reach; relays that also
+    # publish such an AAAA record are judged by their remaining addresses.
+    ygg = ipaddress.ip_network("200::/7")
+    addresses = [ip for ip in addresses if not (ip.version == 6 and ip in ygg)]
     return bool(addresses) and all(is_public_ip(ip) for ip in addresses)
 
 
