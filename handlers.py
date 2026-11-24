@@ -26,6 +26,7 @@ import database
 import dc_helpers
 import mentions
 import moderation
+import relay_notes
 import web.routes
 
 
@@ -219,6 +220,11 @@ def handle_dc_info_message(bot, accid, event):
                             welcome_msg = f"👋🏻 {age} **{member_name}**, welcome to {chat_name} group!{welcome_suffix}"
                             dc_helpers._send(bot, accid, dc_chat_id, welcome_msg)
                             config.logger.info(f"Welcome greeting sent for {member_name} in chat {dc_chat_id}")
+                            try:
+                                relay_notes.note_after_welcome(bot, accid, dc_chat_id, new_member_id,
+                                                               name=member_name, primary_addr=contact.address)
+                            except Exception as note_err:
+                                config.logger.error(f"Relay note after welcome failed: {note_err}")
                         except Exception as welcome_err:
                             config.logger.error(f"Failed to send welcome greeting: {welcome_err}")
                 
@@ -266,6 +272,14 @@ def handle_all_messages(bot, accid, event):
         config.logger.error(f"Error ingesting channel post for chat {msg.chat_id}: {e}")
         
     text = (msg.text or "").strip()
+
+    # ── Relay note: the sender's relay is down or a public mail provider ──
+    # The one place for DMs and commands: dc_helpers._send has no sender, and the command
+    # handlers are separate hooks, so the note is a message of its own (relay_notes.py)
+    try:
+        relay_notes.maybe_note_for_message(bot, accid, event)
+    except Exception as e:
+        config.logger.error(f"Relay note check failed for message {getattr(msg, 'id', None)}: {e}")
 
     # ── @Nick mention: reply to Nick's last message so they get notified ──
     if text.startswith("@") and not getattr(msg, "is_info", False):

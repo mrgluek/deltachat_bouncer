@@ -121,6 +121,19 @@ def _set_cmping_server_status(server: str, is_healthy: bool, error: str | None =
             _cmping_server_errors.pop(server, None)
 
 
+def cmping_status_of(domains) -> dict[str, bool]:
+    """Health of just these servers ({domain: healthy}; servers without a status are left out).
+
+    Cheap enough for every message: no copy of the whole monitoring state."""
+    with _monitor_lock:
+        return {d: _cmping_server_status[d] for d in domains if d in _cmping_server_status}
+
+
+def cmping_status_snapshot() -> dict[str, bool]:
+    with _monitor_lock:
+        return dict(_cmping_server_status)
+
+
 def _snapshot_cmping_state():
     """Copy a consistent monitoring view for formatting outside the lock."""
     with _monitor_lock:

@@ -173,6 +173,31 @@ def whitelisted(domain: str) -> bool:
                 (_load().get(domain) or {}).get("wl") is True)
 
 
+def whitelisted_many(domains) -> set[str]:
+    """The domains for which whitelisted() is True. The whitelist switch is read once, not once
+    per domain (it is a database read)."""
+    if not whitelist.enabled("ip"):
+        return set()
+    version = (whitelist.generation(), True)
+    found = set()
+    for domain in domains:
+        domain = domain.strip().lower()
+        _entry(domain)
+        with _lock:
+            entry = dict(_load().get(domain) or {})
+            ttl = RETRY_SECONDS if entry.get("wl") is None else whitelist.REFRESH_SECONDS
+            stale = _wl_versions.get(domain) != version or time.time() - entry.get("wl_at", 0) > ttl
+            start = stale and "ips" in entry and domain not in _wl_busy
+            if start:
+                _wl_busy.add(domain)
+            if _wl_versions.get(domain) == version and entry.get("wl") is True:
+                found.add(domain)
+        if start:
+            threading.Thread(target=_refresh_whitelist, args=(domain, entry, version),
+                             name="relay-whitelist", daemon=True).start()
+    return found
+
+
 def parse_country(text: str) -> str | None:
     """"🇷🇺", "ru" or "RU" -> "RU"; None for anything else."""
     text = (text or "").strip()

@@ -17,6 +17,7 @@ import database
 import dc_fingerprint
 import dc_helpers
 import moderation
+import relay_notes
 import state
 import web.routes
 
@@ -633,7 +634,7 @@ def help_command(bot, accid, event):
         f"**Commands:**\n"
         f"/bounce [username] — Show user activity, or list members near auto-kick threshold in group.\n"
         f"/search [query1] ... — Search members by email/domain (e.g. @testrun.org) or reply to a message.\n"
-        f"/relays — Find group members using public Russian mail providers (Yandex, Mail.ru, etc.).\n"
+        f"/relays — Find group members using public Russian mail providers (Yandex, Mail.ru, etc.) and members whose relay is unreachable.\n"
         f"/top    — Show top 10 posters in the last 24 hours.\n"
         f"/invite — Generate an invite link/QR code for this group.\n"
         f"/newgroup <name> — Create a new group with me in it and get its join link.\n"
@@ -893,6 +894,7 @@ def relays_command(bot, accid, event, skip_cooldown: bool = False):
     try:
         contacts = bot.rpc.get_chat_contacts(accid, msg.chat_id)
         found_users = []
+        members = []  # (contact_id, name, relay domains) for the unreachable-relay block
         for contact_id in contacts:
             if contact_id == config.DC_CONTACT_ID_SELF:
                 continue
@@ -915,6 +917,7 @@ def relays_command(bot, accid, event, skip_cooldown: bool = False):
 
             # Get all addresses associated with this contact from various sources
             all_addresses = {primary_addr.lower().strip()}
+            relay_domains = set()
             try:
                 # Encryption info typically lists all associated addresses (transports)
                 enc_info = bot.rpc.get_contact_encryption_info(accid, contact_id)
@@ -923,8 +926,13 @@ def relays_command(bot, accid, event, skip_cooldown: bool = False):
                     emails = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', enc_info)
                     for e in emails:
                         all_addresses.add(e.lower().strip())
+                    relay_domains.update(relay_notes.parse_relay_domains(enc_info))
             except Exception:
                 pass
+            primary_domain = relay_notes.domain_of(primary_addr)
+            if primary_domain:
+                relay_domains.add(primary_domain)
+            members.append((contact_id, name, sorted(relay_domains)))
 
             matching_addresses = []
             for addr in all_addresses:
@@ -942,18 +950,48 @@ def relays_command(bot, accid, event, skip_cooldown: bool = False):
                     "matches": sorted(list(set(matching_addresses)))
                 })
 
-        if not found_users:
-            dc_helpers._send(bot, accid, msg.chat_id, "✅ No group members using public Russian mail providers found.")
+        # The data is fetched already: keep the relay domains for the relay notes (one write)
+        try:
+            database.set_contact_relays_many([(cid, doms, now) for cid, _name, doms in members if doms])
+        except Exception as e:
+            config.logger.warning(f"/relays: could not cache relay domains: {e}")
+
+        # Block 1: members whose relay is down now (one downtime query for all down servers)
+        all_domains = {d for _cid, _name, doms in members for d in doms}
+        down = relay_notes.down_domains(all_domains, now=now)
+        errors = state._snapshot_cmping_state()["errors"] if down else {}
+        unreachable = []
+        for contact_id, name, doms in members:
+            for domain in doms:
+                if domain in down:
+                    unreachable.append((contact_id, name, domain, down[domain]))
+
+        if not found_users and not unreachable:
+            dc_helpers._send(bot, accid, msg.chat_id,
+                             "✅ No group members with unreachable relays or public Russian mail providers found.")
             return
 
-        reply = f"⚠️ **Members with public Russian mail providers ({len(found_users)}):**\n\n"
-        reply += "These users may experience delivery issues in large groups:\n\n"
-        for user in found_users:
-            matches_str = ", ".join(user["matches"])
-            reply += f"• /contact{user['contact_id']} **{user['name']}** ({user['primary']}) [{user['last_seen']}] — {matches_str}\n"
-        
-        reply += "\nConsider asking them to use chatmail relays or private servers."
-        dc_helpers._send(bot, accid, msg.chat_id, reply)
+        blocks = []
+        if unreachable:
+            block = f"🔴 **Unreachable relays ({len(unreachable)}):**\n\n"
+            for contact_id, name, domain, ev in unreachable:
+                since = ev.get("went_down_at")
+                dur = f", down {relay_notes.format_duration(now - since)}" if since else ""
+                reason = relay_notes.short_reason(ev.get("error_msg") or errors.get(domain))
+                reason_str = f" — {reason}" if reason else ""
+                block += f"• /contact{contact_id} **{name}** — `{domain}`{dur}{reason_str}\n"
+            blocks.append(block)
+
+        if found_users:
+            reply = f"⚠️ **Members with public Russian mail providers ({len(found_users)}):**\n\n"
+            reply += "These users may experience delivery issues in large groups:\n\n"
+            for user in found_users:
+                matches_str = ", ".join(user["matches"])
+                reply += f"• /contact{user['contact_id']} **{user['name']}** ({user['primary']}) [{user['last_seen']}] — {matches_str}\n"
+
+            reply += "\nConsider asking them to use chatmail relays or private servers."
+            blocks.append(reply)
+        dc_helpers._send(bot, accid, msg.chat_id, "\n".join(blocks))
 
     except Exception as e:
         config.logger.error(f"Error in /relays command: {e}")

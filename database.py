@@ -561,6 +561,26 @@ def init_db():
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_cmping_downtime_server ON cmping_downtime_events(server)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_cmping_downtime_incident ON cmping_downtime_events(incident_id)')
 
+        # Relay domains of a contact (from get_contact_encryption_info), refreshed at most once a day.
+        # Domains only, comma separated, lower case: no full addresses are stored.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS contact_relays (
+                contact_id INTEGER PRIMARY KEY,
+                domains TEXT,
+                updated_at REAL
+            )
+        ''')
+
+        # Relay notes ("your relay is down") sent, at most one per contact and domain every few hours
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS relay_note_sent (
+                contact_id INTEGER NOT NULL,
+                domain TEXT NOT NULL,
+                sent_at REAL NOT NULL,
+                PRIMARY KEY (contact_id, domain)
+            )
+        ''')
+
         # Away status tracking table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS away_status (
@@ -1848,6 +1868,34 @@ def get_average_ping_for_server(domain: str, limit: int = 100) -> tuple:
         pings = [r[0] for r in rows]
         return sum(pings) / len(pings), len(pings)
 
+def get_average_pings_for_servers(domains, limit: int = 100) -> dict:
+    """get_average_ping_for_server for many servers in one query.
+
+    Returns {domain: (avg_ping_ms, count)} for the domains that have measurements; the average
+    covers each server's last `limit` measurements as source or destination."""
+    wanted = sorted({d.strip().lower() for d in domains if d and d.strip()})
+    if not wanted:
+        return {}
+    marks = ",".join("?" * len(wanted))
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT server, AVG(avg), COUNT(*) FROM (
+                SELECT server, avg,
+                       ROW_NUMBER() OVER (PARTITION BY server ORDER BY checked_at DESC) AS rn
+                FROM (
+                    SELECT src AS server, avg, checked_at FROM cmping_history WHERE src IN ({marks})
+                    UNION ALL
+                    SELECT dst AS server, avg, checked_at FROM cmping_history
+                    WHERE dst IN ({marks}) AND dst IS NOT src
+                )
+            ) WHERE rn <= ? GROUP BY server
+            """,
+            (*wanted, *wanted, limit)
+        )
+        return {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
+
 def delete_cmping_history_for_domain(domain: str):
     """Delete all history records involving a specific domain."""
     with _writer_transaction() as conn:
@@ -2059,6 +2107,114 @@ def record_cmping_server_up(server: str, went_up_at: int = None):
         cursor.execute(
             "UPDATE cmping_downtime_events SET went_up_at = ? WHERE server = ? AND went_up_at IS NULL",
             (went_up_at, server_norm)
+        )
+
+
+def get_open_cmping_downtimes(servers) -> dict:
+    """Ongoing downtime of the given servers in one query: {server: {"went_down_at", "error_msg"}}.
+
+    A server with no open downtime event is absent. With several open events (should not happen),
+    the earliest start is used."""
+    wanted = sorted({s.strip().lower() for s in servers if s and s.strip()})
+    if not wanted:
+        return {}
+    marks = ",".join("?" * len(wanted))
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT server, went_down_at, error_msg FROM cmping_downtime_events "
+            f"WHERE went_up_at IS NULL AND server IN ({marks}) ORDER BY went_down_at DESC",
+            wanted
+        )
+        result = {}
+        for server, went_down_at, error_msg in cursor.fetchall():
+            # Rows come newest first, so the earliest open start ends up in the dict
+            result[server] = {"went_down_at": went_down_at, "error_msg": error_msg or ""}
+        return result
+
+
+def _join_domains(domains) -> str:
+    return ",".join(sorted({d.strip().lower() for d in domains if d and d.strip()}))
+
+
+def _split_domains(text) -> list[str]:
+    return [d for d in (text or "").split(",") if d]
+
+
+def get_contact_relays(contact_id: int):
+    """(domains, updated_at) cached for a contact, or None if never stored."""
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT domains, updated_at FROM contact_relays WHERE contact_id = ?", (int(contact_id),))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        return _split_domains(row[0]), row[1] or 0.0
+
+
+def get_contact_relays_many(contact_ids) -> dict:
+    """{contact_id: (domains, updated_at)} for the given contacts, in one query."""
+    ids = sorted({int(c) for c in contact_ids})
+    if not ids:
+        return {}
+    result = {}
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        # SQLite allows at least 999 parameters; groups stay far below, but chunk to be safe
+        for i in range(0, len(ids), 900):
+            chunk = ids[i:i + 900]
+            cursor.execute(
+                f"SELECT contact_id, domains, updated_at FROM contact_relays WHERE contact_id IN ({','.join('?' * len(chunk))})",
+                chunk
+            )
+            for cid, domains, updated_at in cursor.fetchall():
+                result[cid] = (_split_domains(domains), updated_at or 0.0)
+    return result
+
+
+def set_contact_relays(contact_id: int, domains, updated_at: float = None):
+    set_contact_relays_many([(contact_id, domains, updated_at)])
+
+
+def set_contact_relays_many(rows):
+    """Stores [(contact_id, domains, updated_at)] in one transaction."""
+    now = time.time()
+    values = [(int(cid), _join_domains(domains), updated_at if updated_at is not None else now)
+              for cid, domains, updated_at in rows]
+    if not values:
+        return
+    with _writer_transaction() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO contact_relays (contact_id, domains, updated_at) VALUES (?, ?, ?)",
+            values
+        )
+
+
+def get_relay_notes_sent(contact_id: int, domains) -> dict:
+    """{domain: sent_at} of the relay notes already sent to a contact for these domains."""
+    wanted = sorted({d.strip().lower() for d in domains if d and d.strip()})
+    if not wanted:
+        return {}
+    with _reader_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT domain, sent_at FROM relay_note_sent WHERE contact_id = ? AND domain IN ({','.join('?' * len(wanted))})",
+            (int(contact_id), *wanted)
+        )
+        return {row[0]: row[1] for row in cursor.fetchall()}
+
+
+def mark_relay_notes_sent(contact_id: int, domains, sent_at: float = None):
+    sent_at = time.time() if sent_at is None else sent_at
+    values = [(int(contact_id), d, sent_at) for d in sorted({d.strip().lower() for d in domains if d and d.strip()})]
+    if not values:
+        return
+    with _writer_transaction() as conn:
+        # Rare (a note at most every few hours per contact): drop marks older than a week here
+        conn.execute("DELETE FROM relay_note_sent WHERE sent_at < ?", (sent_at - 7 * 24 * 3600,))
+        conn.executemany(
+            "INSERT OR REPLACE INTO relay_note_sent (contact_id, domain, sent_at) VALUES (?, ?, ?)",
+            values
         )
 
 
