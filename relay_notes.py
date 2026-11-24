@@ -36,6 +36,11 @@ EMPTY_RETRY_SECONDS = 600  # nothing readable (new contact, RPC error): look aga
 MIN_PINGS = 10
 TOP_N = 5
 SUGGESTIONS = 2
+GROUP_NOTE_COOLDOWN_SECONDS = 300  # a group gets at most one relay note per 5 min (a dead shared relay must not flood it)
+SUGGEST_CACHE_SECONDS = 600       # ping averages change every ~30 min; the ranking is reused for 10 min
+WHITELIST_CHECK_TOP = 30          # whitelist lookups only for the best candidates by ping
+LIST_RELAYS = 15  # /relays: relays listed in the unreachable block
+LIST_NAMES = 10   # /relays: people named per relay
 # Seconds to wait before a note that follows a command, so the command's own reply goes first
 # (the command handler and the catch-all handler run in no fixed order). 0 = send right away.
 SEND_DELAY_SECONDS = 3.0
@@ -51,6 +56,9 @@ _DM_CACHE_MAX = 20000
 
 # check-then-mark of the rate limit must not interleave between two messages of one person
 _note_lock = threading.Lock()
+_chat_last_note: dict[int, float] = {}  # group chat_id -> time of the last note
+_suggest_cache: dict = {}  # {'at', 'servers', 'averages'}
+_suggest_lock = threading.Lock()
 
 
 # ── Parsing ──────────────────────────────────────────────────────────────────
@@ -79,14 +87,15 @@ def parse_relay_domains(enc_info) -> list[str]:
     is skipped rather than guessed."""
     if not isinstance(enc_info, str) or not enc_info:
         return []
+    # Only "\n" separates lines (str.splitlines() would also split on U+2028 and similar, which
+    # a contact name may carry). The section is the last "Relays:" line: a contact named "Relays"
+    # puts the same header into the fingerprint part above it.
+    lines = enc_info.split("\n")
+    headers = [i for i, line in enumerate(lines) if _RELAYS_HEADER_RE.match(line)]
+    if not headers:
+        return []
     domains = set()
-    in_section = False
-    for line in enc_info.splitlines():
-        if _RELAYS_HEADER_RE.match(line):
-            in_section = True
-            continue
-        if not in_section:
-            continue
+    for line in lines[headers[-1] + 1:]:
         line = line.strip()
         if not line:
             if domains:
@@ -110,6 +119,7 @@ def fetch_contact_domains(bot, accid, contact_id, primary_addr=None) -> list[str
         domains.update(parse_relay_domains(bot.rpc.get_contact_encryption_info(accid, contact_id)))
     except Exception as e:
         config.logger.debug(f"Relay notes: encryption info of contact {contact_id} failed: {e}")
+        raise
     primary = domain_of(primary_addr)
     if primary:
         domains.add(primary)
@@ -122,12 +132,17 @@ def contact_domains(bot, accid, contact_id, primary_addr=None, now=None) -> list
     cached = database.get_contact_relays(contact_id)
     if cached is not None and now - cached[1] < CACHE_SECONDS:
         return cached[0]
-    domains = fetch_contact_domains(bot, accid, contact_id, primary_addr)
-    if not domains and cached is not None:
-        domains = cached[0]  # nothing readable this time: keep the old list, retry in a day
+    failed = False
+    try:
+        domains = fetch_contact_domains(bot, accid, contact_id, primary_addr)
+    except Exception:
+        failed = True  # the RPC failed: never replace a known list by a partial one
+        domains = cached[0] if cached is not None else []
+    if not failed and not domains and cached is not None:
+        domains = cached[0]  # nothing readable this time: keep the old list
     # An empty result is kept only briefly: a contact whose key is not known yet must not stay
     # unnoticed for a day, and a persistent failure still costs at most one RPC per 10 minutes
-    stamp = now if domains else now - CACHE_SECONDS + EMPTY_RETRY_SECONDS
+    stamp = now if domains and not failed else now - CACHE_SECONDS + EMPTY_RETRY_SECONDS
     database.set_contact_relays(contact_id, domains, stamp)
     return domains
 
@@ -206,16 +221,25 @@ def suggest_relays(bot, accid, own_domains, prefer_whitelisted=False) -> list[st
 
     Runs only when a note is about to be sent: one transport list RPC, one monitor query, one
     batched ping query, and for public-provider users one whitelist switch read."""
-    servers = list(dc_helpers._get_bot_domains(bot, accid))
-    for d in database.get_all_cmping_monitors():
-        if d not in servers:
-            servers.append(d)
-    status = state.cmping_status_snapshot()
-    averages = database.get_average_pings_for_servers(servers, limit=100)
+    now = time.time()
+    with _suggest_lock:
+        cached = dict(_suggest_cache)
+    if not cached or now - cached["at"] > SUGGEST_CACHE_SECONDS:
+        servers = list(dc_helpers._get_bot_domains(bot, accid))
+        for d in database.get_all_cmping_monitors():
+            if d not in servers:
+                servers.append(d)
+        cached = {"at": now, "averages": database.get_average_pings_for_servers(servers, limit=100)}
+        with _suggest_lock:
+            _suggest_cache.clear()
+            _suggest_cache.update(cached)
+    averages = cached["averages"]
+    status = state.cmping_status_snapshot()  # health stays live: only the ping ranking is reused
     whitelisted = set()
     if prefer_whitelisted:
-        pool = [d for d, (avg, count) in averages.items()
-                if (count or 0) >= MIN_PINGS and status.get(d) is True and d not in own_domains]
+        pool = sorted((d for d, (avg, count) in averages.items()
+                       if (count or 0) >= MIN_PINGS and status.get(d) is True and d not in own_domains
+                       and avg is not None), key=lambda d: (averages[d][0], d))[:WHITELIST_CHECK_TOP]
         whitelisted = relaygeo.whitelisted_many(pool)
     return select_relay_suggestions(averages, status, exclude=own_domains,
                                     whitelisted=whitelisted, prefer_whitelisted=prefer_whitelisted)
@@ -274,6 +298,12 @@ def compute_note(bot, accid, contact_id, domains, now=None, name=None):
     except Exception as e:
         config.logger.warning(f"Relay notes: could not pick relays to suggest: {e}")
         links = []
+    if not links and not down:
+        # Only "you use a public provider" and nothing to suggest (monitor not warmed up after a
+        # restart, or no healthy relay): a note without a way out is noise, and must not use up the
+        # weekly allowance
+        database.mark_relay_notes_sent(contact_id, due, 0)
+        return None
     return build_note(down, public, links, now=now, name=name)
 
 
@@ -333,16 +363,28 @@ def maybe_note_for_message(bot, accid, event) -> None:
     # command meant for another bot. In a 1:1 chat every message counts.
     if not getattr(event, "command", "") and not _is_dm(bot, accid, msg.chat_id):
         return
+    in_group = not _is_dm(bot, accid, msg.chat_id)
+    now = time.time()
+    if in_group and now - _chat_last_note.get(msg.chat_id, 0) < GROUP_NOTE_COOLDOWN_SECONDS:
+        return  # this group just got a note: nobody is marked, they get theirs on a later command
     domains = contact_domains(bot, accid, from_id)
     note = compute_note(bot, accid, from_id, domains)
     if note:
+        if in_group:
+            if len(_chat_last_note) >= _DM_CACHE_MAX:
+                _chat_last_note.clear()
+            _chat_last_note[msg.chat_id] = now
         # The note quotes the person's message, so in a group it is clear whom it is for
         _send_later(bot, accid, msg.chat_id, note, reply_to_id=getattr(msg, "id", None))
 
 
 def note_after_welcome(bot, accid, chat_id, contact_id, name=None, primary_addr=None) -> None:
     """Second message right after a welcome greeting, when a note applies to the new member."""
+    now = time.time()
+    if now - _chat_last_note.get(chat_id, 0) < GROUP_NOTE_COOLDOWN_SECONDS:
+        return  # several people joined at once: not one note each
     domains = contact_domains(bot, accid, contact_id, primary_addr=primary_addr)
     note = compute_note(bot, accid, contact_id, domains, name=name)
     if note:
+        _chat_last_note[chat_id] = now
         dc_helpers._send(bot, accid, chat_id, note)

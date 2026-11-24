@@ -956,15 +956,18 @@ def relays_command(bot, accid, event, skip_cooldown: bool = False):
         except Exception as e:
             config.logger.warning(f"/relays: could not cache relay domains: {e}")
 
-        # Block 1: members whose relay is down now (one downtime query for all down servers)
+        # Block 1: relays that have been down for hours (one downtime query for all down servers).
+        # Only a known downtime past the same threshold as the relay notes counts: the monitor marks a
+        # server unhealthy already when one pair loses a few pings (or when its partner is the dead
+        # one), and that is not "unreachable". Grouped by relay, so one dead relay is one entry.
         all_domains = {d for _cid, _name, doms in members for d in doms}
-        down = relay_notes.down_domains(all_domains, now=now)
-        errors = state._snapshot_cmping_state()["errors"] if down else {}
-        unreachable = []
+        down = relay_notes.down_domains(all_domains, now=now, min_down=relay_notes.MIN_DOWN_SECONDS)
+        by_relay = {}
         for contact_id, name, doms in members:
             for domain in doms:
                 if domain in down:
-                    unreachable.append((contact_id, name, domain, down[domain]))
+                    by_relay.setdefault(domain, []).append((contact_id, name))
+        unreachable = sorted(by_relay.items(), key=lambda kv: (down[kv[0]]["went_down_at"], kv[0]))
 
         if not found_users and not unreachable:
             dc_helpers._send(bot, accid, msg.chat_id,
@@ -973,13 +976,19 @@ def relays_command(bot, accid, event, skip_cooldown: bool = False):
 
         blocks = []
         if unreachable:
-            block = f"🔴 **Unreachable relays ({len(unreachable)}):**\n\n"
-            for contact_id, name, domain, ev in unreachable:
-                since = ev.get("went_down_at")
-                dur = f", down {relay_notes.format_duration(now - since)}" if since else ""
-                reason = relay_notes.short_reason(ev.get("error_msg") or errors.get(domain))
+            hours = relay_notes.MIN_DOWN_SECONDS // 3600
+            block = f"🔴 **Unreachable relays ({len(unreachable)}):** down for {hours}h or more\n\n"
+            for domain, people in unreachable[:relay_notes.LIST_RELAYS]:
+                ev = down[domain]
+                reason = relay_notes.short_reason(ev.get("error_msg"))
                 reason_str = f" — {reason}" if reason else ""
-                block += f"• /contact{contact_id} **{name}** — `{domain}`{dur}{reason_str}\n"
+                block += (f"• `{domain}`, down {relay_notes.format_duration(now - ev['went_down_at'])}"
+                          f"{reason_str}\n")
+                names = ", ".join(f"/contact{cid} **{name}**" for cid, name in people[:relay_notes.LIST_NAMES])
+                more = len(people) - relay_notes.LIST_NAMES
+                block += f"  {names}" + (f" and {more} more" if more > 0 else "") + "\n"
+            if len(unreachable) > relay_notes.LIST_RELAYS:
+                block += f"…and {len(unreachable) - relay_notes.LIST_RELAYS} more relays\n"
             blocks.append(block)
 
         if found_users:

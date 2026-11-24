@@ -120,6 +120,8 @@ class Base(unittest.TestCase):
             state._cmping_server_errors.clear()
         state._chat_relays_anti_spam.clear()
         relay_notes._dm_cache.clear()
+        relay_notes._chat_last_note.clear()
+        relay_notes._suggest_cache.clear()
         self.sent = []
         self._patches = [
             patch.object(dc_helpers, "_send", side_effect=self._capture),
@@ -182,6 +184,15 @@ class TestParser(Base):
         info = encinfo(["alice@relay1.example", "alice@Relay2.Example"], addr="alice@relay1.example")
         self.assertIn("Me (bot@bot.example):", info)  # our own address is in the text
         self.assertEqual(relay_notes.parse_relay_domains(info), ["relay1.example", "relay2.example"])
+
+    def test_contact_named_relays_and_unicode_line_separators(self):
+        real = "\n\nRelays:\nalice@mail.ru\n"
+        # a contact named "Relays" puts a second header (and hex lines) above the real section
+        self.assertEqual(relay_notes.parse_relay_domains("Relays:\nDEC0 E8D1\n" + real), ["mail.ru"])
+        # U+2028 in a name is not a line break: it cannot fake a section
+        fake = "Alice\u2028Relays:\u2028x@dead.example\u2028"
+        self.assertEqual(relay_notes.parse_relay_domains(fake + real), ["mail.ru"])
+        self.assertEqual(relay_notes.parse_relay_domains(fake), [])
 
     def test_new_core_headers_without_address(self):
         info = ("Messages are end-to-end encrypted.\nFingerprints:\n\nAlice:\n" + grouped(PEER_FP) +
@@ -278,6 +289,16 @@ class TestCache(Base):
         bot.rpc.get_contact_encryption_info.side_effect = lambda accid, cid: encinfo(["alice@yandex.ru"])
         self.assertEqual(relay_notes.contact_domains(bot, 1, 42, now=self.now + 601), ["yandex.ru"])
 
+    def test_transient_rpc_error_keeps_the_known_relays(self):
+        bot = make_bot({42: ["alice@one.example", "alice@two.example"]})
+        relay_notes.contact_domains(bot, 1, 42, now=self.now)
+        bot.rpc.get_contact_encryption_info.side_effect = Exception("timeout")
+        got = relay_notes.contact_domains(bot, 1, 42, primary_addr="alice@one.example", now=self.now + 2 * 86400)
+        self.assertEqual(got, ["one.example", "two.example"])  # not shrunk to the primary
+        # and it is retried soon, not in a day
+        bot.rpc.get_contact_encryption_info.side_effect = lambda a, c: encinfo(["alice@three.example"])
+        self.assertEqual(relay_notes.contact_domains(bot, 1, 42, now=self.now + 2 * 86400 + 601), ["three.example"])
+
     def test_only_domains_are_stored(self):
         bot = make_bot({42: ["alice.secret@one.example"]})
         relay_notes.contact_domains(bot, 1, 42, now=self.now)
@@ -373,7 +394,7 @@ class TestNotes(Base):
         bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Group"}
         relay_notes.maybe_note_for_message(bot, 1, message_event(42, "/top"))
         self.assertEqual(len(self.sent), 1)
-        bot.rpc.get_basic_chat_info.assert_not_called()
+        self.assertEqual(bot.rpc.get_basic_chat_info.call_count, 1)  # the chat type, once per chat
 
     def test_command_for_another_bot_is_ignored(self):
         bot = make_bot({42: ["alice@mail.ru"]})
@@ -424,6 +445,39 @@ class TestNotes(Base):
         for t in threads:
             t.join()
         self.assertEqual(len(self.sent), 1)
+
+    def test_group_gets_one_note_per_five_minutes(self):
+        bot = make_bot({42: ["a@mail.ru"], 43: ["b@mail.ru"], 44: ["c@mail.ru"]})
+        bot.rpc.get_basic_chat_info.return_value = {"chat_type": "Group"}
+        relay_notes.maybe_note_for_message(bot, 1, message_event(42, "/top"))
+        relay_notes.maybe_note_for_message(bot, 1, message_event(43, "/top"))
+        self.assertEqual(len(self.sent), 1)
+        # 43 was not marked: after the cooldown the note comes
+        with patch.object(relay_notes.time, "time", return_value=self.now + 301):
+            relay_notes.maybe_note_for_message(bot, 1, message_event(43, "/top"))
+        self.assertEqual(len(self.sent), 2)
+        self.assertEqual(self.sent[1].reply_to_id, 900)
+
+    def test_public_provider_without_a_relay_to_suggest_burns_no_allowance(self):
+        with state._monitor_lock:
+            state._cmping_server_status.clear()  # monitor not warmed up (after a restart)
+        bot = make_bot({42: ["alice@mail.ru"]})
+        relay_notes.maybe_note_for_message(bot, 1, message_event(42))
+        self.assertEqual(self.sent, [])
+        self.healthy_relay("good1.example", 100)
+        self.healthy_relay("good2.example", 120)
+        relay_notes._suggest_cache.clear()
+        relay_notes.maybe_note_for_message(bot, 1, message_event(42, "again"))
+        self.assertEqual(len(self.sent), 1)
+
+    def test_suggestion_ranking_is_cached_between_notes(self):
+        bot = make_bot({i: [f"u{i}@mail.ru"] for i in range(20, 30)})
+        with CountingDB() as db_first:
+            relay_notes.maybe_note_for_message(bot, 1, message_event(20))
+        with CountingDB() as db_second:
+            relay_notes.maybe_note_for_message(bot, 1, message_event(21))
+        self.assertEqual(len(self.sent), 2)
+        self.assertLess(db_second.total, db_first.total)
 
     def test_special_and_info_messages_are_ignored(self):
         bot = make_bot({2: ["x@mail.ru"]})
@@ -500,7 +554,7 @@ def run_relays(bot):
 
 class TestRelaysCommand(Base):
     def test_two_blocks_and_unknown_status_skipped(self):
-        self.down_since("dead.example", 3 * 3600, "IMAP login failed: connection refused " + "x" * 200)
+        self.down_since("dead.example", 5 * 3600, "IMAP login failed: connection refused " + "x" * 200)
         self.set_status("fine.example", True)
         bot = relays_bot({
             20: ("Dora", "dora@fine.example", ["dora@fine.example", "dora@dead.example"]),
@@ -512,7 +566,8 @@ class TestRelaysCommand(Base):
         self.assertEqual(len(self.sent), 1)
         text = self.sent[0].text
         self.assertIn("🔴 **Unreachable relays (1):**", text)
-        self.assertIn("/contact20 **Dora** — `dead.example`, down 3h — IMAP login failed", text)
+        self.assertIn("• `dead.example`, down 5h — IMAP login failed", text)
+        self.assertIn("/contact20 **Dora**", text)
         self.assertNotIn("x" * 100, text)  # reason trimmed
         self.assertNotIn("Una", text)
         self.assertNotIn("Finn", text)
@@ -521,6 +576,34 @@ class TestRelaysCommand(Base):
         self.assertLess(text.index("Unreachable relays"), text.index("public Russian mail providers"))
         # The fetched relays are kept for the relay notes, without a second RPC
         self.assertEqual(database.get_contact_relays(20)[0], ["dead.example", "fine.example"])
+
+    def test_flaky_or_blamed_servers_are_not_unreachable(self):
+        # Marked unhealthy by one pair with lost pings (down 44 min), or by a dead partner (no downtime
+        # event at all): neither is "unreachable"; only the relay down for hours is
+        self.down_since("flaky.example", 44 * 60, "incoming from x failed: 2 of 5 pings lost")
+        self.set_status("blamed.example", False)
+        self.down_since("dead.example", 3 * 86400 + 20 * 3600, "both directions failed: 5 of 5 pings lost")
+        bot = relays_bot({
+            20: ("Dora", "dora@dead.example", ["dora@dead.example", "dora@flaky.example"]),
+            21: ("Bo", "bo@blamed.example", ["bo@blamed.example", "bo@dead.example"]),
+        })
+        run_relays(bot)
+        text = self.sent[0].text
+        self.assertIn("Unreachable relays (1)", text)
+        self.assertIn("`dead.example`, down 3d 20h", text)
+        self.assertIn("/contact20 **Dora**, /contact21 **Bo**", text)
+        self.assertNotIn("flaky.example", text)
+        self.assertNotIn("blamed.example", text)
+
+    def test_many_dead_relays_are_capped(self):
+        relays = [f"dead{i}.example" for i in range(relay_notes.LIST_RELAYS + 3)]
+        for r in relays:
+            self.down_since(r, 5 * 3600)
+        bot = relays_bot({i: (f"P{i}", f"p{i}@{r}", [f"p{i}@{r}"]) for i, r in enumerate(relays, 20)})
+        run_relays(bot)
+        text = self.sent[0].text
+        self.assertIn(f"Unreachable relays ({len(relays)})", text)
+        self.assertIn("…and 3 more relays", text)
 
     def test_only_russian_block(self):
         bot = relays_bot({21: ("Ivan", "ivan@yandex.ru", ["ivan@yandex.ru"])})
@@ -625,7 +708,8 @@ class TestScale(Base):
         with CountingDB() as db:
             run_relays(bot)
         text = self.sent[0].text
-        self.assertIn(f"Unreachable relays ({self.CONTACTS // 10})", text)
+        self.assertIn(f"Unreachable relays ({self.SERVERS // 10})", text)  # one entry per relay, not per member
+        self.assertLessEqual(text.count("/contact"), relay_notes.LIST_RELAYS * relay_notes.LIST_NAMES)
         # Constant, not per member: one batched cache write, one downtime query (+ snapshot-free state)
         self.assertLessEqual(db.total, 3)
         # One encryption info RPC per member, as before 2.56.0: nothing extra
