@@ -46,6 +46,7 @@ import database
 import dc_helpers
 import state
 from netutil import is_public_ip, urlopen
+import rkncheck
 import whitelist
 
 IPINFO_URL = "https://ipinfo.io"
@@ -438,8 +439,9 @@ def _ripe_country(resource: str) -> str | None:
     return None
 
 
-def _format_ip(ip, host: str | None = None, others: list | None = None) -> str:
+def _format_ip(ip, host: str | None = None, others: list | None = None, rkn_target: str | None = None) -> str:
     ip_s = ip.compressed
+    rkn_target = rkn_target or ip_s  # a host name: cheburcheck checks the name and all its addresses
     info = _ipinfo_ip(ip_s) or {}
     net = _ripestat("network-info", ip_s) or {}
     sdb = _internetdb(ip_s)
@@ -502,6 +504,7 @@ def _format_ip(ip, host: str | None = None, others: list | None = None) -> str:
     wl = whitelist.ip_line(ip)
     if wl:
         lines.append(wl)
+    lines += rkncheck.report_lines(rkn_target)
 
     # Paid plans only: privacy / connection type
     privacy = info.get("privacy")
@@ -531,6 +534,7 @@ def _format_ip(ip, host: str | None = None, others: list | None = None) -> str:
             lines.append(f"🔎 https://www.shodan.io/host/{ip_s}")
     if prefix and asns:
         lines.append(f"🔎 {IPINFO_URL}/AS{asns[0]}/{prefix}")
+    _add(lines, rkncheck.link_line(rkn_target))
     return "\n".join(lines)
 
 
@@ -568,11 +572,13 @@ def _format_net(net) -> str:
     wl = whitelist.net_line(net)
     if wl:
         lines.append(wl)
+    lines += rkncheck.report_lines(net_s)
 
     lines.append("")
     if asns:
         lines.append(f"🔎 {IPINFO_URL}/AS{asns[0].get('asn')}/{announced_as}")
     lines.append(f"🔎 https://stat.ripe.net/{net_s}")
+    _add(lines, rkncheck.link_line(net_s))
     return "\n".join(lines)
 
 
@@ -611,11 +617,18 @@ def _format_asn(asn: int) -> str:
     wl = whitelist.prefixes_line(prefixes)
     if wl:
         lines.append(wl)
+    lines += rkncheck.report_lines(f"AS{asn}")
 
     lines.append("")
     lines.append(f"🔎 {IPINFO_URL}/AS{asn}")
     lines.append(f"🔎 https://stat.ripe.net/AS{asn}")
+    _add(lines, rkncheck.link_line(f"AS{asn}"))
     return "\n".join(lines)
+
+
+def _add(lines: list[str], line: str | None):
+    if line:
+        lines.append(line)
 
 
 def _display_host(host: str) -> str:
@@ -634,7 +647,7 @@ def _format_host(host: str) -> str:
     public = [a for a in addrs if _is_public(a)]
     if not public:
         return f"❌ **{shown_host}** resolves only to non-public addresses, nothing to look up."
-    return (_format_ip(public[0], host=shown_host, others=public[1:])
+    return (_format_ip(public[0], host=shown_host, others=public[1:], rkn_target=host)
             + f"\n💡 `/dns {shown_host}` — its DNS records · `/whois {shown_host}` — registration")
 
 

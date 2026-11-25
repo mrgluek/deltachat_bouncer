@@ -46,6 +46,7 @@ import config
 from netutil import is_public_ip
 import dc_helpers
 import state
+import rkncheck
 import whitelist
 
 SUPPORTED_TYPES = ("A", "AAAA", "CNAME", "MX", "NS", "TXT", "SOA", "CAA", "SRV", "PTR",
@@ -546,8 +547,9 @@ def _build_report(domain: str, res: dns.resolver.Resolver, via: str, sysres) -> 
 
     # Only now, for a name that exists: Cert Spotter queries are few per hour.
     # Runs while the rest of the report is built (PTR, SPF, MTA-STS take a while).
-    ct_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dns-ct")
+    ct_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="dns-ct")
     ct_fut = ct_pool.submit(certs.lookup, domain)
+    rkn_fut = ct_pool.submit(rkncheck.report_lines, domain)  # cheburcheck.ru, cached for an hour
     ct_pool.shutdown(wait=False)
 
     lines = [f"🌐 DNS report: **{_display(domain)}** · {via}", ""]
@@ -578,6 +580,11 @@ def _build_report(domain: str, res: dns.resolver.Resolver, via: str, sysres) -> 
     mail, chatmail = _mail_section(domain, r, sysres)
     # Addresses first, then MX addresses that differ: a relay is reached through both
     wl = [whitelist.addresses_line(addrs + r.get("mx_ips", [])), whitelist.domain_line(domain)]
+    try:
+        wl += rkn_fut.result(timeout=_budget(sysres).remaining() if _budget(sysres) else 20)
+    except Exception as e:
+        config.logger.warning(f"/dns: cheburcheck lookup failed: {e}")
+        wl.append(f"{rkncheck.LABEL}: cheburcheck.ru unavailable, try later")
     lines[wl_at:wl_at] = [line for line in wl if line]
     try:
         ct = ct_fut.result(timeout=_budget(sysres).remaining() if _budget(sysres) else 20)
@@ -596,6 +603,9 @@ def _build_report(domain: str, res: dns.resolver.Resolver, via: str, sysres) -> 
     lines.append(f"💡 `/whois {_display(domain)}` — registrar, expiry date")
     if addrs:
         lines.append(f"💡 `/ip {addrs[0]}` — who hosts it, open ports")
+    rkn_link = rkncheck.link_line(domain)
+    if rkn_link:
+        lines.append(rkn_link)
     return "\n".join(lines)
 
 

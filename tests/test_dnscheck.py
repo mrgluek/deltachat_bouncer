@@ -63,17 +63,21 @@ import config
 import dc_helpers
 import state
 import dnscheck
+import rkncheck
 import whitelist
 
 _no_whitelist = patch.object(whitelist, "enabled", return_value=False)
+_no_rkncheck = patch.object(rkncheck, "enabled", return_value=False)
 
 
 def setUpModule():
     _no_whitelist.start()  # no download of the RU whitelist; test_whitelist.py covers it
+    _no_rkncheck.start()   # no cheburcheck.ru requests; test_rkncheck.py covers them
 
 
 def tearDownModule():
     _no_whitelist.stop()
+    _no_rkncheck.stop()
 
 
 
@@ -293,6 +297,19 @@ class TestReport(unittest.TestCase):
         self.assertIn(domains, text)
         self.assertLess(text.index(domains), text.index("🗂 **Zone**"))
         self.assertNotIn("RU mobile whitelist", report(chatmail_zone()))  # turned off
+
+    def test_rkn_lines(self):
+        rkn = ["🚫 RKN blocklists: ✅ not listed, not on a throttled CDN"]
+        with patch.object(rkncheck, "enabled", return_value=True), \
+                patch.object(rkncheck, "report_lines", return_value=rkn) as lines:
+            text = report(chatmail_zone())
+        lines.assert_called_once_with(D)
+        self.assertLess(text.index(rkn[0]), text.index("🗂 **Zone**"))  # in the Addresses section
+        self.assertIn(f"🔎 https://cheburcheck.ru/check?target={D}", text)
+        with patch.object(rkncheck, "enabled", return_value=True), \
+                patch.object(rkncheck, "report_lines", side_effect=RuntimeError("boom")):
+            self.assertIn("🚫 RKN blocklists: cheburcheck.ru unavailable", report(chatmail_zone()))
+        self.assertNotIn("RKN", report(chatmail_zone()))  # turned off
 
     def test_relay_without_certificate(self):
         text = report(chatmail_zone(), ct={"subdomains": True, "more": False, "certs": []})
