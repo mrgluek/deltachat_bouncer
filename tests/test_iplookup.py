@@ -64,17 +64,21 @@ import config
 import dc_helpers
 import state
 import iplookup
+import rkncheck
 import whitelist
 
 _no_whitelist = patch.object(whitelist, "enabled", return_value=False)
+_no_rkncheck = patch.object(rkncheck, "enabled", return_value=False)
 
 
 def setUpModule():
     _no_whitelist.start()  # no download of the RU whitelist; test_whitelist.py covers it
+    _no_rkncheck.start()   # no cheburcheck.ru requests; test_rkncheck.py covers them
 
 
 def tearDownModule():
     _no_whitelist.stop()
+    _no_rkncheck.stop()
 
 
 
