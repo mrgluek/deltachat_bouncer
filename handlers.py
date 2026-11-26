@@ -44,6 +44,26 @@ def _expire_invite_message(bot, accid, dc_chat_id, invite_msg_id):
             config.logger.error(f"Failed to edit invite message {invite_msg_id}: {edit_err}")
 
 
+# (chat_id, contact_id) -> time of the last welcome. A join through an invite link can reach the bot as
+# two "member added" info messages a second apart (seen 2026-11-26), and each used to get a greeting.
+_WELCOME_DEDUP_SECONDS = 120
+_recent_welcomes: dict = {}
+_recent_welcomes_lock = threading.Lock()
+
+
+def _welcome_is_duplicate(chat_id, contact_id) -> bool:
+    now = time.time()
+    with _recent_welcomes_lock:
+        if len(_recent_welcomes) > 2000:
+            for key in [k for k, t in _recent_welcomes.items() if now - t > _WELCOME_DEDUP_SECONDS]:
+                del _recent_welcomes[key]
+        last = _recent_welcomes.get((chat_id, contact_id), 0)
+        if now - last < _WELCOME_DEDUP_SECONDS:
+            return True
+        _recent_welcomes[(chat_id, contact_id)] = now
+        return False
+
+
 # The decorator must sit right on this function: from v2.38.0 to v2.44.2 a helper inserted above
 # took it, every info message raised a TypeError and this handler never ran
 @config.dc_cli.on(events.NewMessage(is_info=True, is_bot=None, is_outgoing=None))
@@ -204,7 +224,10 @@ def handle_dc_info_message(bot, accid, event):
                         config.logger.info(f"Welcome greeting: could not resolve new member, from_id={msg.from_id}")
                     
                     config.logger.info(f"Welcome greeting: resolved new_member_id={new_member_id!r}")
-                    if new_member_id and new_member_id != 1:
+                    if new_member_id and new_member_id != 1 and _welcome_is_duplicate(dc_chat_id, new_member_id):
+                        config.logger.info(f"Welcome greeting: {new_member_id} was greeted in chat {dc_chat_id} "
+                                           f"less than {_WELCOME_DEDUP_SECONDS} s ago, not again")
+                    elif new_member_id and new_member_id != 1:
                         try:
                             contact = bot.rpc.get_contact(accid, new_member_id)
                             member_name = contact.name or contact.display_name or contact.address or "New member"

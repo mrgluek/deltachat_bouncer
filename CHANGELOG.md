@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.57.1] - 2026-11-26
+
+### Fixed
+- **A new member got the welcome greeting twice.** A join through an invite link can reach the bot as two "member added" info messages a second apart (different message ids, so the per-message deduplication did not apply), and each produced a greeting. The bot now greets the same member in the same chat at most once per 2 minutes.
+
 ## [2.57.0] - 2026-11-25
 
 ### Added

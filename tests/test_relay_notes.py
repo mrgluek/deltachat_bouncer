@@ -121,6 +121,8 @@ class Base(unittest.TestCase):
         state._chat_relays_anti_spam.clear()
         relay_notes._dm_cache.clear()
         relay_notes._chat_last_note.clear()
+        import handlers
+        handlers._recent_welcomes.clear()
         relay_notes._suggest_cache.clear()
         self.sent = []
         self._patches = [
@@ -506,6 +508,21 @@ class TestWelcome(Base):
         bot.rpc.get_contact.return_value = SimpleNamespace(
             name="Alice", display_name="Alice", address=relays[0] if relays else "alice@x.example")
         return bot
+
+    def test_second_join_event_does_not_greet_twice(self):
+        import handlers
+        handlers._recent_welcomes.clear()
+        database.add_catalog_chat(100, "Test", "", 2)
+        database.update_catalog_chat_welcome(100, 1, None)
+        bot = self._bot(["alice@fine.example"])
+        self._join(bot, 55)
+        self._join(bot, 55)  # the same member again a moment later (two info messages)
+        greetings = [m for m in self.sent if "welcome to Test group" in m.text]
+        self.assertEqual(len(greetings), 1)
+        # a different member in the same chat is greeted
+        bot.rpc.get_chat_contacts.return_value = [1, 12, 55, 56]
+        self._join(bot, 56)
+        self.assertEqual(len([m for m in self.sent if "welcome to Test group" in m.text]), 2)
 
     def test_welcome_is_followed_by_note(self):
         database.add_catalog_chat(100, "Test", "", 2)
